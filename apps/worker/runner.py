@@ -16,6 +16,9 @@ def main() -> None:
         settings.home / "platform",
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=settings.allow_model_download,
+        datajuicer_python=settings.datajuicer_python,
+        datajuicer_process_bin=settings.datajuicer_process_bin,
+        datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
     )
     if args.once:
         worker.process_next()

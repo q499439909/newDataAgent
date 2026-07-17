@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
-from dataagent.domain.operators import OperatorCategory
+from dataagent.domain.operators import OperatorCategory, RuntimeBackend
 
 
 class StartAgentRequest(BaseModel):
@@ -36,6 +36,15 @@ class RunControlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["pause", "resume", "cancel"]
+
+
+class ProviderExecuteRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_operator_ref: str = Field(min_length=1)
+    source_path: str = Field(min_length=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    runtime_backend: RuntimeBackend = RuntimeBackend.CPU
 
 
 class ConversationMessageRequest(BaseModel):
@@ -71,6 +80,9 @@ def create_app(
         settings.home / "platform",
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=settings.allow_model_download,
+        datajuicer_python=settings.datajuicer_python,
+        datajuicer_process_bin=settings.datajuicer_process_bin,
+        datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
@@ -178,6 +190,63 @@ def create_app(
             item.model_dump(mode="json")
             for item in agent_runtime.operator_registry.search(category=category)
         ]
+
+    @app.get("/api/operator-providers")
+    def operator_providers(
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> list[dict[str, Any]]:
+        del owner_id
+        return agent_runtime.provider_health()
+
+    @app.get("/api/operator-providers/{provider_id}/operators")
+    def provider_operators(
+        provider_id: str,
+        query: str | None = None,
+        limit: int = 100,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> list[dict[str, Any]]:
+        del owner_id
+        try:
+            return agent_runtime.provider_operators(
+                provider_id=provider_id,
+                query=query,
+                limit=limit,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/work-orders/{work_order_id}/operator-providers/{provider_id}/execute"
+    )
+    def execute_provider_operator(
+        work_order_id: str,
+        provider_id: str,
+        request: ProviderExecuteRequestBody,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.execute_provider_operator(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                provider_id=provider_id,
+                provider_operator_ref=request.provider_operator_ref,
+                source_path=request.source_path,
+                parameters=request.parameters,
+                runtime_backend=request.runtime_backend,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post(
         "/api/work-orders/agent/start",

@@ -25,6 +25,8 @@ from ..infrastructure import (
     SqliteDatabase,
 )
 from ..operators import build_operator_library
+from ..operators.protocol import OperatorContext, OperatorInput
+from ..operators.providers import ProviderExecuteRequest
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,9 @@ class AgentRuntime:
         *,
         include_datajuicer: bool = True,
         allow_model_download: bool = False,
+        datajuicer_python: Path | None = None,
+        datajuicer_process_bin: Path | None = None,
+        datajuicer_timeout_seconds: int = 300,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -72,6 +77,12 @@ class AgentRuntime:
         self.operator_library = build_operator_library(
             include_datajuicer=include_datajuicer,
             allow_model_download=allow_model_download,
+            datajuicer_python=datajuicer_python,
+            datajuicer_process_bin=datajuicer_process_bin,
+            datajuicer_runtime_root=(self.home / "providers" / "datajuicer")
+            if self.home is not None
+            else None,
+            datajuicer_timeout_seconds=datajuicer_timeout_seconds,
         )
         self.builtin_operators = self.operator_library.operators
         self.operator_registry = self.operator_library.registry
@@ -144,24 +155,7 @@ class AgentRuntime:
                 kind="pipeline", entity_id=pipeline_version_id, owner_id=owner_id
             )
         )
-        specs = [
-            TaskSpecVersion.model_validate(item)
-            for item in self.version_store.list_for_owner(kind="task_spec", owner_id=owner_id)
-            if item.get("work_order_id") == work_order_id and item.get("confirmed")
-        ]
-        if not specs:
-            raise ValueError("Confirmed TaskSpec not found for work order")
-        spec = max(specs, key=lambda item: item.version)
-        source = Path(source_path).expanduser().resolve()
-        allowed_roots = [
-            Path(item.uri).expanduser().resolve()
-            for item in spec.data_sources
-            if item.type == "local_directory"
-        ]
-        if not any(source.is_relative_to(root) for root in allowed_roots):
-            raise PermissionError("Preview source is outside the work order data sources")
-        if not source.is_file():
-            raise FileNotFoundError(f"Preview source not found: {source}")
+        source = self._authorized_source(work_order_id, owner_id, source_path)
         builder = NodePreviewBuilder(self.operator_library.runtime, self.home / "previews")
         preview = builder.build(
             pipeline=pipeline,
@@ -175,6 +169,109 @@ class AgentRuntime:
             kind="node_preview_set", owner_id=owner_id, payload=payload
         )
         return payload
+
+    def provider_health(self) -> list[dict[str, Any]]:
+        return [
+            item.model_dump(mode="json")
+            for item in self.operator_library.providers.health()
+        ]
+
+    def provider_operators(
+        self,
+        *,
+        provider_id: str,
+        query: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        provider = self.operator_library.providers.get(provider_id)
+        health = provider.health()
+        if health.status == "unavailable":
+            raise RuntimeError(health.message or f"Provider is unavailable: {provider_id}")
+        descriptors = provider.discover()
+        normalized_query = " ".join((query or "").lower().split())
+        if normalized_query:
+            descriptors = [
+                item
+                for item in descriptors
+                if normalized_query
+                in " ".join(
+                    (
+                        item.provider_operator_ref,
+                        item.display_name,
+                        item.description,
+                        *sorted(item.tags),
+                    )
+                ).lower()
+            ]
+        return [
+            item.model_dump(mode="json")
+            for item in descriptors[: max(1, min(limit, 500))]
+        ]
+
+    def execute_provider_operator(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+        provider_id: str,
+        provider_operator_ref: str,
+        source_path: str,
+        parameters: dict[str, Any],
+        runtime_backend: RuntimeBackend = RuntimeBackend.CPU,
+    ) -> dict[str, Any]:
+        source = self._authorized_source(work_order_id, owner_id, source_path)
+        provider = self.operator_library.providers.get(provider_id)
+        result = provider.execute(
+            ProviderExecuteRequest(
+                provider_operator_ref=provider_operator_ref,
+                runtime_backend=runtime_backend,
+                context=OperatorContext(
+                    run_id=new_id("provider_call"),
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    purpose="development",
+                ),
+                input_data=OperatorInput(
+                    source_path=str(source),
+                    current_path=str(source),
+                ),
+                parameters=parameters,
+            )
+        )
+        if not result.ok or result.result is None:
+            raise RuntimeError(
+                f"Provider execution failed ({result.error_type or 'unknown'}): "
+                f"{result.message}"
+            )
+        return result.result.model_dump(mode="json")
+
+    def _authorized_source(
+        self, work_order_id: str, owner_id: str, source_path: str
+    ) -> Path:
+        self._get_authorized(work_order_id, owner_id)
+        if self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for provider execution")
+        specs = [
+            TaskSpecVersion.model_validate(item)
+            for item in self.version_store.list_for_owner(
+                kind="task_spec", owner_id=owner_id
+            )
+            if item.get("work_order_id") == work_order_id and item.get("confirmed")
+        ]
+        if not specs:
+            raise ValueError("Confirmed TaskSpec not found for work order")
+        spec = max(specs, key=lambda item: item.version)
+        source = Path(source_path).expanduser().resolve()
+        allowed_roots = [
+            Path(item.uri).expanduser().resolve()
+            for item in spec.data_sources
+            if item.type == "local_directory"
+        ]
+        if not any(source.is_relative_to(root) for root in allowed_roots):
+            raise PermissionError("Source is outside the work order data sources")
+        if not source.is_file():
+            raise FileNotFoundError(f"Source asset not found: {source}")
+        return source
 
     def submit_dataset_run(
         self,

@@ -20,6 +20,9 @@ class LocalRunWorker:
         recover_interrupted: bool = True,
         include_datajuicer: bool = True,
         allow_model_download: bool = False,
+        datajuicer_python: Path | None = None,
+        datajuicer_process_bin: Path | None = None,
+        datajuicer_timeout_seconds: int = 300,
     ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
@@ -34,6 +37,10 @@ class LocalRunWorker:
             operator_runtime=build_operator_library(
                 include_datajuicer=include_datajuicer,
                 allow_model_download=allow_model_download,
+                datajuicer_python=datajuicer_python,
+                datajuicer_process_bin=datajuicer_process_bin,
+                datajuicer_runtime_root=self.home / "providers" / "datajuicer",
+                datajuicer_timeout_seconds=datajuicer_timeout_seconds,
             ).runtime,
             quality_evaluator=QualityEvaluator(self.version_store),
         )

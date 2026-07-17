@@ -30,6 +30,13 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
+def _env_path(name: str) -> Path | None:
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str | None
@@ -42,6 +49,9 @@ class Settings:
     allow_model_download: bool = False
     model_cache: Path | None = None
     datajuicer_enabled: bool = True
+    datajuicer_python: Path | None = None
+    datajuicer_process_bin: Path | None = None
+    datajuicer_timeout_seconds: int = 300
 
     @classmethod
     def load(cls, cwd: Path | None = None) -> "Settings":
@@ -54,6 +64,9 @@ class Settings:
         env_path = next((path.resolve() for path in candidates if path.exists()), None)
         if env_path:
             _load_env_file(env_path)
+        local_env = root / "dataagent.local.env"
+        if local_env.exists():
+            _load_env_file(local_env)
 
         home_raw = os.getenv("DATAAGENT_HOME", ".dataagent")
         home = Path(home_raw).expanduser()
@@ -76,6 +89,11 @@ class Settings:
             allow_model_download=_env_bool("DATAAGENT_ALLOW_MODEL_DOWNLOAD", False),
             model_cache=model_cache.resolve(),
             datajuicer_enabled=_env_bool("DATAAGENT_DATAJUICER_ENABLED", True),
+            datajuicer_python=_env_path("DATAAGENT_DATAJUICER_PYTHON"),
+            datajuicer_process_bin=_env_path("DATAAGENT_DATAJUICER_PROCESS_BIN"),
+            datajuicer_timeout_seconds=int(
+                os.getenv("DATAAGENT_DATAJUICER_TIMEOUT_SECONDS", "300")
+            ),
         )
 
     def ensure_directories(self) -> None:

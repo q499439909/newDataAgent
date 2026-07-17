@@ -1,4 +1,8 @@
 from .datajuicer import DataJuicerOperatorProvider
+from .datajuicer_executor import (
+    DataJuicerProcessExecutor,
+    DataJuicerSubprocessSearcher,
+)
 from .native import NativeOperatorProvider
 from .protocol import (
     OperatorProvider,
@@ -13,6 +17,8 @@ from .registry import ProviderRegistry
 
 __all__ = [
     "DataJuicerOperatorProvider",
+    "DataJuicerProcessExecutor",
+    "DataJuicerSubprocessSearcher",
     "NativeOperatorProvider",
     "OperatorProvider",
     "ProviderExecuteRequest",

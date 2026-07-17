@@ -181,9 +181,17 @@ Token 默认从 `MILVUS_TOKEN` 环境变量读取且不会输出。只有同时�
 ```powershell
 $env:DATAAGENT_ALLOW_MODEL_DOWNLOAD = "false"
 $env:DATAAGENT_DATAJUICER_ENABLED = "true"
+$env:DATAAGENT_DATAJUICER_PYTHON = "D:\path\to\data-juicer-env\python.exe"
+$env:DATAAGENT_DATAJUICER_PROCESS_BIN = "D:\path\to\data-juicer-env\Scripts\dj-process.exe"
 ```
 
-Data-Juicer 是可选 Provider。未安装 `py-data-juicer` 时只会显示为不可用，不影响 Native 算子和控制面；发现阶段只读取元数据，不实例化模型或下载权重。真实模型后端需要固定 revision、SHA256 和许可证后再单独接入。
+也可以复制 `dataagent.local.env.example` 为被 Git 忽略的 `dataagent.local.env`。Data-Juicer 是可选 Provider；建议指向独立环境，控制面不会导入它的重依赖。发现阶段只读取元数据，不实例化模型；当前执行阶段只放行带 `cpu` 标签的 Filter。未允许下载时，执行器会同时启用 Hugging Face、uv、pip 离线策略，并阻止 Data-Juicer LazyLoader 自动安装依赖。真实模型后端需要固定 revision、SHA256 和许可证后再单独接入。
+
+控制面接口：
+
+- `GET /api/operator-providers`：Provider 健康状态；
+- `GET /api/operator-providers/datajuicer/operators?query=shape`：检索外部算子；
+- `POST /api/work-orders/{work_order_id}/operator-providers/datajuicer/execute`：在 WorkOrder 已确认的本地数据目录内执行 CPU Filter。
 
 ## 当前 CLI 边界
 

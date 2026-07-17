@@ -2,6 +2,7 @@
 .env.*
 model.env
 model.env.*
+dataagent.local.env
 !.env.example
 .dataagent/
 .pytest_cache/

@@ -78,10 +78,14 @@ class DataJuicerOperatorProvider:
         searcher_factory: Callable[[], Any] | None = None,
         executor: Callable[[ProviderExecuteRequest], ProviderExecuteResult] | None = None,
         provider_version: str | None = None,
+        allow_model_download: bool = False,
+        availability_error: str | None = None,
     ) -> None:
         self._searcher_factory = searcher_factory
         self._executor = executor
         self.provider_version = provider_version or self._installed_version()
+        self.allow_model_download = allow_model_download
+        self.availability_error = availability_error
         self._descriptors: dict[str, ProviderOperatorDescriptor] | None = None
 
     @staticmethod
@@ -126,6 +130,21 @@ class DataJuicerOperatorProvider:
         runtime_backend: RuntimeBackend,
     ) -> ProviderValidationResult:
         descriptor = self.describe(provider_operator_ref)
+        errors: list[str] = []
+        if runtime_backend != RuntimeBackend.CPU:
+            errors.append("Data-Juicer execution currently supports the CPU backend only")
+        if descriptor.suggested_category != OperatorCategory.FILTERING:
+            errors.append(
+                "Only Data-Juicer filter operators are admitted for single-asset execution"
+            )
+        if "cpu" not in descriptor.tags:
+            errors.append("The operator is not declared as CPU-compatible")
+        if not self.allow_model_download and any(
+            tag in descriptor.tags for tag in {"gpu", "llm", "model"}
+        ):
+            errors.append("Model-backed Data-Juicer operators are disabled in offline mode")
+        if errors:
+            return ProviderValidationResult(ok=False, errors=tuple(errors))
         try:
             normalized = validate_parameters(descriptor.parameter_schema, parameters)
         except ParameterValidationError as exc:
@@ -139,9 +158,30 @@ class DataJuicerOperatorProvider:
                 error_type="provider_execution_unconfigured",
                 message="Data-Juicer execution requires an isolated provider worker",
             )
-        return self._executor(request)
+        validation = self.validate(
+            request.provider_operator_ref,
+            request.parameters,
+            request.runtime_backend,
+        )
+        if not validation.ok:
+            return ProviderExecuteResult(
+                ok=False,
+                error_type="provider_validation_failed",
+                message="; ".join(validation.errors),
+            )
+        normalized_request = request.model_copy(
+            update={"parameters": validation.normalized_parameters}
+        )
+        return self._executor(normalized_request)
 
     def health(self) -> ProviderHealth:
+        if self.availability_error:
+            return ProviderHealth(
+                provider_id=self.provider_id,
+                provider_version=self.provider_version,
+                status=ProviderHealthStatus.UNAVAILABLE,
+                message=self.availability_error,
+            )
         if self._searcher_factory is None and self.provider_version == "unavailable":
             return ProviderHealth(
                 provider_id=self.provider_id,
@@ -166,33 +206,44 @@ class DataJuicerOperatorProvider:
         name = str(record.get("name", "")).strip()
         description = str(record.get("desc", "")).strip()
         op_type = str(record.get("type", "")).strip().lower()
-        tags = frozenset(str(tag).strip().lower() for tag in record.get("tags", []) if str(tag).strip())
-        properties: dict[str, Any] = {}
-        required: list[str] = []
-        signature = record.get("sig")
-        if signature is not None:
-            descriptions = record.get("param_desc_map", {}) or {}
-            for param_name, param in signature.parameters.items():
-                if param_name in {"self", "args", "kwargs"} or param.kind in {
-                    inspect.Parameter.VAR_POSITIONAL,
-                    inspect.Parameter.VAR_KEYWORD,
-                }:
-                    continue
-                schema: dict[str, Any] = {
-                    "type": _json_type(param.annotation, param.default),
-                    "description": str(descriptions.get(param_name, "")).strip(),
-                }
-                if param.default is inspect.Signature.empty:
-                    required.append(param_name)
-                elif isinstance(param.default, (str, int, float, bool, list, dict)) or param.default is None:
-                    schema["default"] = param.default
-                properties[param_name] = schema
-        parameter_schema = {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-            "additionalProperties": False,
-        }
+        tags = frozenset(
+            str(tag).strip().lower()
+            for tag in record.get("tags", [])
+            if str(tag).strip()
+        )
+        supplied_schema = record.get("parameter_schema")
+        if isinstance(supplied_schema, dict):
+            parameter_schema = supplied_schema
+        else:
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            signature = record.get("sig")
+            if signature is not None:
+                descriptions = record.get("param_desc_map", {}) or {}
+                for param_name, param in signature.parameters.items():
+                    if param_name in {"self", "args", "kwargs"} or param.kind in {
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    }:
+                        continue
+                    schema: dict[str, Any] = {
+                        "type": _json_type(param.annotation, param.default),
+                        "description": str(descriptions.get(param_name, "")).strip(),
+                    }
+                    if param.default is inspect.Signature.empty:
+                        required.append(param_name)
+                    elif (
+                        isinstance(param.default, (str, int, float, bool, list, dict))
+                        or param.default is None
+                    ):
+                        schema["default"] = param.default
+                    properties[param_name] = schema
+            parameter_schema = {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
         category, secondary = _suggest_category(op_type, name)
         digest_source = f"{self.provider_version}|{name}|{op_type}|{description}|{parameter_schema}"
         return ProviderOperatorDescriptor(

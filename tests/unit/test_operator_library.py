@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
 from pathlib import Path
+import sys
 
 import pytest
 from PIL import Image
@@ -21,6 +24,8 @@ from dataagent.operators.planning import (
 )
 from dataagent.operators.protocol import OperatorContext, OperatorInput
 from dataagent.operators.providers import DataJuicerOperatorProvider
+from dataagent.operators.providers import DataJuicerProcessExecutor
+from dataagent.operators.providers import ProviderExecuteRequest
 from dataagent.operators.validation import ParameterValidationError, validate_parameters
 
 
@@ -175,7 +180,7 @@ class _FakeSearcher:
                 "name": "image_aesthetic_filter",
                 "desc": "Scores image aesthetics",
                 "type": "filter",
-                "tags": ["image", "aesthetic"],
+                "tags": ["cpu", "image", "aesthetic"],
                 "sig": inspect.signature(self._operator),
                 "param_desc_map": {"threshold": "Minimum score"},
             }
@@ -204,6 +209,94 @@ def test_datajuicer_discovery_is_lazy_cached_and_metadata_only() -> None:
         RuntimeBackend.CPU,
     )
     assert not invalid.ok
+
+
+def test_datajuicer_executor_runs_isolated_jsonl_process(tmp_path) -> None:
+    fake_process = tmp_path / "fake_dj_process.py"
+    fake_process.write_text(
+        """
+import json
+import os
+import sys
+from pathlib import Path
+
+recipe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+dataset_path = recipe["dataset"]["configs"][0]["path"]
+row = json.loads(Path(dataset_path).read_text(encoding="utf-8"))
+parameters = next(iter(recipe["process"][0].values()))
+output = Path(recipe["export_path"])
+output.parent.mkdir(parents=True, exist_ok=True)
+if parameters.get("enabled", True):
+    row["fake_score"] = parameters.get("threshold", 0.5)
+    row["offline_policy"] = {
+        "hf": os.environ.get("HF_HUB_OFFLINE"),
+        "uv": os.environ.get("UV_OFFLINE"),
+        "pip": os.environ.get("PIP_NO_INDEX"),
+    }
+    output.write_text(json.dumps(row) + "\\n", encoding="utf-8")
+else:
+    output.write_text("", encoding="utf-8")
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.png"
+    Image.new("RGB", (32, 24), (80, 100, 120)).save(source)
+    executor = DataJuicerProcessExecutor(
+        (sys.executable, fake_process),
+        runtime_root=tmp_path / "provider-runtime",
+        timeout_seconds=10,
+    )
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=_FakeSearcher,
+        executor=executor,
+        provider_version="test-version",
+    )
+    request = ProviderExecuteRequest(
+        provider_operator_ref="image_aesthetic_filter",
+        runtime_backend=RuntimeBackend.CPU,
+        context=OperatorContext(
+            run_id="run_1",
+            work_order_id="work_order_1",
+            owner_id="user_1",
+            purpose="development",
+        ),
+        input_data=OperatorInput(
+            source_path=str(source),
+            current_path=str(source),
+        ),
+        parameters={"threshold": 0.7},
+    )
+
+    kept = provider.execute(request)
+    assert kept.ok
+    assert kept.result is not None
+    assert kept.result.decision == "continue"
+    assert kept.result.labels["datajuicer_output"]["fake_score"] == 0.7
+    assert kept.result.labels["datajuicer_output"]["offline_policy"] == {
+        "hf": "1",
+        "uv": "1",
+        "pip": "1",
+    }
+    assert Path(kept.result.artifacts[0].uri).is_file()
+
+    rejected = provider.execute(
+        request.model_copy(update={"parameters": {"enabled": False}})
+    )
+    assert rejected.ok
+    assert rejected.result is not None
+    assert rejected.result.decision == "reject"
+    assert rejected.result.reason_codes == ["DATAJUICER_FILTERED_OUT"]
+
+
+def test_invalid_external_datajuicer_environment_does_not_break_library(tmp_path) -> None:
+    library = build_operator_library(
+        datajuicer_python=tmp_path / "missing-python.exe",
+        datajuicer_runtime_root=tmp_path / "runtime",
+    )
+
+    health = library.providers.get("datajuicer").health()
+    assert health.status == "unavailable"
+    assert "not found" in health.message
 
 
 def test_production_pipeline_cannot_use_mock_operator() -> None:
