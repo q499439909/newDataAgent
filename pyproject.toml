@@ -28,6 +28,7 @@ dev = ["pytest>=8,<9"]
 [project.scripts]
 dataagent = "dataagent.cli:app"
 dataagent-api = "apps.api.runner:main"
+dataagent-tui = "apps.tui.runner:main"
 dataagent-worker = "apps.worker.runner:main"
 
 [tool.hatch.build.targets.wheel]

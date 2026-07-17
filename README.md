@@ -53,6 +53,18 @@ API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将�
 - `GET /api/datasets/{dataset_version_id}`：查看 DatasetVersion 和资产血缘。
 - `GET /api/qc-reports/{qc_report_id}`：查看质量结论、指标、失败资产和返工建议。
 
+## 启动 Agentic TUI
+
+API 和 Worker 运行后，再开一个 PowerShell 窗口：
+
+```powershell
+.\.venv\Scripts\dataagent-tui.exe --owner local-user
+```
+
+可直接输入自然语言需求，TUI 会继续询问本地图片目录。也可使用 `/new D:\images | 筛选清晰图片并去重` 创建工单。当前驾驶舱支持 TaskSpec 与 Pipeline 审批、状态同步、Run 提交与查看、暂停、恢复、取消，以及 DatasetVersion 和 QCReport 摘要；输入 `/help` 查看当前命令。
+
+TUI 只调用 FastAPI，不直接访问 SQLite。当前版本尚未接入中途自然语言追问、附件、服务端事件订阅和 Web 图片审核深链接，这些能力会在 ConversationThread 与 Web 工作台里程碑继续补齐。
+
 DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
 
 ## 环境检查
