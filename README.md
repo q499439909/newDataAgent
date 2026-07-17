@@ -1,0 +1,126 @@
+# DataAgent CLI
+
+DataAgent 是一个面向图片数据生产的本地 CLI。它把自然语言需求转换为 `TaskSpec`，在同一批图片上比较“保留优先、均衡、质量优先”三类 Pipeline，经边界样本审核后执行全量任务，并输出不可变数据版本和可复用 Pipeline。
+
+## 安装
+
+```powershell
+cd D:\newDataAgent
+python -m pip install -e .
+```
+
+DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
+
+## 环境检查
+
+```powershell
+dataagent doctor
+dataagent doctor --check-api
+```
+
+`--check-api` 会向规划模型发送一个很小的健康检查请求；输出不会显示 API Key。
+
+## 完整流程
+
+### 1. 创建任务
+
+```powershell
+dataagent task create `
+  --source "D:\images\incoming" `
+  --requirement "筛选短边至少 1440、人物清晰的生活照片，去重并输出清单"
+```
+
+创建结果会显示 Task ID 和规划模型生成的 `TaskSpec`。API 不可用时，CLI 会明确提示并回退到保守的本地解析，不会伪装成模型规划结果。
+
+如需修正规划结果，先准备符合 `TaskSpec` 结构的 JSON，再在确认前执行：
+
+```powershell
+dataagent task update-spec task_xxxxxxxxxxxx --file .\task-spec.json
+```
+
+### 2. 确认需求并试跑
+
+```powershell
+dataagent task confirm task_xxxxxxxxxxxx
+dataagent trial run task_xxxxxxxxxxxx --sample-size 100 --vision-limit 8
+```
+
+三类 Pipeline 使用完全相同的样本。`--vision-limit` 控制视觉模型抽样调用数，避免对数千张图片无上限调用 API。未经过人工审核的结果会标记为代理评估。
+
+### 3. 审核边界样本
+
+```powershell
+dataagent review start task_xxxxxxxxxxxx
+```
+
+默认审核均衡方案，CLI 会逐条显示图片路径、Pipeline 判断、拒绝原因、尺寸、亮度、清晰度和视觉模型结论。也可以指定候选：
+
+```powershell
+dataagent review start task_xxxxxxxxxxxx --pipeline pipe_xxxxxxxxxxxx --limit 20
+```
+
+### 4. 全量执行
+
+```powershell
+dataagent run start task_xxxxxxxxxxxx --pipeline pipe_xxxxxxxxxxxx
+```
+
+全量任务默认每 100 张更新一次进度。DataAgent 会校验执行前后的全部原图哈希；任何原图发生变化都会中止发布。筛选结果写入 Manifest，图片转换产物写入新的数据版本目录。
+
+如果 TaskSpec 含语义条件，全量执行会逐图调用视觉模型。只有明确接受“结果不能声称满足语义要求”时才使用 `--skip-semantic` 跳过。
+
+### 5. 查看与复用
+
+```powershell
+dataagent task list
+dataagent trial report task_xxxxxxxxxxxx
+dataagent run show run_xxxxxxxxxxxx
+dataagent dataset show dataset_xxxxxxxxxxxx
+dataagent pipeline list
+dataagent pipeline reuse pipe_xxxxxxxxxxxx --source "D:\images\next-batch"
+```
+
+复用历史 Pipeline 时仍会建立新任务，并与另外两种策略在新数据的小样本上重新比较，不会直接跳过回归试跑。
+
+## Milvus 探测
+
+安装可选依赖后，可以探测现有 Collection 的向量字段和原图定位字段：
+
+```powershell
+python -m pip install -e .[milvus]
+dataagent milvus discover `
+  --uri "http://127.0.0.1:19530" `
+  --collection image_collection
+```
+
+Token 默认从 `MILVUS_TOKEN` 环境变量读取且不会输出。只有同时发现向量字段和图片路径/URI 候选字段时，CLI 才会把 Collection 标记为可进入处理映射配置。
+
+## 本地数据
+
+默认工作目录为 `D:\newDataAgent\.dataagent`：
+
+```text
+.dataagent/
+├── dataagent.db
+├── reports/
+│   └── task_*-trial.json
+└── datasets/
+    └── dataset_*/
+        ├── manifest.json
+        └── files/
+```
+
+可以通过 `DATAAGENT_HOME` 改到其他磁盘。原始图片目录始终只读使用，不原地覆盖或删除。
+
+## 当前 CLI 边界
+
+- 已实现本地图片目录的规划、三方案试跑、视觉抽样评估、边界审核、全量执行、不可变版本和 Pipeline 复用。
+- 已提供 Milvus Schema 探测；自然语言检索仍需补充现有文本编码器和字段映射配置。
+- Docker 生成算子沙箱和异步多任务 Worker 属于下一阶段接入点；当前 CLI 不会在没有沙箱时执行大模型生成的代码。
+- 当前清晰度和亮度属于无参考代理指标，必须结合视觉模型和需求提出者审核使用。
+
+## 测试
+
+```powershell
+python -m pytest
+```
