@@ -50,7 +50,11 @@ def _sha256(path: Path) -> str:
 
 def _dhash(image: Image.Image, hash_size: int = 8) -> str:
     grayscale = image.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
-    pixels = list(grayscale.getdata())
+    pixels = list(
+        grayscale.get_flattened_data()
+        if hasattr(grayscale, "get_flattened_data")
+        else grayscale.getdata()
+    )
     bits = []
     for row in range(hash_size):
         offset = row * (hash_size + 1)
@@ -64,7 +68,9 @@ def _blur_score(image: Image.Image) -> float:
     gray = image.convert("L")
     if max(gray.size) > 512:
         gray.thumbnail((512, 512), Image.Resampling.LANCZOS)
-    pixels = list(gray.getdata())
+    pixels = list(
+        gray.get_flattened_data() if hasattr(gray, "get_flattened_data") else gray.getdata()
+    )
     width, height = gray.size
     if width < 3 or height < 3:
         return 0.0

@@ -2,12 +2,36 @@
 
 DataAgent 是一个面向图片数据生产的本地 CLI。它把自然语言需求转换为 `TaskSpec`，在同一批图片上比较“保留优先、均衡、质量优先”三类 Pipeline，经边界样本审核后执行全量任务，并输出不可变数据版本和可复用 Pipeline。
 
+仓库正在按最终 PRD 迁移为“四个专业 Agent + LangGraph + 统一控制面”的完整平台。原 CLI 继续可用；新增控制面已经支持四 Agent 子图、两处 HITL interrupt、SQLite checkpoint、正式版本追加存储、分类算子库和真实图片节点预览。
+
 ## 安装
 
 ```powershell
 cd D:\newDataAgent
-python -m pip install -e .
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
+
+项目使用独立 `.venv`，避免 LangGraph SDK 与机器上其他 Python 工具产生依赖冲突。
+
+## 启动控制面 API
+
+```powershell
+.\.venv\Scripts\dataagent-api.exe
+```
+
+默认地址为 `http://127.0.0.1:8000`，OpenAPI 文档为 `http://127.0.0.1:8000/docs`。当前控制面提供：
+
+- 启动、查询和恢复同一 LangGraph Agent thread；
+- TaskSpec 确认和 Pipeline 选择 interrupt；
+- 需求规划、检索、数据处理和数据策略四个子图；
+- 三类用户 Pipeline 与每类内部变体；
+- Owner 级 thread 隔离；
+- SQLite checkpoint 和不可变领域版本存储；
+- 分类算子列表；
+- 任务数据源范围内的真实节点图片预览。
+
+API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将由 Session 自动注入，客户端不能自行指定他人 Owner。
 
 DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
 
@@ -122,5 +146,5 @@ Token 默认从 `MILVUS_TOKEN` 环境变量读取且不会输出。只有同时�
 ## 测试
 
 ```powershell
-python -m pytest
+.\.venv\Scripts\python.exe -m pytest
 ```
