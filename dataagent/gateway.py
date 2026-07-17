@@ -117,6 +117,39 @@ class ModelGateway:
             max_tokens=16,
         )
 
+    def conversation_turn(
+        self,
+        *,
+        history: list[dict[str, str]],
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], ModelUsage]:
+        system = (
+            "You are DataAgent's conversational control assistant. Reply naturally in Chinese "
+            "unless the user uses another language. You can explain the product and discuss the "
+            "current task. Classify the user's intent, but never claim an action succeeded unless "
+            "the control plane executes it. Ask one concise follow-up when information is missing. "
+            "START_WORK_ORDER requires a concrete data-production requirement; greetings, product "
+            "questions, capability questions, and usage questions are CHAT. A filesystem path by "
+            "itself is PROVIDE_SOURCE only when pending_requirement is present. APPROVE, REJECT, "
+            "SUBMIT_RUN, RUN_STATUS, and CONTROL_RUN require explicit user intent. Return JSON only "
+            "with keys: intent, reply, requirement, source, strategy, action. Allowed intents are "
+            "CHAT, START_WORK_ORDER, PROVIDE_SOURCE, APPROVE, REJECT, SUBMIT_RUN, RUN_STATUS, "
+            "CONTROL_RUN. strategy may be retention_first, balanced, quality_first, or null. "
+            "action may be pause, resume, cancel, or null."
+        )
+        payload = {
+            "configured_model": self.settings.planning_model,
+            "conversation": history[-20:],
+            "control_context": context,
+        }
+        result = self._messages(
+            self.settings.planning_model,
+            system,
+            json.dumps(payload, ensure_ascii=False),
+            max_tokens=1200,
+        )
+        return _extract_json(result.text), result.usage
+
     def plan_task(self, requirement: str, source_path: str) -> tuple[TaskSpec, ModelUsage]:
         schema = TaskSpec.model_json_schema()
         system = (

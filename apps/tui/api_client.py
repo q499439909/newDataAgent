@@ -27,6 +27,26 @@ class ControlPlaneClient:
     def close(self) -> None:
         self._client.close()
 
+    def create_conversation(self) -> dict[str, Any]:
+        return self._request("POST", "/api/conversations")
+
+    def get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/api/conversations/{conversation_id}")
+
+    def send_message(self, conversation_id: str, content: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/conversations/{conversation_id}/messages",
+            json={"content": content},
+        )
+
+    def bind_work_order(self, conversation_id: str, work_order_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/conversations/{conversation_id}/work-order",
+            json={"work_order_id": work_order_id},
+        )
+
     def start_work_order(
         self, *, requirement: str, source: str, work_order_id: str | None = None
     ) -> dict[str, Any]:

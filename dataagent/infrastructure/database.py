@@ -106,6 +106,39 @@ class RunSourceRow(Base):
     output_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ConversationThreadRow(Base):
+    __tablename__ = "conversation_threads"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    work_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    context_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class ConversationMessageRow(Base):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "sequence", name="uq_conversation_message_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class SqliteDatabase:
     def __init__(self, path: Path):
         self.path = path.resolve()
@@ -487,4 +520,110 @@ class RunStore:
             "source_uri": row.source_uri,
             "source_sha256": row.source_sha256,
             "output_relative_path": row.output_relative_path,
+        }
+
+
+class ConversationStore:
+    def __init__(self, database: SqliteDatabase):
+        self.database = database
+
+    def create(self, *, thread_id: str, owner_id: str) -> dict[str, Any]:
+        with self.database.session() as session, session.begin():
+            row = ConversationThreadRow(id=thread_id, owner_id=owner_id)
+            session.add(row)
+            session.flush()
+            return self._thread_dict(row)
+
+    def get(self, thread_id: str, owner_id: str) -> dict[str, Any]:
+        with self.database.session() as session:
+            row = session.get(ConversationThreadRow, thread_id)
+            if row is None:
+                raise KeyError(f"Conversation not found: {thread_id}")
+            if row.owner_id != owner_id:
+                raise PermissionError("Conversation belongs to another owner")
+            return self._thread_dict(row)
+
+    def update(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        context: dict[str, Any],
+        work_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.get(thread_id, owner_id)
+        values: dict[str, Any] = {
+            "context_json": json.dumps(context, ensure_ascii=False),
+            "updated_at": datetime.now(UTC),
+        }
+        if work_order_id is not None:
+            values["work_order_id"] = work_order_id
+        with self.database.session() as session, session.begin():
+            session.execute(
+                update(ConversationThreadRow)
+                .where(ConversationThreadRow.id == thread_id)
+                .values(**values)
+            )
+        return self.get(thread_id, owner_id)
+
+    def add_message(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        role: str,
+        content: str,
+        intent: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        self.get(thread_id, owner_id)
+        with self.database.session() as session, session.begin():
+            last = session.scalar(
+                select(ConversationMessageRow.sequence)
+                .where(ConversationMessageRow.thread_id == thread_id)
+                .order_by(ConversationMessageRow.sequence.desc())
+                .limit(1)
+            )
+            row = ConversationMessageRow(
+                thread_id=thread_id,
+                sequence=(last or 0) + 1,
+                role=role,
+                content=content,
+                intent=intent,
+                model=model,
+            )
+            session.add(row)
+            session.flush()
+            return self._message_dict(row)
+
+    def messages(self, thread_id: str, owner_id: str) -> list[dict[str, Any]]:
+        self.get(thread_id, owner_id)
+        with self.database.session() as session:
+            rows = session.scalars(
+                select(ConversationMessageRow)
+                .where(ConversationMessageRow.thread_id == thread_id)
+                .order_by(ConversationMessageRow.sequence)
+            ).all()
+            return [self._message_dict(row) for row in rows]
+
+    @staticmethod
+    def _thread_dict(row: ConversationThreadRow) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "owner_id": row.owner_id,
+            "work_order_id": row.work_order_id,
+            "context": json.loads(row.context_json),
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    @staticmethod
+    def _message_dict(row: ConversationMessageRow) -> dict[str, Any]:
+        return {
+            "sequence": row.sequence,
+            "role": row.role,
+            "content": row.content,
+            "intent": row.intent,
+            "model": row.model,
+            "created_at": row.created_at,
         }

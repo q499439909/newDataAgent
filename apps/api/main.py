@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
 from dataagent.domain.operators import OperatorCategory
 
@@ -37,6 +38,18 @@ class RunControlRequest(BaseModel):
     action: Literal["pause", "resume", "cancel"]
 
 
+class ConversationMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1)
+
+
+class ConversationWorkOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    work_order_id: str = Field(min_length=1)
+
+
 class AgentTurnResponse(BaseModel):
     work_order_id: str
     thread_id: str
@@ -48,16 +61,95 @@ def require_owner(x_owner_id: Annotated[str, Header(min_length=1)]) -> str:
     return x_owner_id
 
 
-def create_app(runtime: AgentRuntime | None = None) -> FastAPI:
-    app = FastAPI(title="DataAgent Control Plane", version="0.2.0")
+def create_app(
+    runtime: AgentRuntime | None = None,
+    conversation_service: ConversationService | None = None,
+) -> FastAPI:
+    app = FastAPI(title="DataAgent Control Plane", version="0.3.0")
     app.state.agent_runtime = runtime or AgentRuntime(Settings.load().home / "platform")
+    if conversation_service is not None:
+        app.state.conversation_service = conversation_service
+    elif app.state.agent_runtime.conversation_store is not None:
+        app.state.conversation_service = ConversationService(
+            store=app.state.agent_runtime.conversation_store,
+            agent_runtime=app.state.agent_runtime,
+            settings=Settings.load(),
+        )
+    else:
+        app.state.conversation_service = None
 
     def get_runtime() -> AgentRuntime:
         return app.state.agent_runtime
 
+    def get_conversation_service() -> ConversationService:
+        service = app.state.conversation_service
+        if service is None:
+            raise HTTPException(
+                status_code=422, detail="Persistent runtime is required for conversations"
+            )
+        return service
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.post("/api/conversations", status_code=status.HTTP_201_CREATED)
+    def create_conversation(
+        owner_id: str = Depends(require_owner),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> dict[str, Any]:
+        return service.create(owner_id)
+
+    @app.get("/api/conversations/{conversation_id}")
+    def get_conversation(
+        conversation_id: str,
+        owner_id: str = Depends(require_owner),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> dict[str, Any]:
+        try:
+            return service.get(conversation_id, owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/api/conversations/{conversation_id}/messages")
+    def send_conversation_message(
+        conversation_id: str,
+        request: ConversationMessageRequest,
+        owner_id: str = Depends(require_owner),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> dict[str, Any]:
+        try:
+            return service.send(
+                thread_id=conversation_id,
+                owner_id=owner_id,
+                content=request.content,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/conversations/{conversation_id}/work-order")
+    def bind_conversation_work_order(
+        conversation_id: str,
+        request: ConversationWorkOrderRequest,
+        owner_id: str = Depends(require_owner),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> dict[str, Any]:
+        try:
+            return service.bind_work_order(
+                thread_id=conversation_id,
+                owner_id=owner_id,
+                work_order_id=request.work_order_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.get("/api/operator-categories")
     def operator_categories(

@@ -16,7 +16,13 @@ from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
 from ..graph import build_main_graph
-from ..infrastructure import AgentThreadStore, DomainVersionStore, RunStore, SqliteDatabase
+from ..infrastructure import (
+    AgentThreadStore,
+    ConversationStore,
+    DomainVersionStore,
+    RunStore,
+    SqliteDatabase,
+)
 from ..operators import OperatorRegistry, OperatorRuntime
 from ..operators.builtin import builtin_image_operators
 
@@ -38,6 +44,7 @@ class AgentRuntime:
         self.thread_store: AgentThreadStore | None = None
         self.version_store: DomainVersionStore | None = None
         self.run_store: RunStore | None = None
+        self.conversation_store: ConversationStore | None = None
         if home is None:
             self.checkpointer = InMemorySaver()
         else:
@@ -48,6 +55,7 @@ class AgentRuntime:
             self.thread_store = AgentThreadStore(database)
             self.version_store = DomainVersionStore(database)
             self.run_store = RunStore(database)
+            self.conversation_store = ConversationStore(database)
             self._checkpoint_connection = sqlite3.connect(
                 home / "checkpoints.db", check_same_thread=False
             )

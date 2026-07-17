@@ -6,6 +6,16 @@ from typing import Any, Protocol
 
 
 class TuiClient(Protocol):
+    def create_conversation(self) -> dict[str, Any]: ...
+
+    def get_conversation(self, conversation_id: str) -> dict[str, Any]: ...
+
+    def send_message(self, conversation_id: str, content: str) -> dict[str, Any]: ...
+
+    def bind_work_order(
+        self, conversation_id: str, work_order_id: str
+    ) -> dict[str, Any]: ...
+
     def start_work_order(
         self, *, requirement: str, source: str, work_order_id: str | None = None
     ) -> dict[str, Any]: ...
@@ -30,17 +40,41 @@ class TuiClient(Protocol):
 @dataclass
 class TuiSession:
     client: TuiClient
+    conversation_id: str | None = None
     work_order_id: str | None = None
     active_run_id: str | None = None
     turn: dict[str, Any] | None = None
 
+    def ensure_conversation(self) -> dict[str, Any]:
+        if self.conversation_id:
+            return self.client.get_conversation(self.conversation_id)
+        conversation = self.client.create_conversation()
+        self.conversation_id = conversation["id"]
+        self.work_order_id = conversation.get("work_order_id")
+        return conversation
+
+    def chat(self, content: str) -> dict[str, Any]:
+        self.ensure_conversation()
+        response = self.client.send_message(self.conversation_id, content)
+        self.work_order_id = response.get("work_order_id") or self.work_order_id
+        if response.get("turn"):
+            self.turn = response["turn"]
+            self.work_order_id = self.turn["work_order_id"]
+        if response.get("run"):
+            self.active_run_id = response["run"]["id"]
+        return response
+
     def start(self, *, requirement: str, source: str) -> dict[str, Any]:
-        self.turn = self.client.start_work_order(requirement=requirement, source=source)
-        self.work_order_id = self.turn["work_order_id"]
-        self.active_run_id = None
-        return self.turn
+        response = self.chat(
+            f"请创建一个图片数据任务。数据目录是 {source}。需求是：{requirement}"
+        )
+        if not response.get("turn"):
+            raise ValueError(response.get("reply") or "Work order was not created")
+        return response["turn"]
 
     def open(self, work_order_id: str) -> dict[str, Any]:
+        self.ensure_conversation()
+        self.client.bind_work_order(self.conversation_id, work_order_id)
         self.turn = self.client.state(work_order_id)
         self.work_order_id = work_order_id
         runs = self.client.list_runs(work_order_id)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from apps.tui.app import TuiApp, parse_new_command
 from apps.tui.session import TuiSession
 
@@ -8,6 +10,45 @@ class FakeControlPlaneClient:
     def __init__(self) -> None:
         self.stage = "new"
         self.controls: list[str] = []
+
+    def create_conversation(self):
+        return {"id": "conversation_1", "work_order_id": None, "messages": []}
+
+    def get_conversation(self, conversation_id):
+        return {
+            "id": conversation_id,
+            "work_order_id": "work_order_1" if self.stage != "new" else None,
+            "messages": [],
+        }
+
+    def send_message(self, conversation_id, content):
+        if "请创建一个图片数据任务" in content:
+            self.stage = "spec"
+            turn = self._turn(
+                [{"id": "interrupt_1", "value": {"kind": "task_spec_confirmation"}}]
+            )
+            return {
+                "conversation_id": conversation_id,
+                "work_order_id": "work_order_1",
+                "reply": "已创建工单。",
+                "turn": turn,
+                "run": None,
+            }
+        return {
+            "conversation_id": conversation_id,
+            "work_order_id": "work_order_1" if self.stage != "new" else None,
+            "reply": "你好，我是 DataAgent。",
+            "turn": None,
+            "run": None,
+        }
+
+    def bind_work_order(self, conversation_id, work_order_id):
+        self.stage = "ready"
+        return {
+            "id": conversation_id,
+            "work_order_id": work_order_id,
+            "messages": [],
+        }
 
     def start_work_order(self, *, requirement, source, work_order_id=None):
         assert requirement == "筛选清晰图片"
@@ -137,6 +178,11 @@ class StubConsole:
         self.messages.append(prompt)
         return self.source
 
+    @contextmanager
+    def status(self, message: str):
+        self.messages.append(message)
+        yield
+
 
 def test_tui_greeting_does_not_start_a_work_order() -> None:
     console = StubConsole()
@@ -147,16 +193,16 @@ def test_tui_greeting_does_not_start_a_work_order() -> None:
 
     assert session.work_order_id is None
     assert console.input_calls == 0
-    assert any("请告诉我数据目标" in message for message in console.messages)
+    assert any("DataAgent" in message for message in console.messages)
 
 
-def test_tui_requirement_prompts_for_a_clearly_named_source_directory() -> None:
+def test_tui_requirement_is_sent_to_conversation_without_local_prompt() -> None:
     console = StubConsole()
     session = TuiSession(FakeControlPlaneClient())
     app = TuiApp(session, console=console)
 
     app.handle("筛选清晰图片")
 
-    assert session.work_order_id == "work_order_1"
-    assert console.input_calls == 1
-    assert any("图片目录" in message for message in console.messages)
+    assert session.work_order_id is None
+    assert console.input_calls == 0
+    assert any("DataAgent" in message for message in console.messages)

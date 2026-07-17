@@ -61,9 +61,15 @@ API 和 Worker 运行后，再开一个 PowerShell 窗口：
 .\.venv\Scripts\dataagent-tui.exe --owner local-user
 ```
 
-可直接输入自然语言需求，TUI 会继续询问本地图片目录。也可使用 `/new D:\images | 筛选清晰图片并去重` 创建工单。当前驾驶舱支持 TaskSpec 与 Pipeline 审批、状态同步、Run 提交与查看、暂停、恢复、取消，以及 DatasetVersion 和 QCReport 摘要；输入 `/help` 查看当前命令。
+TUI 启动后会创建持久 `ConversationThread`，普通文本由配置的规划模型理解和回复。可以先闲聊、询问使用方式或当前模型，也可以自然描述数据目标；只有识别到明确任务后才会继续追问图片目录、约束和审批，不会把普通问题当成工单。也可使用 `/new D:\images | 筛选清晰图片并去重` 快速创建任务。当前驾驶舱支持 TaskSpec 与 Pipeline 审批、状态同步、Run 提交与查看、暂停、恢复、取消，以及 DatasetVersion 和 QCReport 摘要；输入 `/help` 查看可选快捷命令。
 
-TUI 只调用 FastAPI，不直接访问 SQLite。当前版本尚未接入中途自然语言追问、附件、服务端事件订阅和 Web 图片审核深链接，这些能力会在 ConversationThread 与 Web 工作台里程碑继续补齐。
+启动时会显示 conversation ID。关闭后可恢复同一段消息历史和关联工单：
+
+```powershell
+.\.venv\Scripts\dataagent-tui.exe --owner local-user --conversation conversation_xxx
+```
+
+TUI 只调用 FastAPI，不直接访问 SQLite。当前版本尚未接入附件、流式 token 输出、服务端事件订阅和 Web 图片审核深链接，这些能力会在 Web 工作台里程碑继续补齐。
 
 DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
 

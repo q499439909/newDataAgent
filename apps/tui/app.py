@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.table import Table
 
 from .api_client import ControlPlaneError
@@ -29,7 +30,11 @@ class TuiApp:
 
     def run(self) -> None:
         self.console.print("[bold]DataAgent[/bold]  [dim]TUI control plane[/dim]")
-        self.console.print("你好，请描述你想生产的图片数据；输入 [bold]/help[/bold] 可查看控制命令。")
+        conversation = self.session.ensure_conversation()
+        self.console.print(
+            f"[dim]conversation {conversation['id']}[/dim]\n"
+            "你好，直接和我说就可以。数据任务的信息不完整时，我会继续问你。"
+        )
         while True:
             try:
                 line = self.console.input("[cyan]dataagent>[/cyan] ").strip()
@@ -46,7 +51,7 @@ class TuiApp:
 
     def handle(self, line: str) -> bool:
         if not line.startswith("/"):
-            self._handle_natural_language(line)
+            self._chat(line)
             return True
         command, _, argument = line.partition(" ")
         command = command.lower()
@@ -55,7 +60,9 @@ class TuiApp:
             return False
         if command == "/new":
             source, requirement = parse_new_command(argument)
-            self._render_turn(self.session.start(requirement=requirement, source=source))
+            self._chat(
+                f"请创建一个图片数据任务。数据目录是 {source}。需求是：{requirement}"
+            )
         elif command == "/open":
             if not argument:
                 raise ValueError("Work order id is required")
@@ -63,17 +70,21 @@ class TuiApp:
         elif command == "/status":
             self._render_turn(self.session.refresh())
         elif command == "/approve":
-            self._render_turn(self.session.approve(argument or "balanced"))
+            strategy = argument or "balanced"
+            self._chat(f"确认，选择 {strategy} 策略。")
         elif command == "/reject":
-            self._render_turn(self.session.reject(argument or "rejected from tui"))
+            self._chat(f"拒绝当前方案。原因：{argument or '不符合需求'}")
         elif command == "/submit":
-            self._render_run(self.session.submit_run())
+            self._chat("开始运行当前任务。")
         elif command == "/runs":
             self._render_runs(self.session.runs())
         elif command == "/run":
             self._render_run(self.session.run(argument or None))
         elif command in {"/pause", "/resume", "/cancel"}:
-            self._render_run(self.session.control(command[1:], argument or None))
+            if argument:
+                self.session.active_run_id = argument
+            action = {"/pause": "暂停", "/resume": "恢复", "/cancel": "取消"}[command]
+            self._chat(f"{action}当前 Run。")
         elif command == "/watch":
             self._watch(argument or None)
         elif command == "/result":
@@ -84,28 +95,18 @@ class TuiApp:
             raise ValueError(f"Unknown command: {command}")
         return True
 
-    def _handle_natural_language(self, text: str) -> None:
-        normalized = text.strip().lower()
-        greeting = normalized.strip("!！。,.，~～ ")
-        if greeting in {"你好", "您好", "嗨", "hi", "hello", "hey"}:
-            self.console.print("你好。请告诉我数据目标，例如：筛选清晰的人像图片并去重。")
-            return
-        if not self.session.work_order_id:
-            self.console.print("需求已记录。接下来请提供这批图片所在的本地目录。")
-            source = self.console.input(
-                "[cyan]图片目录（例如 D:\\images\\incoming）>[/cyan] "
-            ).strip()
-            if not source:
-                raise ValueError("图片目录不能为空")
-            self._render_turn(self.session.start(requirement=text, source=source))
-            return
-        if normalized in {"确认", "批准", "同意", "approve", "yes", "y"}:
-            self._render_turn(self.session.approve())
-            return
-        if normalized in {"拒绝", "不同意", "reject", "no", "n"}:
-            self._render_turn(self.session.reject(text))
-            return
-        raise ValueError("This milestone supports natural-language creation and approval controls")
+    def _chat(self, content: str) -> None:
+        with self.console.status("[dim]DataAgent 正在思考...[/dim]"):
+            response = self.session.chat(content)
+        self._render_conversation(response)
+
+    def _render_conversation(self, response: dict[str, Any]) -> None:
+        self.console.print("[green]DataAgent>[/green]")
+        self.console.print(Markdown(response["reply"]))
+        if response.get("turn"):
+            self._render_turn(response["turn"])
+        if response.get("run"):
+            self._render_run(response["run"])
 
     def _render_turn(self, payload: dict[str, Any]) -> None:
         state = payload.get("state", {})
