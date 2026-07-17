@@ -9,6 +9,8 @@ from typing import Any, get_args, get_origin
 from ...domain.operators import OperatorCategory, RuntimeBackend
 from ..validation import ParameterValidationError, validate_parameters
 from .protocol import (
+    ProviderDatasetExecuteRequest,
+    ProviderDatasetExecuteResult,
     ProviderExecuteRequest,
     ProviderExecuteResult,
     ProviderHealth,
@@ -133,9 +135,12 @@ class DataJuicerOperatorProvider:
         errors: list[str] = []
         if runtime_backend != RuntimeBackend.CPU:
             errors.append("Data-Juicer execution currently supports the CPU backend only")
-        if descriptor.suggested_category != OperatorCategory.FILTERING:
+        if descriptor.suggested_category not in {
+            OperatorCategory.FILTERING,
+            OperatorCategory.DEDUPLICATION,
+        }:
             errors.append(
-                "Only Data-Juicer filter operators are admitted for single-asset execution"
+                "Only admitted Data-Juicer filters and deduplicators can execute locally"
             )
         if "cpu" not in descriptor.tags:
             errors.append("The operator is not declared as CPU-compatible")
@@ -173,6 +178,39 @@ class DataJuicerOperatorProvider:
             update={"parameters": validation.normalized_parameters}
         )
         return self._executor(normalized_request)
+
+    def execute_dataset(
+        self, request: ProviderDatasetExecuteRequest
+    ) -> ProviderDatasetExecuteResult:
+        if self._executor is None or not hasattr(self._executor, "execute_dataset"):
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="provider_execution_unconfigured",
+                message="Data-Juicer dataset execution requires an isolated provider worker",
+            )
+        validation = self.validate(
+            request.provider_operator_ref,
+            request.parameters,
+            request.runtime_backend,
+        )
+        if not validation.ok:
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="provider_validation_failed",
+                message="; ".join(validation.errors),
+            )
+        normalized = request.model_copy(
+            update={"parameters": validation.normalized_parameters}
+        )
+        return self._executor.execute_dataset(normalized)
+
+    def admit(self, descriptors: list[ProviderOperatorDescriptor]) -> None:
+        """Seed immutable descriptors for formal proxies without runtime discovery."""
+        if self._descriptors is None:
+            self._descriptors = {}
+        self._descriptors.update(
+            {item.provider_operator_ref: item for item in descriptors}
+        )
 
     def health(self) -> ProviderHealth:
         if self.availability_error:

@@ -7,6 +7,9 @@ from ..protocol import Operator
 from ..runtime import OperatorRuntime
 from ..validation import ParameterValidationError, validate_parameters
 from .protocol import (
+    ProviderDatasetExecuteRequest,
+    ProviderDatasetExecuteResult,
+    ProviderDatasetItemResult,
     ProviderExecuteRequest,
     ProviderExecuteResult,
     ProviderHealth,
@@ -77,6 +80,31 @@ class NativeOperatorProvider:
                 message=str(exc),
             )
         return ProviderExecuteResult(ok=True, result=result)
+
+    def execute_dataset(
+        self, request: ProviderDatasetExecuteRequest
+    ) -> ProviderDatasetExecuteResult:
+        results: list[ProviderDatasetItemResult] = []
+        for item in request.items:
+            executed = self.execute(
+                ProviderExecuteRequest(
+                    provider_operator_ref=request.provider_operator_ref,
+                    runtime_backend=request.runtime_backend,
+                    context=request.context,
+                    input_data=item.input_data,
+                    parameters=request.parameters,
+                )
+            )
+            if not executed.ok or executed.result is None:
+                return ProviderDatasetExecuteResult(
+                    ok=False,
+                    error_type=executed.error_type,
+                    message=executed.message,
+                )
+            results.append(
+                ProviderDatasetItemResult(asset_id=item.asset_id, result=executed.result)
+            )
+        return ProviderDatasetExecuteResult(ok=True, items=tuple(results))
 
     def health(self) -> ProviderHealth:
         return ProviderHealth(

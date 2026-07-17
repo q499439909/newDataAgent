@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..domain.pipelines import PipelineVersion
-from ..domain.operators import RuntimeBackend
+from ..domain.operators import ExecutionScope, RuntimeBackend
 from .protocol import Operator, OperatorContext, OperatorInput, OperatorResult
 from .validation import validate_parameters
 
@@ -62,3 +62,31 @@ class OperatorRuntime:
         normalized = validate_parameters(operator.spec.parameter_schema, parameters)
         result = operator.execute(context, input_data, normalized)
         return OperatorResult.model_validate(result)
+
+    def prepare_dataset_node(
+        self,
+        *,
+        operator_version_id: str,
+        node_id: str,
+        context: OperatorContext,
+        inputs: tuple[OperatorInput, ...],
+        parameters: dict,
+        runtime_backend: RuntimeBackend = RuntimeBackend.CPU,
+    ) -> bool:
+        operator = self.get(operator_version_id)
+        if operator.spec.execution_scope != ExecutionScope.DATASET:
+            return False
+        prepare = getattr(operator, "prepare_dataset", None)
+        if not callable(prepare):
+            raise RuntimeError(
+                f"Dataset-scoped operator has no batch implementation: {operator_version_id}"
+            )
+        normalized = validate_parameters(operator.spec.parameter_schema, parameters)
+        prepare(
+            node_id=node_id,
+            context=context,
+            inputs=inputs,
+            parameters=normalized,
+            runtime_backend=runtime_backend,
+        )
+        return True

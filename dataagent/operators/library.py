@@ -15,6 +15,7 @@ from .providers import (
     DataJuicerSubprocessSearcher,
     NativeOperatorProvider,
     ProviderRegistry,
+    build_datajuicer_proxy_operators,
 )
 from .registry import OperatorRegistry
 from .runtime import OperatorRuntime
@@ -40,14 +41,13 @@ def build_operator_library(
     model_manager = ModelManager(
         (MockModelBackend(),), allow_download=allow_model_download
     )
-    operators = (
+    native_operators = (
         *builtin_image_operators(),
         *builtin_utility_operators(),
         *builtin_model_operators(model_manager),
     )
-    registry = OperatorRegistry(operator.spec for operator in operators)
-    runtime = OperatorRuntime(operators)
-    providers = ProviderRegistry((NativeOperatorProvider(operators),))
+    operators = list(native_operators)
+    providers = ProviderRegistry((NativeOperatorProvider(native_operators),))
     if include_datajuicer:
         searcher = None
         executor = None
@@ -75,17 +75,21 @@ def build_operator_library(
                 availability_error = (
                     f"Data-Juicer process executable not found: {datajuicer_process_bin}"
                 )
-        providers.register(
-            DataJuicerOperatorProvider(
+        datajuicer_provider = DataJuicerOperatorProvider(
                 searcher_factory=(lambda: searcher) if searcher is not None else None,
                 executor=executor,
                 provider_version=provider_version,
                 allow_model_download=allow_model_download,
                 availability_error=availability_error,
             )
-        )
+        providers.register(datajuicer_provider)
+        if executor is not None and not availability_error:
+            operators.extend(build_datajuicer_proxy_operators(datajuicer_provider))
+    operators_tuple = tuple(operators)
+    registry = OperatorRegistry(operator.spec for operator in operators_tuple)
+    runtime = OperatorRuntime(operators_tuple)
     return OperatorLibrary(
-        operators=operators,
+        operators=operators_tuple,
         registry=registry,
         runtime=runtime,
         providers=providers,

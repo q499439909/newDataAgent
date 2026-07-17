@@ -106,6 +106,22 @@ class RunSourceRow(Base):
     output_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class RunEventRow(Base):
+    __tablename__ = "run_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    node_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    details_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class ConversationThreadRow(Base):
     __tablename__ = "conversation_threads"
 
@@ -415,6 +431,43 @@ class RunStore:
             ).all()
             return [self._item_dict(row) for row in rows]
 
+    def add_event(
+        self,
+        run_id: str,
+        event_type: str,
+        details: dict[str, Any] | None = None,
+        *,
+        node_id: str | None = None,
+        provider_id: str | None = None,
+        message: str = "",
+        progress: int | None = None,
+    ) -> dict[str, Any]:
+        with self.database.session() as session, session.begin():
+            if session.get(RunRow, run_id) is None:
+                raise KeyError(f"Run not found: {run_id}")
+            row = RunEventRow(
+                run_id=run_id,
+                event_type=event_type,
+                node_id=node_id,
+                provider_id=provider_id,
+                message=message,
+                progress=progress,
+                details_json=json.dumps(details or {}, ensure_ascii=False, default=str),
+            )
+            session.add(row)
+            session.flush()
+            return self._event_dict(row)
+
+    def events(self, run_id: str, owner_id: str | None = None) -> list[dict[str, Any]]:
+        self.get(run_id, owner_id)
+        with self.database.session() as session:
+            rows = session.scalars(
+                select(RunEventRow)
+                .where(RunEventRow.run_id == run_id)
+                .order_by(RunEventRow.id)
+            ).all()
+            return [self._event_dict(row) for row in rows]
+
     def request_pause(self, run_id: str, owner_id: str) -> dict[str, Any]:
         run = self.get(run_id, owner_id)
         if run["status"] == "QUEUED":
@@ -520,6 +573,20 @@ class RunStore:
             "source_uri": row.source_uri,
             "source_sha256": row.source_sha256,
             "output_relative_path": row.output_relative_path,
+        }
+
+    @staticmethod
+    def _event_dict(row: RunEventRow) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "run_id": row.run_id,
+            "event_type": row.event_type,
+            "node_id": row.node_id,
+            "provider_id": row.provider_id,
+            "message": row.message,
+            "progress": row.progress,
+            "details": json.loads(row.details_json),
+            "created_at": row.created_at,
         }
 
 

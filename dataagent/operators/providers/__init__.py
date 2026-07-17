@@ -6,6 +6,10 @@ from .datajuicer_executor import (
 from .native import NativeOperatorProvider
 from .protocol import (
     OperatorProvider,
+    ProviderDatasetExecuteRequest,
+    ProviderDatasetExecuteResult,
+    ProviderDatasetItem,
+    ProviderDatasetItemResult,
     ProviderExecuteRequest,
     ProviderExecuteResult,
     ProviderHealth,
@@ -14,6 +18,11 @@ from .protocol import (
     ProviderValidationResult,
 )
 from .registry import ProviderRegistry
+from .proxy import (
+    DATAJUICER_ADMISSIONS,
+    ProviderProxyOperator,
+    build_datajuicer_proxy_operators,
+)
 
 __all__ = [
     "DataJuicerOperatorProvider",
@@ -21,11 +30,18 @@ __all__ = [
     "DataJuicerSubprocessSearcher",
     "NativeOperatorProvider",
     "OperatorProvider",
+    "ProviderDatasetExecuteRequest",
+    "ProviderDatasetExecuteResult",
+    "ProviderDatasetItem",
+    "ProviderDatasetItemResult",
     "ProviderExecuteRequest",
     "ProviderExecuteResult",
     "ProviderHealth",
     "ProviderHealthStatus",
     "ProviderOperatorDescriptor",
     "ProviderRegistry",
+    "DATAJUICER_ADMISSIONS",
+    "ProviderProxyOperator",
+    "build_datajuicer_proxy_operators",
     "ProviderValidationResult",
 ]

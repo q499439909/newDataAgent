@@ -66,6 +66,45 @@ class ProviderExecuteResult(BaseModel):
     result: OperatorResult | None = None
     error_type: str | None = None
     message: str = ""
+    duration_seconds: float = Field(default=0, ge=0)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+
+class ProviderDatasetItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    input_data: OperatorInput
+
+
+class ProviderDatasetExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_operator_ref: str
+    runtime_backend: RuntimeBackend
+    context: OperatorContext
+    items: tuple[ProviderDatasetItem, ...]
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProviderDatasetItemResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    result: OperatorResult
+
+
+class ProviderDatasetExecuteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    items: tuple[ProviderDatasetItemResult, ...] = ()
+    error_type: str | None = None
+    message: str = ""
+    duration_seconds: float = Field(default=0, ge=0)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
 
 
 class OperatorProvider(Protocol):
@@ -85,6 +124,10 @@ class OperatorProvider(Protocol):
 
     def execute(self, request: ProviderExecuteRequest) -> ProviderExecuteResult: ...
 
+    def execute_dataset(
+        self, request: ProviderDatasetExecuteRequest
+    ) -> ProviderDatasetExecuteResult: ...
+
     def health(self) -> ProviderHealth: ...
 
 
@@ -92,6 +135,10 @@ __all__ = [
     "OperatorProvider",
     "ProviderExecuteRequest",
     "ProviderExecuteResult",
+    "ProviderDatasetExecuteRequest",
+    "ProviderDatasetExecuteResult",
+    "ProviderDatasetItem",
+    "ProviderDatasetItemResult",
     "ProviderHealth",
     "ProviderHealthStatus",
     "ProviderOperatorDescriptor",

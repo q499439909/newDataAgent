@@ -1,0 +1,63 @@
+{
+  "id": "benchmark_datajuicer_cpu_341b9602ccb94e73",
+  "version": 1,
+  "parent_version_id": null,
+  "created_by": "system",
+  "change_reason": "operator golden set and performance baseline",
+  "created_at": "2026-07-17T12:35:40.296348Z",
+  "immutable": true,
+  "golden_set_id": "golden_datajuicer_cpu_v1",
+  "provider_id": "datajuicer",
+  "provider_version": "1.5.3",
+  "runtime_backend": "cpu",
+  "hardware": "Windows AMD64 Intel64 Family 6 Model 158 Stepping 13, GenuineIntel",
+  "case_results": [
+    {
+      "case_id": "shape-boundary",
+      "actual_decisions": [
+        "continue",
+        "reject"
+      ],
+      "expected_decisions": [
+        "continue",
+        "reject"
+      ],
+      "duration_seconds": 28.72124650000478,
+      "passed": true,
+      "error": null
+    },
+    {
+      "case_id": "aspect-boundary",
+      "actual_decisions": [
+        "continue",
+        "reject"
+      ],
+      "expected_decisions": [
+        "continue",
+        "reject"
+      ],
+      "duration_seconds": 28.6216186999809,
+      "passed": true,
+      "error": null
+    },
+    {
+      "case_id": "perceptual-duplicate",
+      "actual_decisions": [
+        "continue",
+        "reject"
+      ],
+      "expected_decisions": [
+        "continue",
+        "reject"
+      ],
+      "duration_seconds": 20.89919209998334,
+      "passed": true,
+      "error": null
+    }
+  ],
+  "asset_count": 6,
+  "duration_seconds": 78.24209680000786,
+  "assets_per_second": 0.07668506143612702,
+  "passed": true,
+  "evidence_sha256": "660125afd9e6a81af8f7f7078efb7c2da92e0687208a255706f404fd1dc5ef30"
+}

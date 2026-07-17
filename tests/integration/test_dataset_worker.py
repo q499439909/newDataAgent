@@ -99,6 +99,12 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     assert report["status"] == "PASSED"
     assert report["full_hard_rule_check"] is True
     assert report["semantic_quality_verified"] is False
+    events = client.get(
+        f"/api/runs/{completed['id']}/events",
+        headers={"X-Owner-ID": "user_1"},
+    ).json()
+    event_types = {item["event_type"] for item in events}
+    assert {"run_started", "run_planned", "asset_completed", "run_succeeded"} <= event_types
     assert {path.name: _sha256(path) for path in (first, duplicate)} == source_hashes
 
 

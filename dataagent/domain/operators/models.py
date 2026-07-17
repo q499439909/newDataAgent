@@ -42,6 +42,11 @@ class RuntimeBackend(StrEnum):
     REMOTE = "remote"
 
 
+class ExecutionScope(StrEnum):
+    ASSET = "asset"
+    DATASET = "dataset"
+
+
 class ModelSource(StrEnum):
     OPEN_SOURCE = "open_source"
     INTERNAL = "internal"
@@ -135,6 +140,7 @@ class OperatorSpecVersion(VersionedModel):
     supported_runtime_profiles: tuple[RuntimeProfile, ...] = Field(
         default_factory=lambda: (RuntimeProfile(),)
     )
+    execution_scope: ExecutionScope = ExecutionScope.ASSET
     model_requirement: ModelRequirement | None = None
     # Kept for compatibility with the first milestone. New code uses `implementation`.
     implementation_type: str = "python"

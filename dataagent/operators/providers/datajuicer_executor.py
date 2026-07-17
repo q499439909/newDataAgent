@@ -15,7 +15,14 @@ from typing import Any
 
 from ...domain.operators import AssetRef, RuntimeBackend
 from ..protocol import OperatorResult
-from .protocol import ProviderExecuteRequest, ProviderExecuteResult
+from .protocol import (
+    ProviderDatasetExecuteRequest,
+    ProviderDatasetExecuteResult,
+    ProviderDatasetItem,
+    ProviderDatasetItemResult,
+    ProviderExecuteRequest,
+    ProviderExecuteResult,
+)
 
 
 _SAFE_OPERATOR_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -106,31 +113,60 @@ class DataJuicerProcessExecutor:
         self.allow_model_download = allow_model_download
 
     def __call__(self, request: ProviderExecuteRequest) -> ProviderExecuteResult:
+        batch = self.execute_dataset(
+            ProviderDatasetExecuteRequest(
+                provider_operator_ref=request.provider_operator_ref,
+                runtime_backend=request.runtime_backend,
+                context=request.context,
+                items=(ProviderDatasetItem(asset_id="asset_0", input_data=request.input_data),),
+                parameters=request.parameters,
+            )
+        )
+        return ProviderExecuteResult(
+            ok=batch.ok,
+            result=batch.items[0].result if batch.ok and batch.items else None,
+            error_type=batch.error_type,
+            message=batch.message,
+            duration_seconds=batch.duration_seconds,
+            stdout_tail=batch.stdout_tail,
+            stderr_tail=batch.stderr_tail,
+        )
+
+    def execute_dataset(
+        self, request: ProviderDatasetExecuteRequest
+    ) -> ProviderDatasetExecuteResult:
+        started = time.monotonic()
         if request.runtime_backend != RuntimeBackend.CPU:
-            return ProviderExecuteResult(
+            return ProviderDatasetExecuteResult(
                 ok=False,
                 error_type="unsupported_runtime_backend",
                 message="The local Data-Juicer executor currently supports CPU only",
             )
         if not _SAFE_OPERATOR_NAME.fullmatch(request.provider_operator_ref):
-            return ProviderExecuteResult(
+            return ProviderDatasetExecuteResult(
                 ok=False,
                 error_type="invalid_operator_ref",
                 message="Data-Juicer operator name contains unsupported characters",
             )
-        source = Path(request.input_data.current_path).expanduser().resolve()
-        if not source.is_file():
-            return ProviderExecuteResult(
-                ok=False,
-                error_type="input_not_found",
-                message=f"Input asset not found: {source}",
-            )
+        sources: list[Path] = []
+        for item in request.items:
+            source = Path(item.input_data.current_path).expanduser().resolve()
+            if not source.is_file():
+                return ProviderDatasetExecuteResult(
+                    ok=False,
+                    error_type="input_not_found",
+                    message=f"Input asset not found: {source}",
+                )
+            sources.append(source)
+        if not request.items:
+            return ProviderDatasetExecuteResult(ok=True)
 
         identity = json.dumps(
             {
                 "run_id": request.context.run_id,
                 "operator": request.provider_operator_ref,
-                "source": str(source),
+                "assets": [item.asset_id for item in request.items],
+                "sources": [str(item) for item in sources],
                 "parameters": request.parameters,
             },
             ensure_ascii=False,
@@ -142,13 +178,20 @@ class DataJuicerProcessExecutor:
         input_path = execution_root / "input.jsonl"
         export_path = execution_root / "output.jsonl"
         recipe_path = execution_root / "recipe.yaml"
-        record = {
-            "_dataagent_asset_id": execution_id,
-            "images": [str(source)],
-            "text": "<__dj__image>",
+        internal_ids = {
+            f"asset_{index:08d}": (item, source)
+            for index, (item, source) in enumerate(zip(request.items, sources, strict=True))
         }
+        records = [
+            {
+                "_dataagent_asset_id": internal_id,
+                "images": [str(source)],
+                "text": "<__dj__image>",
+            }
+            for internal_id, (_, source) in internal_ids.items()
+        ]
         input_path.write_text(
-            json.dumps(record, ensure_ascii=False) + "\n",
+            "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
             encoding="utf-8",
         )
         recipe = {
@@ -212,71 +255,122 @@ except ImportError:
                     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
                 }
             )
+        event_sink = request.context.shared.get("event_sink")
+        self._emit(
+            event_sink,
+            "provider_process_started",
+            provider_id="datajuicer",
+            operator_ref=request.provider_operator_ref,
+            item_count=len(request.items),
+        )
         returncode, stdout, stderr, error_type = self._run(
             command,
             execution_root,
             environment,
             request.context.shared.get("cancel_check"),
         )
+        duration = time.monotonic() - started
+        stdout_tail = _tail(stdout)
+        stderr_tail = _tail(stderr)
+        self._emit(
+            event_sink,
+            "provider_process_completed",
+            provider_id="datajuicer",
+            operator_ref=request.provider_operator_ref,
+            item_count=len(request.items),
+            returncode=returncode,
+            duration_seconds=round(duration, 6),
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        )
         if returncode != 0:
-            return ProviderExecuteResult(
+            return ProviderDatasetExecuteResult(
                 ok=False,
                 error_type=error_type or "command_failed",
-                message=_tail(stderr or stdout) or "Data-Juicer execution failed",
+                message=stderr_tail or stdout_tail or "Data-Juicer execution failed",
+                duration_seconds=duration,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             )
         try:
             rows = self._read_jsonl(export_path)
         except Exception as exc:
-            return ProviderExecuteResult(
+            return ProviderDatasetExecuteResult(
                 ok=False,
                 error_type="invalid_provider_output",
                 message=str(exc),
+                duration_seconds=duration,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
             )
-
-        kept = next(
-            (
-                row
-                for row in rows
-                if row.get("_dataagent_asset_id") == execution_id
-            ),
-            rows[0] if rows else None,
-        )
-        decision = "continue" if kept is not None else "reject"
-        output_fields = {
-            key: value
-            for key, value in (kept or {}).items()
-            if key not in {"_dataagent_asset_id", "images", "text"}
+        rows_by_id = {
+            str(row.get("_dataagent_asset_id")): row
+            for row in rows
+            if row.get("_dataagent_asset_id") is not None
         }
-        output_path = str(source)
-        images = (kept or {}).get("images", [])
-        if isinstance(images, list) and images:
-            candidate = Path(str(images[0])).expanduser()
-            if not candidate.is_absolute():
-                candidate = (execution_root / candidate).resolve()
-            if candidate.is_file():
-                output_path = str(candidate)
+        if rows and not rows_by_id:
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="provider_identity_lost",
+                message="Data-Juicer output did not preserve DataAgent asset ids",
+                duration_seconds=duration,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
         artifact = AssetRef(
             uri=str(export_path),
             media_type="application/x-ndjson",
             sha256=hashlib.sha256(export_path.read_bytes()).hexdigest(),
         )
-        return ProviderExecuteResult(
+        results: list[ProviderDatasetItemResult] = []
+        for internal_id, (item, source) in internal_ids.items():
+            kept = rows_by_id.get(internal_id)
+            output_fields = {
+                key: value
+                for key, value in (kept or {}).items()
+                if key not in {"_dataagent_asset_id", "images", "text"}
+            }
+            output_path = str(source)
+            images = (kept or {}).get("images", [])
+            if isinstance(images, list) and images:
+                candidate = Path(str(images[0])).expanduser()
+                if not candidate.is_absolute():
+                    candidate = (execution_root / candidate).resolve()
+                if candidate.is_file():
+                    output_path = str(candidate)
+            results.append(
+                ProviderDatasetItemResult(
+                    asset_id=item.asset_id,
+                    result=OperatorResult(
+                        output_path=output_path,
+                        metrics=item.input_data.metrics,
+                        labels={
+                            **item.input_data.labels,
+                            "datajuicer_operator": request.provider_operator_ref,
+                            "datajuicer_output": output_fields,
+                        },
+                        artifacts=[*item.input_data.artifacts, artifact],
+                        annotations=item.input_data.annotations,
+                        embeddings=item.input_data.embeddings,
+                        decision="continue" if kept is not None else "reject",
+                        reason_codes=(
+                            [] if kept is not None else ["DATAJUICER_FILTERED_OUT"]
+                        ),
+                    ),
+                )
+            )
+        return ProviderDatasetExecuteResult(
             ok=True,
-            result=OperatorResult(
-                output_path=output_path,
-                metrics=request.input_data.metrics,
-                labels={
-                    **request.input_data.labels,
-                    "datajuicer_operator": request.provider_operator_ref,
-                    "datajuicer_output": output_fields,
-                },
-                artifacts=[*request.input_data.artifacts, artifact],
-                annotations=request.input_data.annotations,
-                embeddings=request.input_data.embeddings,
-                decision=decision,
-                reason_codes=[] if kept is not None else ["DATAJUICER_FILTERED_OUT"],
-            ),
+            items=tuple(results),
+            duration_seconds=duration,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
         )
+
+    @staticmethod
+    def _emit(event_sink: Any, event_type: str, **details: Any) -> None:
+        if isinstance(event_sink, Callable):
+            event_sink(event_type, details)
 
     def _run(
         self,

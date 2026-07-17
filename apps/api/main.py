@@ -398,6 +398,21 @@ def create_app(
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/api/runs/{run_id}/events")
+    def get_dataset_run_events(
+        run_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> list[dict[str, Any]]:
+        try:
+            return agent_runtime.get_run_events(run_id=run_id, owner_id=owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/api/datasets/{dataset_version_id}")
     def get_dataset_version(
         dataset_version_id: str,

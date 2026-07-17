@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.pipelines import PipelineVersion
-from ..domain.operators import AnnotationRef, AssetRef, EmbeddingRef
+from ..domain.operators import AnnotationRef, AssetRef, EmbeddingRef, ExecutionScope, OperatorCategory
 from ..domain.runs import DatasetAsset, DatasetVersion
 from ..domain.specs import TaskSpecVersion
 from ..evaluation import QualityEvaluator
@@ -67,25 +67,53 @@ class DatasetRunExecutor:
 
     def execute(self, run_id: str) -> dict[str, Any]:
         run = self.run_store.get(run_id)
+        self.run_store.add_event(run_id, "run_started", {"status": run["status"]})
         try:
             dataset = self._execute(run)
         except Exception as exc:
+            current_status = self.run_store.get(run_id)["status"]
+            if current_status == "CANCELLING":
+                self.run_store.mark_cancelled(run_id)
+                self.run_store.add_event(run_id, "run_cancelled", {"reason": str(exc)})
+                return self.run_store.get(run_id)
+            if current_status == "PAUSING":
+                self.run_store.mark_paused(run_id)
+                self.run_store.add_event(run_id, "run_paused", {"reason": str(exc)})
+                return self.run_store.get(run_id)
             self.run_store.mark_failed(run_id, str(exc))
+            self.run_store.add_event(
+                run_id,
+                "run_failed",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+            )
             raise
         if dataset is not None:
             self.run_store.mark_evaluating(run_id)
-            self.quality_evaluator.evaluate(
-                dataset=dataset,
-                spec=TaskSpecVersion.model_validate(
-                    self.version_store.get(
-                        kind="task_spec",
-                        entity_id=run["task_spec_version_id"],
-                        owner_id=run["owner_id"],
-                    )
-                ),
-                owner_id=run["owner_id"],
-            )
+            self.run_store.add_event(run_id, "evaluation_started")
+            try:
+                self.quality_evaluator.evaluate(
+                    dataset=dataset,
+                    spec=TaskSpecVersion.model_validate(
+                        self.version_store.get(
+                            kind="task_spec",
+                            entity_id=run["task_spec_version_id"],
+                            owner_id=run["owner_id"],
+                        )
+                    ),
+                    owner_id=run["owner_id"],
+                )
+            except Exception as exc:
+                self.run_store.mark_failed(run_id, str(exc))
+                self.run_store.add_event(
+                    run_id,
+                    "run_failed",
+                    {"stage": "evaluation", "error_type": type(exc).__name__, "error": str(exc)},
+                )
+                raise
             self.run_store.mark_succeeded(run_id, dataset.id)
+            self.run_store.add_event(
+                run_id, "run_succeeded", {"dataset_version_id": dataset.id}
+            )
         return self.run_store.get(run_id)
 
     def _execute(self, run: dict[str, Any]) -> DatasetVersion | None:
@@ -134,10 +162,42 @@ class DatasetRunExecutor:
             raise ValueError("No supported images found in the approved data sources")
         self.run_store.set_total(run["id"], len(planned))
         self.operator_runtime.validate_pipeline(pipeline)
+        ordered_nodes = _ordered_nodes(pipeline)
+        encountered_asset_processing = False
+        for node in ordered_nodes:
+            operator_spec = self.operator_runtime.get(node.operator_version_id).spec
+            if operator_spec.execution_scope == ExecutionScope.DATASET:
+                if encountered_asset_processing:
+                    raise ValueError(
+                        "Dataset-scoped operators must precede asset filtering and transforms"
+                    )
+            elif operator_spec.primary_category != OperatorCategory.INGESTION:
+                encountered_asset_processing = True
+        self.run_store.add_event(
+            run["id"],
+            "run_planned",
+            {"asset_count": len(planned), "node_count": len(ordered_nodes)},
+        )
 
         existing = self.run_store.items(run["id"])
         if len(existing) > len(planned):
             raise RuntimeError("Run checkpoint has more assets than the current source plan")
+        def cancel_check() -> bool:
+            return self.run_store.get(run["id"])["status"] in {
+                "CANCELLING",
+                "PAUSING",
+            }
+
+        def event_sink(event_type: str, details: dict[str, Any]) -> None:
+            payload = dict(details)
+            self.run_store.add_event(
+                run["id"],
+                event_type,
+                payload,
+                node_id=str(context.shared.get("active_node_id") or "") or None,
+                provider_id=payload.get("provider_id"),
+            )
+
         context = OperatorContext(
             run_id=run["id"],
             work_order_id=run["work_order_id"],
@@ -145,6 +205,8 @@ class DatasetRunExecutor:
             shared={
                 "seen_dhash": set(),
                 "artifact_root": self.home / "runs" / run["id"] / "artifacts",
+                "cancel_check": cancel_check,
+                "event_sink": event_sink,
             },
         )
         for item in existing:
@@ -153,6 +215,39 @@ class DatasetRunExecutor:
                 context.shared["seen_dhash"].add(dhash)
 
         staging_files = self.home / "runs" / run["id"] / "files"
+        raw_inputs = tuple(
+            OperatorInput(
+                source_path=item["source_uri"], current_path=item["source_uri"]
+            )
+            for item in planned
+        )
+        for node in ordered_nodes:
+            context.shared["active_node_id"] = node.id
+            operator = self.operator_runtime.get(node.operator_version_id)
+            if operator.spec.execution_scope != ExecutionScope.DATASET:
+                continue
+            self.run_store.add_event(
+                run["id"],
+                "dataset_node_started",
+                {"operator_version_id": node.operator_version_id, "asset_count": len(raw_inputs)},
+                node_id=node.id,
+                provider_id=operator.spec.provider.provider_id,
+            )
+            self.operator_runtime.prepare_dataset_node(
+                operator_version_id=node.operator_version_id,
+                node_id=node.id,
+                context=context,
+                inputs=raw_inputs,
+                parameters=node.parameters,
+                runtime_backend=node.runtime_backend,
+            )
+            self.run_store.add_event(
+                run["id"],
+                "dataset_node_completed",
+                {"operator_version_id": node.operator_version_id, "asset_count": len(raw_inputs)},
+                node_id=node.id,
+                provider_id=operator.spec.provider.provider_id,
+            )
         for sequence, planned_source in enumerate(planned):
             source = Path(planned_source["source_uri"])
             relative_path = Path(planned_source["output_relative_path"])
@@ -168,16 +263,19 @@ class DatasetRunExecutor:
             status = self.run_store.get(run["id"])["status"]
             if status == "PAUSING":
                 self.run_store.mark_paused(run["id"])
+                self.run_store.add_event(run["id"], "run_paused")
                 return None
             if status == "CANCELLING":
                 self.run_store.mark_cancelled(run["id"])
+                self.run_store.add_event(run["id"], "run_cancelled")
                 return None
 
             current = OperatorInput(source_path=str(source), current_path=str(source))
             decision = "keep"
             reason_codes: list[str] = []
             try:
-                for node in _ordered_nodes(pipeline):
+                for node in ordered_nodes:
+                    context.shared["active_node_id"] = node.id
                     result = self.operator_runtime.execute(
                         operator_version_id=node.operator_version_id,
                         context=context,
@@ -229,6 +327,12 @@ class DatasetRunExecutor:
                     "metrics": current.metrics,
                     "labels": self._checkpoint_labels(current),
                 },
+            )
+            self.run_store.add_event(
+                run["id"],
+                "asset_completed",
+                {"sequence": sequence, "decision": decision, "source_uri": str(source)},
+                progress=sequence + 1,
             )
 
         completed = self.run_store.items(run["id"])
