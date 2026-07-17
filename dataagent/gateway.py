@@ -146,7 +146,7 @@ class ModelGateway:
             self.settings.planning_model,
             system,
             json.dumps(payload, ensure_ascii=False),
-            max_tokens=1200,
+            max_tokens=700,
         )
         return _extract_json(result.text), result.usage
 

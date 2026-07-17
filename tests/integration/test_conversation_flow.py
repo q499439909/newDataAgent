@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from time import perf_counter
 
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.conversation import ConversationService
@@ -12,8 +13,10 @@ class FakeConversationGateway:
 
     def __init__(self, decisions):
         self.decisions = list(decisions)
+        self.calls = 0
 
     def conversation_turn(self, *, history, context):
+        self.calls += 1
         assert history[-1]["role"] == "user"
         return self.decisions.pop(0), None
 
@@ -30,33 +33,41 @@ def _settings(tmp_path) -> Settings:
     )
 
 
-def test_conversation_safety_gate_keeps_usage_question_out_of_work_orders(tmp_path) -> None:
+def test_common_system_questions_use_fast_path_without_model_call(tmp_path) -> None:
     runtime = AgentRuntime(tmp_path / "runtime")
     assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            {
+                "intent": "START_WORK_ORDER",
+                "reply": "incorrect model response",
+                "requirement": "教我怎么使用",
+            }
+        ]
+    )
     service = ConversationService(
         store=runtime.conversation_store,
         agent_runtime=runtime,
         settings=_settings(tmp_path),
-        gateway=FakeConversationGateway(
-            [
-                {
-                    "intent": "START_WORK_ORDER",
-                    "reply": "我来说明使用方法。",
-                    "requirement": "教我怎么使用",
-                }
-            ]
-        ),
+        gateway=gateway,
     )
     conversation = service.create("user_1")
 
-    response = service.send(
-        thread_id=conversation["id"], owner_id="user_1", content="教我怎么使用"
-    )
+    responses = []
+    for content in ("教我怎么使用", "how to use", "what model"):
+        started = perf_counter()
+        response = service.send(
+            thread_id=conversation["id"], owner_id="user_1", content=content
+        )
+        responses.append((response, perf_counter() - started))
+    response = responses[0][0]
 
     assert response["work_order_id"] is None
     assert response["turn"] is None
-    assert response["reply"] == "我来说明使用方法。"
-    assert [item["role"] for item in response["messages"]] == ["user", "assistant"]
+    assert "不需要记命令" in response["reply"]
+    assert gateway.calls == 0
+    assert all(item_elapsed < 1.0 for _, item_elapsed in responses)
+    assert len(responses[-1][0]["messages"]) == 6
     with pytest.raises(PermissionError):
         service.get(conversation["id"], "user_2")
 

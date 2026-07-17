@@ -107,6 +107,9 @@ class ConversationService:
         history: list[dict[str, Any]],
         context: dict[str, Any],
     ) -> ConversationDecision:
+        fast = self._fast_decision(content)
+        if fast is not None:
+            return fast
         fallback = self._fallback_decision(content, context)
         if not self.gateway.configured:
             return fallback
@@ -130,6 +133,49 @@ class ConversationService:
         ):
             return decision.model_copy(update={"intent": ConversationIntent.CHAT})
         return decision
+
+    def _fast_decision(self, content: str) -> ConversationDecision | None:
+        normalized = content.strip().lower().strip("!！。,.，~～ ")
+        if normalized in {"你好", "您好", "嗨", "hi", "hello", "hey"}:
+            return ConversationDecision(
+                reply="你好，我是 DataAgent。你可以直接问我问题，也可以描述图片数据任务。"
+            )
+        if normalized in {"你是谁", "你叫什么", "who are you"}:
+            return ConversationDecision(
+                reply="我是 DataAgent，负责把图片数据需求规划、执行并评测成可追溯的数据版本。"
+            )
+        if any(
+            token in normalized
+            for token in (
+                "怎么使用",
+                "如何使用",
+                "怎么用",
+                "能做什么",
+                "帮助",
+                "how to use",
+                "how do i use",
+                "what can you do",
+                "help",
+            )
+        ):
+            return ConversationDecision(
+                reply=(
+                    "直接描述你的图片数据目标即可，例如“筛选清晰人像并去重”。"
+                    "我会在信息不足时追问目录和约束，方案确认后再运行，不需要记命令。"
+                )
+            )
+        if any(
+            token in normalized
+            for token in ("什么模型", "哪个模型", "what model", "which model")
+        ):
+            return ConversationDecision(
+                reply=f"当前需要模型理解的对话由 {self.settings.planning_model} 处理。"
+            )
+        if normalized in {"谢谢", "感谢", "thanks", "thank you"}:
+            return ConversationDecision(reply="不客气。继续说你的需求就好。")
+        if normalized in {"再见", "拜拜", "bye", "goodbye"}:
+            return ConversationDecision(reply="再见。下次可以用 conversation ID 接着这段任务继续。")
+        return None
 
     def _apply(
         self,
