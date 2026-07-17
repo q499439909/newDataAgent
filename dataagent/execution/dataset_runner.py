@@ -9,6 +9,7 @@ from typing import Any
 from ..domain.pipelines import PipelineVersion
 from ..domain.runs import DatasetAsset, DatasetVersion
 from ..domain.specs import TaskSpecVersion
+from ..evaluation import QualityEvaluator
 from ..imaging import scan_images
 from ..infrastructure import DomainVersionStore, RunStore
 from ..operators import OperatorRuntime
@@ -52,11 +53,13 @@ class DatasetRunExecutor:
         run_store: RunStore,
         version_store: DomainVersionStore,
         operator_runtime: OperatorRuntime,
+        quality_evaluator: QualityEvaluator,
     ) -> None:
         self.home = home.resolve()
         self.run_store = run_store
         self.version_store = version_store
         self.operator_runtime = operator_runtime
+        self.quality_evaluator = quality_evaluator
 
     def execute(self, run_id: str) -> dict[str, Any]:
         run = self.run_store.get(run_id)
@@ -66,6 +69,18 @@ class DatasetRunExecutor:
             self.run_store.mark_failed(run_id, str(exc))
             raise
         if dataset is not None:
+            self.run_store.mark_evaluating(run_id)
+            self.quality_evaluator.evaluate(
+                dataset=dataset,
+                spec=TaskSpecVersion.model_validate(
+                    self.version_store.get(
+                        kind="task_spec",
+                        entity_id=run["task_spec_version_id"],
+                        owner_id=run["owner_id"],
+                    )
+                ),
+                owner_id=run["owner_id"],
+            )
             self.run_store.mark_succeeded(run_id, dataset.id)
         return self.run_store.get(run_id)
 

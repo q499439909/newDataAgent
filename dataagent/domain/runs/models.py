@@ -16,6 +16,7 @@ class RunStatus(StrEnum):
     PAUSED = "PAUSED"
     CANCELLING = "CANCELLING"
     CANCELLED = "CANCELLED"
+    EVALUATING = "EVALUATING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
 
@@ -34,6 +35,7 @@ class RunSnapshot(DomainModel):
     failed: int = Field(default=0, ge=0)
     idempotency_key: str
     dataset_version_id: str | None = None
+    qc_report_id: str | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

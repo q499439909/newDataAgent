@@ -299,7 +299,7 @@ class RunStore:
         with self.database.session() as session, session.begin():
             session.execute(
                 update(RunRow)
-                .where(RunRow.status == "RUNNING")
+                .where(RunRow.status.in_(("RUNNING", "EVALUATING")))
                 .values(status="QUEUED", updated_at=now)
             )
             session.execute(
@@ -422,6 +422,9 @@ class RunStore:
             dataset_version_id=dataset_version_id,
             control_requested=False,
         )
+
+    def mark_evaluating(self, run_id: str) -> None:
+        self._update(run_id, status="EVALUATING", control_requested=False)
 
     def mark_failed(self, run_id: str, error: str) -> None:
         self._update(run_id, status="FAILED", error=error, control_requested=False)

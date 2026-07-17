@@ -43,7 +43,7 @@ API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将�
 
 本地部署配置使用 SQLite 持久队列和单 Worker。Agent 审批完成后，通过 `POST /api/work-orders/{work_order_id}/runs` 提交 Run；请求必须带 `Idempotency-Key`，重复提交同一键只返回原 Run。Worker 只接受已确认 TaskSpec 和已批准 PipelineVersion，逐图保存断点并支持暂停、恢复和取消。进程异常退出后，重新启动 Worker 会从已保存的资产断点继续。
 
-当前本地 Worker 支持 `local_directory` 图片源。成功 Run 将只读校验原图，在 `DATAAGENT_HOME/platform/datasets` 下发布不可变 DatasetVersion、Manifest 和保留图片副本；空输出或原图执行期间发生变化时禁止发布。
+当前本地 Worker 支持 `local_directory` 图片源。成功 Run 将只读校验原图，在 `DATAAGENT_HOME/platform/datasets` 下发布不可变 DatasetVersion、Manifest 和保留图片副本；空输出或原图执行期间发生变化时禁止发布。发布后由独立 Quality Evaluator 对保留资产执行全量硬规则检查，生成版本化 QCReport；尚未接入 Golden Set 时会明确标记语义质量未经验证，不把清晰度等代理指标描述为真实准确率。
 
 相关控制面接口：
 
@@ -51,6 +51,7 @@ API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将�
 - `GET /api/runs/{run_id}`：查看进度和结果；
 - `POST /api/runs/{run_id}/control`：执行 `pause`、`resume` 或 `cancel`；
 - `GET /api/datasets/{dataset_version_id}`：查看 DatasetVersion 和资产血缘。
+- `GET /api/qc-reports/{qc_report_id}`：查看质量结论、指标、失败资产和返工建议。
 
 DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..execution import DatasetRunExecutor
+from ..evaluation import QualityEvaluator
 from ..infrastructure import DomainVersionStore, RunStore, SqliteDatabase
 from ..operators import OperatorRuntime
 from ..operators.builtin import builtin_image_operators
@@ -25,6 +26,7 @@ class LocalRunWorker:
             run_store=self.run_store,
             version_store=self.version_store,
             operator_runtime=OperatorRuntime(builtin_image_operators()),
+            quality_evaluator=QualityEvaluator(self.version_store),
         )
 
     def process_next(self) -> dict[str, Any] | None:

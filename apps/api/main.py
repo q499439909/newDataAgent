@@ -247,6 +247,21 @@ def create_app(runtime: AgentRuntime | None = None) -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/api/qc-reports/{qc_report_id}")
+    def get_qc_report(
+        qc_report_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.get_qc_report(
+                qc_report_id=qc_report_id, owner_id=owner_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return app
 
 

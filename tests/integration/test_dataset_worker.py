@@ -82,6 +82,7 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     run = client.get(
         f"/api/runs/{completed['id']}", headers={"X-Owner-ID": "user_1"}
     ).json()
+    assert run["qc_report_id"]
     dataset = client.get(
         f"/api/datasets/{run['dataset_version_id']}",
         headers={"X-Owner-ID": "user_1"},
@@ -90,6 +91,14 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     assert dataset["kept_count"] == 1
     assert dataset["rejected_count"] == 1
     assert dataset["original_files_unchanged"] is True
+    report = client.get(
+        f"/api/qc-reports/{run['qc_report_id']}",
+        headers={"X-Owner-ID": "user_1"},
+    ).json()
+    assert report["dataset_version_id"] == dataset["id"]
+    assert report["status"] == "PASSED"
+    assert report["full_hard_rule_check"] is True
+    assert report["semantic_quality_verified"] is False
     assert {path.name: _sha256(path) for path in (first, duplicate)} == source_hashes
 
 

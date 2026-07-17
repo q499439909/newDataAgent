@@ -10,6 +10,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from ..domain.common import new_id
+from ..domain.evaluations import QCReport
 from ..domain.pipelines import PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
@@ -197,21 +198,19 @@ class AgentRuntime:
             task_spec_version_id=spec.id,
             idempotency_key=idempotency_key,
         )
-        return RunSnapshot.model_validate(run).model_dump(mode="json")
+        return self._run_payload(run)
 
     def get_run(self, *, run_id: str, owner_id: str) -> dict[str, Any]:
         if self.run_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
-        return RunSnapshot.model_validate(
-            self.run_store.get(run_id, owner_id)
-        ).model_dump(mode="json")
+        return self._run_payload(self.run_store.get(run_id, owner_id))
 
     def list_runs(self, *, work_order_id: str, owner_id: str) -> list[dict[str, Any]]:
         self._get_authorized(work_order_id, owner_id)
         if self.run_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
         return [
-            RunSnapshot.model_validate(item).model_dump(mode="json")
+            self._run_payload(item)
             for item in self.run_store.list_for_work_order(work_order_id, owner_id)
         ]
 
@@ -227,9 +226,7 @@ class AgentRuntime:
             handler = handlers[action]
         except KeyError as exc:
             raise ValueError(f"Unsupported run action: {action}") from exc
-        return RunSnapshot.model_validate(
-            handler(run_id, owner_id)
-        ).model_dump(mode="json")
+        return self._run_payload(handler(run_id, owner_id))
 
     def get_dataset(self, *, dataset_version_id: str, owner_id: str) -> dict[str, Any]:
         if self.version_store is None:
@@ -238,6 +235,27 @@ class AgentRuntime:
             kind="dataset", entity_id=dataset_version_id, owner_id=owner_id
         )
         return DatasetVersion.model_validate(payload).model_dump(mode="json")
+
+    def get_qc_report(self, *, qc_report_id: str, owner_id: str) -> dict[str, Any]:
+        if self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for quality reports")
+        payload = self.version_store.get(
+            kind="qc_report", entity_id=qc_report_id, owner_id=owner_id
+        )
+        return QCReport.model_validate(payload).model_dump(mode="json")
+
+    def _run_payload(self, run: dict[str, Any]) -> dict[str, Any]:
+        if self.version_store is not None:
+            reports = [
+                item
+                for item in self.version_store.list_for_owner(
+                    kind="qc_report", owner_id=run["owner_id"]
+                )
+                if item.get("run_id") == run["id"]
+            ]
+            if reports:
+                run = {**run, "qc_report_id": reports[-1]["id"]}
+        return RunSnapshot.model_validate(run).model_dump(mode="json")
 
     def _get_authorized(self, work_order_id: str, owner_id: str) -> AgentThread:
         record = self._lookup(work_order_id)
