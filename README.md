@@ -2,7 +2,7 @@
 
 DataAgent 是一个面向图片数据生产的本地 CLI。它把自然语言需求转换为 `TaskSpec`，在同一批图片上比较“保留优先、均衡、质量优先”三类 Pipeline，经边界样本审核后执行全量任务，并输出不可变数据版本和可复用 Pipeline。
 
-仓库正在按最终 PRD 迁移为“四个专业 Agent + LangGraph + 统一控制面”的完整平台。原 CLI 继续可用；新增控制面已经支持四 Agent 子图、两处 HITL interrupt、SQLite checkpoint、正式版本追加存储、分类算子库和真实图片节点预览。
+仓库正在按最终 PRD 迁移为“四个专业 Agent + LangGraph + 统一控制面”的完整平台。原 CLI 继续可用；新增控制面已经支持四 Agent 子图、两处 HITL interrupt、SQLite checkpoint、正式版本追加存储、分类算子库、真实图片节点预览，以及独立 Worker 驱动的 DatasetVersion 生产闭环。
 
 ## 安装
 
@@ -32,6 +32,25 @@ python -m venv .venv
 - 任务数据源范围内的真实节点图片预览。
 
 API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将由 Session 自动注入，客户端不能自行指定他人 Owner。
+
+## 启动本地执行 Worker
+
+另开一个 PowerShell 窗口运行：
+
+```powershell
+.\.venv\Scripts\dataagent-worker.exe
+```
+
+本地部署配置使用 SQLite 持久队列和单 Worker。Agent 审批完成后，通过 `POST /api/work-orders/{work_order_id}/runs` 提交 Run；请求必须带 `Idempotency-Key`，重复提交同一键只返回原 Run。Worker 只接受已确认 TaskSpec 和已批准 PipelineVersion，逐图保存断点并支持暂停、恢复和取消。进程异常退出后，重新启动 Worker 会从已保存的资产断点继续。
+
+当前本地 Worker 支持 `local_directory` 图片源。成功 Run 将只读校验原图，在 `DATAAGENT_HOME/platform/datasets` 下发布不可变 DatasetVersion、Manifest 和保留图片副本；空输出或原图执行期间发生变化时禁止发布。
+
+相关控制面接口：
+
+- `GET /api/work-orders/{work_order_id}/runs`：查看工单 Run；
+- `GET /api/runs/{run_id}`：查看进度和结果；
+- `POST /api/runs/{run_id}/control`：执行 `pause`、`resume` 或 `cancel`；
+- `GET /api/datasets/{dataset_version_id}`：查看 DatasetVersion 和资产血缘。
 
 DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
 

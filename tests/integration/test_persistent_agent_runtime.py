@@ -48,9 +48,11 @@ def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None
     assert len(
         final_runtime.version_store.list_for_owner(kind="retrieval_plan", owner_id="user_1")
     ) == 1
-    assert len(
-        final_runtime.version_store.list_for_owner(kind="pipeline", owner_id="user_1")
-    ) == 6
+    pipelines = final_runtime.version_store.list_for_owner(
+        kind="pipeline", owner_id="user_1"
+    )
+    assert len(pipelines) == 7
+    assert sum(item["approved"] for item in pipelines) == 1
     assert len(
         final_runtime.version_store.list_for_owner(kind="sampling_plan", owner_id="user_1")
     ) == 1

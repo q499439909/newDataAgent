@@ -11,10 +11,11 @@ from langgraph.types import Command
 
 from ..domain.common import new_id
 from ..domain.pipelines import PipelineVersion
+from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
 from ..graph import build_main_graph
-from ..infrastructure import AgentThreadStore, DomainVersionStore, SqliteDatabase
+from ..infrastructure import AgentThreadStore, DomainVersionStore, RunStore, SqliteDatabase
 from ..operators import OperatorRegistry, OperatorRuntime
 from ..operators.builtin import builtin_image_operators
 
@@ -35,6 +36,7 @@ class AgentRuntime:
         self._checkpoint_connection: sqlite3.Connection | None = None
         self.thread_store: AgentThreadStore | None = None
         self.version_store: DomainVersionStore | None = None
+        self.run_store: RunStore | None = None
         if home is None:
             self.checkpointer = InMemorySaver()
         else:
@@ -44,6 +46,7 @@ class AgentRuntime:
             database = SqliteDatabase(control_path)
             self.thread_store = AgentThreadStore(database)
             self.version_store = DomainVersionStore(database)
+            self.run_store = RunStore(database)
             self._checkpoint_connection = sqlite3.connect(
                 home / "checkpoints.db", check_same_thread=False
             )
@@ -158,6 +161,84 @@ class AgentRuntime:
         )
         return payload
 
+    def submit_dataset_run(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        record = self._get_authorized(work_order_id, owner_id)
+        if self.run_store is None or self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        snapshot = self.graph.get_state(self._config(record))
+        if snapshot.interrupts:
+            raise ValueError("Agent workflow still requires approval")
+        state = dict(snapshot.values)
+        if state.get("terminated"):
+            raise ValueError("Terminated work orders cannot submit dataset runs")
+        pipeline_id = state.get("selected_pipeline_id")
+        spec_payload = state.get("task_spec")
+        if not pipeline_id or not spec_payload or state.get("next_action") != "submit_dataset_run":
+            raise ValueError("Work order is not ready to submit a dataset run")
+        pipeline = PipelineVersion.model_validate(
+            self.version_store.get(
+                kind="pipeline", entity_id=pipeline_id, owner_id=owner_id
+            )
+        )
+        if not pipeline.approved:
+            raise ValueError("Selected PipelineVersion is not approved")
+        spec = TaskSpecVersion.model_validate(spec_payload)
+        run = self.run_store.create(
+            run_id=new_id("run"),
+            work_order_id=work_order_id,
+            owner_id=owner_id,
+            pipeline_version_id=pipeline.id,
+            task_spec_version_id=spec.id,
+            idempotency_key=idempotency_key,
+        )
+        return RunSnapshot.model_validate(run).model_dump(mode="json")
+
+    def get_run(self, *, run_id: str, owner_id: str) -> dict[str, Any]:
+        if self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        return RunSnapshot.model_validate(
+            self.run_store.get(run_id, owner_id)
+        ).model_dump(mode="json")
+
+    def list_runs(self, *, work_order_id: str, owner_id: str) -> list[dict[str, Any]]:
+        self._get_authorized(work_order_id, owner_id)
+        if self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        return [
+            RunSnapshot.model_validate(item).model_dump(mode="json")
+            for item in self.run_store.list_for_work_order(work_order_id, owner_id)
+        ]
+
+    def control_run(self, *, run_id: str, owner_id: str, action: str) -> dict[str, Any]:
+        if self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        handlers = {
+            "pause": self.run_store.request_pause,
+            "resume": self.run_store.resume,
+            "cancel": self.run_store.request_cancel,
+        }
+        try:
+            handler = handlers[action]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported run action: {action}") from exc
+        return RunSnapshot.model_validate(
+            handler(run_id, owner_id)
+        ).model_dump(mode="json")
+
+    def get_dataset(self, *, dataset_version_id: str, owner_id: str) -> dict[str, Any]:
+        if self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for datasets")
+        payload = self.version_store.get(
+            kind="dataset", entity_id=dataset_version_id, owner_id=owner_id
+        )
+        return DatasetVersion.model_validate(payload).model_dump(mode="json")
+
     def _get_authorized(self, work_order_id: str, owner_id: str) -> AgentThread:
         record = self._lookup(work_order_id)
         if record.owner_id != owner_id:
@@ -200,6 +281,11 @@ class AgentRuntime:
         for payload in result.get("pipeline_variants", ()):
             self.version_store.save_if_absent(
                 kind="pipeline", owner_id=record.owner_id, payload=payload
+            )
+        approved_pipeline = result.get("approved_pipeline")
+        if approved_pipeline:
+            self.version_store.save_if_absent(
+                kind="pipeline", owner_id=record.owner_id, payload=approved_pipeline
             )
 
     @staticmethod

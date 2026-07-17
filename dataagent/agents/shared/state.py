@@ -18,6 +18,7 @@ class WorkOrderGraphState(TypedDict, total=False):
 
     pipeline_variants: list[dict[str, Any]]
     representative_pipelines: list[dict[str, Any]]
+    approved_pipeline: dict[str, Any]
     selected_pipeline_id: str
     pipeline_approval: dict[str, Any]
 

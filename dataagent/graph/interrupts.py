@@ -67,7 +67,7 @@ def approve_pipeline(state: WorkOrderGraphState) -> dict[str, Any]:
                 }
                 for item in representatives
             ],
-            "default_strategy": PipelineStrategy.BALANCED,
+            "default_strategy": PipelineStrategy.BALANCED.value,
             "allowed_actions": ["approve", "reject", "edit_parameters", "terminate"],
         }
     )
@@ -86,8 +86,25 @@ def approve_pipeline(state: WorkOrderGraphState) -> dict[str, Any]:
         )
     if selected_id not in {item.id for item in representatives}:
         raise ValueError("Selected pipeline is not one of the representative pipelines")
+    selected = next(item for item in representatives if item.id == selected_id)
+    family_versions = [
+        PipelineVersion.model_validate(item)
+        for item in state.get("pipeline_variants", ())
+        if item.get("family_id") == selected.family_id
+    ]
+    approved_pipeline = selected.model_copy(
+        update={
+            "id": new_id("pipeline_version"),
+            "version": max(item.version for item in family_versions) + 1,
+            "parent_version_id": selected.id,
+            "created_by": state["owner_id"],
+            "change_reason": "Pipeline approved by user",
+            "approved": True,
+        }
+    )
     return {
-        "selected_pipeline_id": selected_id,
+        "approved_pipeline": approved_pipeline.model_dump(mode="json"),
+        "selected_pipeline_id": approved_pipeline.id,
         "pipeline_approval": decision if isinstance(decision, dict) else {"approved": True},
         "next_action": "run_strategy_agent",
         "trace": append_trace(state, "hitl:pipeline_approved"),

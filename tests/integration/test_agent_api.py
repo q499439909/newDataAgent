@@ -55,7 +55,9 @@ def test_web_and_tui_can_share_and_resume_one_agent_thread() -> None:
     final = pipeline_approved.json()
     assert final["thread_id"] == first["thread_id"]
     assert final["interrupts"] == []
-    assert final["state"]["selected_pipeline_id"] == balanced["id"]
+    assert final["state"]["selected_pipeline_id"] != balanced["id"]
+    assert final["state"]["approved_pipeline"]["parent_version_id"] == balanced["id"]
+    assert final["state"]["approved_pipeline"]["approved"] is True
     assert final["state"]["sampling_plan"]["random_seed"] == 42
 
 

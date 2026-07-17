@@ -48,7 +48,10 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
         Command(resume={"approved": True, "pipeline_id": balanced["id"]}), config
     )
     assert "__interrupt__" not in final
-    assert final["selected_pipeline_id"] == balanced["id"]
+    assert final["selected_pipeline_id"] != balanced["id"]
+    assert final["approved_pipeline"]["parent_version_id"] == balanced["id"]
+    assert final["approved_pipeline"]["approved"] is True
+    assert final["approved_pipeline"]["version"] == 3
     assert final["sampling_plan"]["random_seed"] == 42
     assert final["next_action"] == "submit_dataset_run"
     assert final["trace"] == [

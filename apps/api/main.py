@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +29,12 @@ class BuildPreviewRequest(BaseModel):
 
     pipeline_version_id: str
     source_path: str
+
+
+class RunControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["pause", "resume", "cancel"]
 
 
 class AgentTurnResponse(BaseModel):
@@ -156,6 +162,89 @@ def create_app(runtime: AgentRuntime | None = None) -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/work-orders/{work_order_id}/runs", status_code=status.HTTP_202_ACCEPTED)
+    def submit_dataset_run(
+        work_order_id: str,
+        idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.submit_dataset_run(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/work-orders/{work_order_id}/runs")
+    def list_dataset_runs(
+        work_order_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> list[dict[str, Any]]:
+        try:
+            return agent_runtime.list_runs(work_order_id=work_order_id, owner_id=owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/runs/{run_id}")
+    def get_dataset_run(
+        run_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.get_run(run_id=run_id, owner_id=owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/control")
+    def control_dataset_run(
+        run_id: str,
+        request: RunControlRequest,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.control_run(
+                run_id=run_id, owner_id=owner_id, action=request.action
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/datasets/{dataset_version_id}")
+    def get_dataset_version(
+        dataset_version_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.get_dataset(
+                dataset_version_id=dataset_version_id, owner_id=owner_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return app
