@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from apps.tui.app import parse_new_command
+from apps.tui.app import TuiApp, parse_new_command
 from apps.tui.session import TuiSession
 
 
@@ -121,3 +121,42 @@ def test_tui_session_controls_the_shared_work_order_and_run() -> None:
     assert dataset["id"] == "dataset_1"
     assert report is not None
     assert report["status"] == "PASSED"
+
+
+class StubConsole:
+    def __init__(self, source: str = "D:\\images") -> None:
+        self.source = source
+        self.messages: list[str] = []
+        self.input_calls = 0
+
+    def print(self, value="") -> None:
+        self.messages.append(str(value))
+
+    def input(self, prompt: str) -> str:
+        self.input_calls += 1
+        self.messages.append(prompt)
+        return self.source
+
+
+def test_tui_greeting_does_not_start_a_work_order() -> None:
+    console = StubConsole()
+    session = TuiSession(FakeControlPlaneClient())
+    app = TuiApp(session, console=console)
+
+    app.handle("你好！")
+
+    assert session.work_order_id is None
+    assert console.input_calls == 0
+    assert any("请告诉我数据目标" in message for message in console.messages)
+
+
+def test_tui_requirement_prompts_for_a_clearly_named_source_directory() -> None:
+    console = StubConsole()
+    session = TuiSession(FakeControlPlaneClient())
+    app = TuiApp(session, console=console)
+
+    app.handle("筛选清晰图片")
+
+    assert session.work_order_id == "work_order_1"
+    assert console.input_calls == 1
+    assert any("图片目录" in message for message in console.messages)

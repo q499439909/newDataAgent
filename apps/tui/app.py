@@ -29,6 +29,7 @@ class TuiApp:
 
     def run(self) -> None:
         self.console.print("[bold]DataAgent[/bold]  [dim]TUI control plane[/dim]")
+        self.console.print("你好，请描述你想生产的图片数据；输入 [bold]/help[/bold] 可查看控制命令。")
         while True:
             try:
                 line = self.console.input("[cyan]dataagent>[/cyan] ").strip()
@@ -84,11 +85,20 @@ class TuiApp:
         return True
 
     def _handle_natural_language(self, text: str) -> None:
+        normalized = text.strip().lower()
+        greeting = normalized.strip("!！。,.，~～ ")
+        if greeting in {"你好", "您好", "嗨", "hi", "hello", "hey"}:
+            self.console.print("你好。请告诉我数据目标，例如：筛选清晰的人像图片并去重。")
+            return
         if not self.session.work_order_id:
-            source = self.console.input("[cyan]source>[/cyan] ").strip()
+            self.console.print("需求已记录。接下来请提供这批图片所在的本地目录。")
+            source = self.console.input(
+                "[cyan]图片目录（例如 D:\\images\\incoming）>[/cyan] "
+            ).strip()
+            if not source:
+                raise ValueError("图片目录不能为空")
             self._render_turn(self.session.start(requirement=text, source=source))
             return
-        normalized = text.strip().lower()
         if normalized in {"确认", "批准", "同意", "approve", "yes", "y"}:
             self._render_turn(self.session.approve())
             return
