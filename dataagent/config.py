@@ -18,6 +18,18 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 @dataclass(frozen=True)
 class Settings:
     api_key: str | None
@@ -27,6 +39,9 @@ class Settings:
     home: Path
     owner: str
     env_path: Path | None
+    allow_model_download: bool = False
+    model_cache: Path | None = None
+    datajuicer_enabled: bool = True
 
     @classmethod
     def load(cls, cwd: Path | None = None) -> "Settings":
@@ -44,6 +59,10 @@ class Settings:
         home = Path(home_raw).expanduser()
         if not home.is_absolute():
             home = root / home
+        model_cache_raw = os.getenv("DATAAGENT_MODEL_CACHE")
+        model_cache = Path(model_cache_raw).expanduser() if model_cache_raw else home / "models"
+        if not model_cache.is_absolute():
+            model_cache = root / model_cache
         return cls(
             api_key=os.getenv("BAILIAN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
             base_url=os.getenv(
@@ -54,10 +73,14 @@ class Settings:
             home=home.resolve(),
             owner=os.getenv("DATAAGENT_OWNER", os.getenv("USERNAME", "local")),
             env_path=env_path,
+            allow_model_download=_env_bool("DATAAGENT_ALLOW_MODEL_DOWNLOAD", False),
+            model_cache=model_cache.resolve(),
+            datajuicer_enabled=_env_bool("DATAAGENT_DATAJUICER_ENABLED", True),
         )
 
     def ensure_directories(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         (self.home / "datasets").mkdir(exist_ok=True)
         (self.home / "reports").mkdir(exist_ok=True)
-
+        if self.model_cache is not None:
+            self.model_cache.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from ..domain.common import new_id
 from ..domain.evaluations import QCReport
+from ..domain.operators import OperatorStatus, RuntimeBackend
 from ..domain.pipelines import PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
@@ -23,8 +24,7 @@ from ..infrastructure import (
     RunStore,
     SqliteDatabase,
 )
-from ..operators import OperatorRegistry, OperatorRuntime
-from ..operators.builtin import builtin_image_operators
+from ..operators import build_operator_library
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,13 @@ class AgentThread:
 class AgentRuntime:
     """Application service exposing one shared graph to Web and TUI clients."""
 
-    def __init__(self, home: Path | None = None) -> None:
+    def __init__(
+        self,
+        home: Path | None = None,
+        *,
+        include_datajuicer: bool = True,
+        allow_model_download: bool = False,
+    ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
         self._checkpoint_connection: sqlite3.Connection | None = None
@@ -63,10 +69,12 @@ class AgentRuntime:
             saver.setup()
             self.checkpointer = saver
         self.graph = build_main_graph(self.checkpointer)
-        self.builtin_operators = builtin_image_operators()
-        self.operator_registry = OperatorRegistry(
-            operator.spec for operator in self.builtin_operators
+        self.operator_library = build_operator_library(
+            include_datajuicer=include_datajuicer,
+            allow_model_download=allow_model_download,
         )
+        self.builtin_operators = self.operator_library.operators
+        self.operator_registry = self.operator_library.registry
 
     def start(
         self,
@@ -154,9 +162,7 @@ class AgentRuntime:
             raise PermissionError("Preview source is outside the work order data sources")
         if not source.is_file():
             raise FileNotFoundError(f"Preview source not found: {source}")
-        builder = NodePreviewBuilder(
-            OperatorRuntime(self.builtin_operators), self.home / "previews"
-        )
+        builder = NodePreviewBuilder(self.operator_library.runtime, self.home / "previews")
         preview = builder.build(
             pipeline=pipeline,
             source_path=source,
@@ -197,6 +203,7 @@ class AgentRuntime:
         )
         if not pipeline.approved:
             raise ValueError("Selected PipelineVersion is not approved")
+        self._validate_production_pipeline(pipeline)
         spec = TaskSpecVersion.model_validate(spec_payload)
         run = self.run_store.create(
             run_id=new_id("run"),
@@ -207,6 +214,25 @@ class AgentRuntime:
             idempotency_key=idempotency_key,
         )
         return self._run_payload(run)
+
+    def _validate_production_pipeline(self, pipeline: PipelineVersion) -> None:
+        self.operator_library.runtime.validate_pipeline(pipeline)
+        released = {
+            OperatorStatus.PERSONAL_RELEASE,
+            OperatorStatus.PUBLIC_RELEASE,
+        }
+        violations: list[str] = []
+        for node in pipeline.nodes:
+            spec = self.operator_registry.get(node.operator_version_id)
+            if spec.status not in released:
+                violations.append(f"{spec.id} has status {spec.status}")
+            if node.runtime_backend == RuntimeBackend.MOCK:
+                violations.append(f"{spec.id} uses the mock runtime")
+        if violations:
+            raise ValueError(
+                "Pipeline is not eligible for production execution: "
+                + "; ".join(violations)
+            )
 
     def get_run(self, *, run_id: str, owner_id: str) -> dict[str, Any]:
         if self.run_store is None:

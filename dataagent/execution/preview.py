@@ -34,7 +34,13 @@ class NodePreviewBuilder:
             run_id=run_id,
             work_order_id=work_order_id,
             owner_id=owner_id,
-            shared={},
+            purpose="preview",
+            shared={
+                "artifact_root": self.preview_root
+                / pipeline.id
+                / asset_id
+                / "artifacts"
+            },
         )
         current = OperatorInput(source_path=str(source_path), current_path=str(source_path))
         items: list[NodePreviewItem] = []
@@ -47,6 +53,7 @@ class NodePreviewBuilder:
                 context=context,
                 input_data=current,
                 parameters=node.parameters,
+                runtime_backend=node.runtime_backend,
             )
             output_path = Path(result.output_path) if result.output_path else Path(current.current_path)
             output_preview = self._thumbnail(
@@ -63,6 +70,9 @@ class NodePreviewBuilder:
                     metrics_after=result.metrics,
                     labels_before=current.labels,
                     labels_after=result.labels,
+                    artifacts=tuple(result.artifacts),
+                    annotations=tuple(result.annotations),
+                    embeddings=tuple(result.embeddings),
                     decision=result.decision,
                     reason_codes=tuple(result.reason_codes),
                     confidence=result.confidence,
@@ -74,6 +84,9 @@ class NodePreviewBuilder:
                 current_path=str(output_path),
                 metrics=result.metrics,
                 labels=result.labels,
+                artifacts=result.artifacts,
+                annotations=result.annotations,
+                embeddings=result.embeddings,
             )
             if result.decision == "reject":
                 break

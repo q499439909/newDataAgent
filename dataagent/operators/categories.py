@@ -33,6 +33,7 @@ SECONDARY_CATEGORIES: dict[OperatorCategory, frozenset[str]] = {
             "object_detection",
             "segmentation",
             "face_and_person",
+            "watermark_detection",
             "scene_understanding",
             "aesthetic_understanding",
             "vlm_judgement",

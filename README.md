@@ -174,6 +174,17 @@ Token 默认从 `MILVUS_TOKEN` 环境变量读取且不会输出。只有同时�
 
 可以通过 `DATAAGENT_HOME` 改到其他磁盘。原始图片目录始终只读使用，不原地覆盖或删除。
 
+## 算子库开发模式
+
+算子通过统一的 Operator、Provider 和 Runtime 协议注册。当前内置八个已发布的 CPU 参考算子，使九个主类别都有可运行实现；另有美学评分、图像分割、水印识别、人像 ID 四个开发态模型算子。模型算子默认使用确定性的 Mock 后端，不需要 GPU，也不会下载权重；Mock 结果可以用于 Pipeline 编译和节点预览，但生产提交会拒绝 Draft 或 Mock 算子。
+
+```powershell
+$env:DATAAGENT_ALLOW_MODEL_DOWNLOAD = "false"
+$env:DATAAGENT_DATAJUICER_ENABLED = "true"
+```
+
+Data-Juicer 是可选 Provider。未安装 `py-data-juicer` 时只会显示为不可用，不影响 Native 算子和控制面；发现阶段只读取元数据，不实例化模型或下载权重。真实模型后端需要固定 revision、SHA256 和许可证后再单独接入。
+
 ## 当前 CLI 边界
 
 - 已实现本地图片目录的规划、三方案试跑、视觉抽样评估、边界审核、全量执行、不可变版本和 Pipeline 复用。

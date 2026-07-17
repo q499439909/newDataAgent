@@ -26,6 +26,7 @@ class TaskSpecVersion(VersionedModel):
     objective: str
     data_sources: tuple[DataSourceSpec, ...]
     output_actions: tuple[str, ...] = ("filter", "manifest")
+    required_capabilities: tuple[str, ...] = ()
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     semantic_requirements: tuple[str, ...] = ()
     exclusion_requirements: tuple[str, ...] = ()

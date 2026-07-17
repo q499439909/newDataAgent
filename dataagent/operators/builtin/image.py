@@ -3,7 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ...domain.operators import OperatorCategory, OperatorSpecVersion, OperatorStatus
+from ...domain.operators import (
+    ImplementationSpec,
+    ImplementationType,
+    OperatorCategory,
+    OperatorSpecVersion,
+    OperatorStatus,
+    ProviderRef,
+    RuntimeBackend,
+    RuntimeProfile,
+)
 from ...imaging import analyze_image
 from ..protocol import OperatorContext, OperatorInput, OperatorResult
 
@@ -18,6 +27,7 @@ def _spec(
     secondary: str,
     implementation_ref: str,
     tags: frozenset[str],
+    parameter_schema: dict[str, Any] | None = None,
 ) -> OperatorSpecVersion:
     return OperatorSpecVersion(
         id=operator_id,
@@ -33,6 +43,22 @@ def _spec(
         capability_tags=tags,
         input_schema="ImageAssetRef",
         output_schema="EnrichedImageAsset",
+        parameter_schema=parameter_schema
+        or {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        provider=ProviderRef(
+            provider_id="native",
+            provider_version="0.1.0",
+            provider_operator_ref=operator_id,
+        ),
+        implementation=ImplementationSpec(
+            implementation_type=ImplementationType.CODE,
+            entrypoint=implementation_ref,
+        ),
+        supported_runtime_profiles=(RuntimeProfile(backend=RuntimeBackend.CPU),),
         implementation_ref=implementation_ref,
         status=OperatorStatus.PUBLIC_RELEASE,
         owner_id="system",
@@ -59,6 +85,10 @@ class DecodeCheckOperator:
         return OperatorResult(
             output_path=input_data.current_path,
             metrics=metrics,
+            labels=input_data.labels,
+            artifacts=input_data.artifacts,
+            annotations=input_data.annotations,
+            embeddings=input_data.embeddings,
             decision="continue" if metrics["decode_ok"] else "reject",
             reason_codes=[] if metrics["decode_ok"] else ["DECODE_FAILED"],
             confidence=1.0,
@@ -75,6 +105,18 @@ class QualityFilterOperator:
         secondary="image_quality",
         implementation_ref="dataagent.operators.builtin.image:QualityFilterOperator",
         tags=frozenset({"image", "quality", "filter"}),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "confidence_threshold": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0.55,
+                }
+            },
+            "additionalProperties": False,
+        },
     )
 
     def execute(
@@ -91,6 +133,9 @@ class QualityFilterOperator:
             output_path=input_data.current_path,
             metrics={**input_data.metrics, "quality_score": quality_score},
             labels={**input_data.labels, "quality_pass": keep},
+            artifacts=input_data.artifacts,
+            annotations=input_data.annotations,
+            embeddings=input_data.embeddings,
             decision="continue" if keep else "reject",
             reason_codes=[] if keep else ["QUALITY_BELOW_THRESHOLD"],
             confidence=quality_score,
@@ -107,6 +152,18 @@ class PerceptualDedupOperator:
         secondary="perceptual_duplicate",
         implementation_ref="dataagent.operators.builtin.image:PerceptualDedupOperator",
         tags=frozenset({"image", "deduplication", "perceptual_hash"}),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "distance_threshold": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 64,
+                    "default": 0,
+                }
+            },
+            "additionalProperties": False,
+        },
     )
 
     def execute(
@@ -114,13 +171,23 @@ class PerceptualDedupOperator:
     ) -> OperatorResult:
         seen = context.shared.setdefault("seen_dhash", set())
         dhash = input_data.metrics.get("dhash")
-        duplicate = bool(dhash and dhash in seen)
+        threshold = parameters["distance_threshold"]
+        duplicate = bool(
+            dhash
+            and any(
+                (int(dhash, 16) ^ int(candidate, 16)).bit_count() <= threshold
+                for candidate in seen
+            )
+        )
         if dhash:
             seen.add(dhash)
         return OperatorResult(
             output_path=input_data.current_path,
             metrics=input_data.metrics,
             labels={**input_data.labels, "duplicate": duplicate},
+            artifacts=input_data.artifacts,
+            annotations=input_data.annotations,
+            embeddings=input_data.embeddings,
             decision="reject" if duplicate else "continue",
             reason_codes=["PERCEPTUAL_DUPLICATE"] if duplicate else [],
             confidence=1.0,
@@ -146,6 +213,9 @@ class ManifestOperator:
             output_path=input_data.current_path,
             metrics=input_data.metrics,
             labels=input_data.labels,
+            artifacts=input_data.artifacts,
+            annotations=input_data.annotations,
+            embeddings=input_data.embeddings,
             decision="keep",
             confidence=1.0,
         )

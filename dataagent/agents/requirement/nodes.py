@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ...domain.common import new_id
 from ...domain.specs import AcceptanceSpec, DataSourceSpec, TaskSpecVersion
+from ...operators.planning import infer_required_capabilities
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -19,6 +20,7 @@ def generate_task_spec(state: WorkOrderGraphState) -> dict:
         change_reason="initial requirement planning",
         work_order_id=state["work_order_id"],
         objective=state["requirement"],
+        required_capabilities=infer_required_capabilities(state["requirement"]),
         data_sources=sources,
         acceptance=AcceptanceSpec(boundary_review_size=20),
     )

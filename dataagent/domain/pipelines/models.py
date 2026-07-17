@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from ..common.models import DomainModel, VersionedModel
+from ..operators import AnnotationRef, AssetRef, EmbeddingRef, RuntimeBackend
 
 
 class PipelineStrategy(StrEnum):
@@ -20,6 +21,7 @@ class PipelineNode(DomainModel):
     name: str
     category: str
     parameters: dict[str, Any] = Field(default_factory=dict)
+    runtime_backend: RuntimeBackend = RuntimeBackend.CPU
     required: bool = False
 
 
@@ -111,6 +113,9 @@ class NodePreviewItem(DomainModel):
     metrics_after: dict[str, Any] = Field(default_factory=dict)
     labels_before: dict[str, Any] = Field(default_factory=dict)
     labels_after: dict[str, Any] = Field(default_factory=dict)
+    artifacts: tuple[AssetRef, ...] = ()
+    annotations: tuple[AnnotationRef, ...] = ()
+    embeddings: tuple[EmbeddingRef, ...] = ()
     decision: str
     reason_codes: tuple[str, ...] = ()
     confidence: float | None = Field(default=None, ge=0, le=1)

@@ -8,6 +8,13 @@ from ...domain.pipelines import (
     PipelineVersion,
 )
 from ...domain.specs import TaskSpecVersion
+from ...domain.operators import OperatorCategory, RuntimeBackend
+from ...operators import build_operator_library
+from ...operators.planning import (
+    MODEL_CAPABILITY_REQUIREMENTS,
+    OperatorRequirement,
+    OperatorSelector,
+)
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -16,6 +23,98 @@ STRATEGY_THRESHOLDS: dict[PipelineStrategy, tuple[float, float]] = {
     PipelineStrategy.BALANCED: (0.55, 0.65),
     PipelineStrategy.QUALITY_FIRST: (0.75, 0.85),
 }
+
+
+_BASE_REQUIREMENTS = (
+    (
+        "ingest",
+        OperatorRequirement(
+            capability="decode",
+            category=OperatorCategory.INGESTION,
+            secondary_category="decoding",
+            runtime_backend=RuntimeBackend.CPU,
+        ),
+        {},
+        True,
+    ),
+    (
+        "filter",
+        OperatorRequirement(
+            capability="quality",
+            category=OperatorCategory.FILTERING,
+            secondary_category="image_quality",
+            runtime_backend=RuntimeBackend.CPU,
+        ),
+        None,
+        True,
+    ),
+    (
+        "deduplicate",
+        OperatorRequirement(
+            capability="deduplication",
+            category=OperatorCategory.DEDUPLICATION,
+            secondary_category="perceptual_duplicate",
+            runtime_backend=RuntimeBackend.CPU,
+        ),
+        None,
+        False,
+    ),
+    (
+        "manifest",
+        OperatorRequirement(
+            capability="manifest",
+            category=OperatorCategory.OUTPUT,
+            secondary_category="manifest",
+            runtime_backend=RuntimeBackend.CPU,
+        ),
+        {},
+        True,
+    ),
+)
+
+
+def _compile_nodes(spec: TaskSpecVersion, threshold: float) -> tuple[PipelineNode, ...]:
+    library = build_operator_library(include_datajuicer=False)
+    selector = OperatorSelector(library.registry)
+    selected: list[PipelineNode] = []
+    for node_id, requirement, parameters, required in _BASE_REQUIREMENTS:
+        operator = selector.select(requirement)
+        resolved_parameters = parameters
+        if node_id == "filter":
+            resolved_parameters = {"confidence_threshold": threshold}
+        elif node_id == "deduplicate":
+            resolved_parameters = {"distance_threshold": max(1, round(threshold * 10))}
+        selected.append(
+            PipelineNode(
+                id=node_id,
+                operator_version_id=operator.id,
+                name=operator.display_name,
+                category=operator.primary_category.value,
+                parameters=resolved_parameters or {},
+                runtime_backend=requirement.runtime_backend or RuntimeBackend.CPU,
+                required=required,
+            )
+        )
+
+    insert_at = 1
+    for capability in spec.required_capabilities:
+        requirement = MODEL_CAPABILITY_REQUIREMENTS.get(capability)
+        if requirement is None:
+            raise ValueError(f"No operator requirement is registered for: {capability}")
+        operator = selector.select(requirement)
+        selected.insert(
+            insert_at,
+            PipelineNode(
+                id=f"understand_{capability}",
+                operator_version_id=operator.id,
+                name=operator.display_name,
+                category=operator.primary_category.value,
+                runtime_backend=RuntimeBackend.MOCK,
+                required=True,
+            ),
+        )
+        insert_at += 1
+    return tuple(selected)
 
 
 def _build_variant(
@@ -27,41 +126,10 @@ def _build_variant(
     owner_id: str,
 ) -> PipelineVersion:
     family_id = f"pipeline_{strategy.value}"
-    nodes = (
-        PipelineNode(
-            id="ingest",
-            operator_version_id="builtin.decode_check:1",
-            name="解码与元数据",
-            category="INGESTION",
-            required=True,
-        ),
-        PipelineNode(
-            id="filter",
-            operator_version_id="builtin.quality_filter:1",
-            name="质量与规则过滤",
-            category="FILTERING",
-            parameters={"confidence_threshold": threshold},
-            required=True,
-        ),
-        PipelineNode(
-            id="deduplicate",
-            operator_version_id="builtin.perceptual_dedup:1",
-            name="感知去重",
-            category="DEDUPLICATION",
-            parameters={"distance_threshold": max(1, round(threshold * 10))},
-        ),
-        PipelineNode(
-            id="manifest",
-            operator_version_id="builtin.manifest:1",
-            name="生成 Manifest",
-            category="OUTPUT",
-            required=True,
-        ),
-    )
-    edges = (
-        PipelineEdge(source="ingest", target="filter"),
-        PipelineEdge(source="filter", target="deduplicate"),
-        PipelineEdge(source="deduplicate", target="manifest"),
+    nodes = _compile_nodes(spec, threshold)
+    edges = tuple(
+        PipelineEdge(source=source.id, target=target.id)
+        for source, target in zip(nodes, nodes[1:])
     )
     return PipelineVersion(
         id=new_id("pipeline_version"),

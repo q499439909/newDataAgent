@@ -66,14 +66,19 @@ def create_app(
     conversation_service: ConversationService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DataAgent Control Plane", version="0.3.0")
-    app.state.agent_runtime = runtime or AgentRuntime(Settings.load().home / "platform")
+    settings = Settings.load()
+    app.state.agent_runtime = runtime or AgentRuntime(
+        settings.home / "platform",
+        include_datajuicer=settings.datajuicer_enabled,
+        allow_model_download=settings.allow_model_download,
+    )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
     elif app.state.agent_runtime.conversation_store is not None:
         app.state.conversation_service = ConversationService(
             store=app.state.agent_runtime.conversation_store,
             agent_runtime=app.state.agent_runtime,
-            settings=Settings.load(),
+            settings=settings,
         )
     else:
         app.state.conversation_service = None

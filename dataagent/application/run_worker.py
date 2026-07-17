@@ -7,14 +7,20 @@ from typing import Any
 from ..execution import DatasetRunExecutor
 from ..evaluation import QualityEvaluator
 from ..infrastructure import DomainVersionStore, RunStore, SqliteDatabase
-from ..operators import OperatorRuntime
-from ..operators.builtin import builtin_image_operators
+from ..operators import build_operator_library
 
 
 class LocalRunWorker:
     """Single-host durable worker for the local deployment profile."""
 
-    def __init__(self, home: Path, *, recover_interrupted: bool = True) -> None:
+    def __init__(
+        self,
+        home: Path,
+        *,
+        recover_interrupted: bool = True,
+        include_datajuicer: bool = True,
+        allow_model_download: bool = False,
+    ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
         self.run_store = RunStore(database)
@@ -25,7 +31,10 @@ class LocalRunWorker:
             home=self.home,
             run_store=self.run_store,
             version_store=self.version_store,
-            operator_runtime=OperatorRuntime(builtin_image_operators()),
+            operator_runtime=build_operator_library(
+                include_datajuicer=include_datajuicer,
+                allow_model_download=allow_model_download,
+            ).runtime,
             quality_evaluator=QualityEvaluator(self.version_store),
         )
 

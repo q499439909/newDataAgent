@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from ..common.models import DomainModel, VersionedModel
+from ..operators import AnnotationRef, AssetRef, EmbeddingRef
 
 
 class RunStatus(StrEnum):
@@ -58,6 +59,9 @@ class DatasetAsset(DomainModel):
     reason_codes: tuple[str, ...] = ()
     metrics: dict[str, Any] = Field(default_factory=dict)
     labels: dict[str, Any] = Field(default_factory=dict)
+    artifacts: tuple[AssetRef, ...] = ()
+    annotations: tuple[AnnotationRef, ...] = ()
+    embeddings: tuple[EmbeddingRef, ...] = ()
 
 
 class DatasetVersion(VersionedModel):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.pipelines import PipelineVersion
+from ..domain.operators import AnnotationRef, AssetRef, EmbeddingRef
 from ..domain.runs import DatasetAsset, DatasetVersion
 from ..domain.specs import TaskSpecVersion
 from ..evaluation import QualityEvaluator
@@ -14,6 +15,9 @@ from ..imaging import scan_images
 from ..infrastructure import DomainVersionStore, RunStore
 from ..operators import OperatorRuntime
 from ..operators.protocol import OperatorContext, OperatorInput
+
+
+_OPERATOR_OUTPUTS_KEY = "_dataagent_operator_outputs"
 
 
 def _sha256(path: Path) -> str:
@@ -138,7 +142,10 @@ class DatasetRunExecutor:
             run_id=run["id"],
             work_order_id=run["work_order_id"],
             owner_id=owner_id,
-            shared={"seen_dhash": set()},
+            shared={
+                "seen_dhash": set(),
+                "artifact_root": self.home / "runs" / run["id"] / "artifacts",
+            },
         )
         for item in existing:
             dhash = item["metrics"].get("dhash")
@@ -176,12 +183,16 @@ class DatasetRunExecutor:
                         context=context,
                         input_data=current,
                         parameters=node.parameters,
+                        runtime_backend=node.runtime_backend,
                     )
                     current = OperatorInput(
                         source_path=current.source_path,
                         current_path=result.output_path or current.current_path,
                         metrics=result.metrics,
                         labels=result.labels,
+                        artifacts=result.artifacts,
+                        annotations=result.annotations,
+                        embeddings=result.embeddings,
                     )
                     reason_codes.extend(result.reason_codes)
                     if result.decision == "reject":
@@ -216,7 +227,7 @@ class DatasetRunExecutor:
                     "decision": decision,
                     "reason_codes": reason_codes,
                     "metrics": current.metrics,
-                    "labels": current.labels,
+                    "labels": self._checkpoint_labels(current),
                 },
             )
 
@@ -224,6 +235,17 @@ class DatasetRunExecutor:
         if not any(item["decision"] == "keep" for item in completed):
             raise RuntimeError("Run produced an empty dataset; publication was blocked")
         return self._publish(run, spec, pipeline, roots, completed)
+
+    @staticmethod
+    def _checkpoint_labels(current: OperatorInput) -> dict[str, Any]:
+        labels = dict(current.labels)
+        if current.artifacts or current.annotations or current.embeddings:
+            labels[_OPERATOR_OUTPUTS_KEY] = {
+                "artifacts": [item.model_dump(mode="json") for item in current.artifacts],
+                "annotations": [item.model_dump(mode="json") for item in current.annotations],
+                "embeddings": [item.model_dump(mode="json") for item in current.embeddings],
+            }
+        return labels
 
     def _publish(
         self,
@@ -248,8 +270,21 @@ class DatasetRunExecutor:
             dataset_root.parent.mkdir(parents=True, exist_ok=True)
             staging_root.replace(dataset_root)
         manifest_path = dataset_root / "manifest.json"
-        assets = tuple(
-            DatasetAsset(
+
+        def published_artifact(value: dict[str, Any]) -> AssetRef:
+            artifact = AssetRef.model_validate(value)
+            artifact_path = Path(artifact.uri)
+            if artifact_path.is_absolute() and artifact_path.is_relative_to(staging_root):
+                artifact = artifact.model_copy(
+                    update={"uri": str(dataset_root / artifact_path.relative_to(staging_root))}
+                )
+            return artifact
+
+        assets: list[DatasetAsset] = []
+        for item in items:
+            labels = dict(item["labels"])
+            operator_outputs = labels.pop(_OPERATOR_OUTPUTS_KEY, {})
+            assets.append(DatasetAsset(
                 source_uri=item["source_uri"],
                 source_sha256=item["source_sha256"],
                 output_uri=(
@@ -261,10 +296,21 @@ class DatasetRunExecutor:
                 decision=item["decision"],
                 reason_codes=tuple(item["reason_codes"]),
                 metrics=item["metrics"],
-                labels=item["labels"],
-            )
-            for item in items
-        )
+                labels=labels,
+                artifacts=tuple(
+                    published_artifact(value)
+                    for value in operator_outputs.get("artifacts", ())
+                ),
+                annotations=tuple(
+                    AnnotationRef.model_validate(value)
+                    for value in operator_outputs.get("annotations", ())
+                ),
+                embeddings=tuple(
+                    EmbeddingRef.model_validate(value)
+                    for value in operator_outputs.get("embeddings", ())
+                ),
+            ))
+        assets_tuple = tuple(assets)
         dataset = DatasetVersion(
             id=dataset_id,
             version=1,
@@ -276,11 +322,11 @@ class DatasetRunExecutor:
             run_id=run["id"],
             source_roots=tuple(str(root) for root in roots),
             manifest_uri=str(manifest_path.resolve()),
-            assets=assets,
-            source_count=len(assets),
-            kept_count=sum(item.decision == "keep" for item in assets),
-            rejected_count=sum(item.decision == "reject" for item in assets),
-            failed_count=sum(item.decision == "failed" for item in assets),
+            assets=assets_tuple,
+            source_count=len(assets_tuple),
+            kept_count=sum(item.decision == "keep" for item in assets_tuple),
+            rejected_count=sum(item.decision == "reject" for item in assets_tuple),
+            failed_count=sum(item.decision == "failed" for item in assets_tuple),
             original_files_unchanged=True,
         )
         temporary = manifest_path.with_suffix(".json.tmp")

@@ -11,7 +11,12 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="Process at most one queued run")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     args = parser.parse_args()
-    worker = LocalRunWorker(Settings.load().home / "platform")
+    settings = Settings.load()
+    worker = LocalRunWorker(
+        settings.home / "platform",
+        include_datajuicer=settings.datajuicer_enabled,
+        allow_model_download=settings.allow_model_download,
+    )
     if args.once:
         worker.process_next()
         return
