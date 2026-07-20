@@ -242,3 +242,38 @@ def test_numeric_resolution_choices_bind_to_pending_interrupt() -> None:
     assert remote is not None and remote.runtime_backend == "remote"
     assert revise is not None and revise.action == "revise_task"
     assert terminate is not None and terminate.action == "terminate"
+
+
+def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
+    pipelines = [
+        {
+            "id": "pipeline_balanced",
+            "strategy": "balanced",
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "quality_filter",
+                    "operator_version_id": "builtin.quality_filter:1",
+                    "runtime_backend": "cpu",
+                    "parameters": {"confidence_threshold": 0.55},
+                },
+                {
+                    "id": "image_classification",
+                    "operator_version_id": (
+                        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                    ),
+                    "runtime_backend": "remote",
+                    "parameters": {"tag_field_name": "image_tags"},
+                },
+            ],
+        }
+    ]
+
+    decision = ConversationService._pipeline_details_decision(
+        "用了什么算子", {"pipeline_choices": pipelines}
+    )
+
+    assert decision is not None
+    assert "builtin.quality_filter:1" in decision.reply
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in decision.reply
+    assert "data_loader" not in decision.reply

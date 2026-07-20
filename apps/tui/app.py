@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -129,6 +130,54 @@ class TuiApp:
             for item in pipelines:
                 choices.add_row(item["strategy"], str(item["version"]), item["id"])
             self.console.print(choices)
+            self._render_pipeline_details(pipelines)
+
+    def _render_pipeline_details(self, pipelines: list[dict[str, Any]]) -> None:
+        for pipeline in pipelines:
+            nodes = Table(
+                "Step",
+                "Node",
+                "Operator version",
+                "Backend",
+                "Parameters",
+                title=f"{pipeline['strategy']} pipeline",
+            )
+            for index, node in enumerate(pipeline.get("nodes", []), start=1):
+                parameters = node.get("parameters") or {}
+                nodes.add_row(
+                    str(index),
+                    str(node.get("id", "-")),
+                    str(node.get("operator_version_id", "-")),
+                    str(node.get("runtime_backend", "-")),
+                    json.dumps(parameters, ensure_ascii=False, sort_keys=True),
+                )
+            self.console.print(nodes)
+
+        strategies = [str(item.get("strategy", "unknown")) for item in pipelines]
+        parameters_by_node: dict[str, dict[str, str]] = {}
+        for pipeline in pipelines:
+            strategy = str(pipeline.get("strategy", "unknown"))
+            for node in pipeline.get("nodes", []):
+                parameters_by_node.setdefault(str(node.get("id", "-")), {})[
+                    strategy
+                ] = json.dumps(
+                    node.get("parameters") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+        varying = {
+            node_id: values
+            for node_id, values in parameters_by_node.items()
+            if len(set(values.values())) > 1
+        }
+        if varying:
+            comparison = Table("Node", *strategies, title="Strategy differences")
+            for node_id, values in varying.items():
+                comparison.add_row(
+                    node_id,
+                    *(values.get(strategy, "{}") for strategy in strategies),
+                )
+            self.console.print(comparison)
 
     def _render_runs(self, runs: list[dict[str, Any]]) -> None:
         table = Table("Run", "Status", "Progress", "Dataset", "QC")

@@ -40,6 +40,12 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
     assert {item["strategy"] for item in second["representative_pipelines"]} == {
         strategy.value for strategy in PipelineStrategy
     }
+    approval_pipelines = second["__interrupt__"][0].value["pipelines"]
+    assert len(approval_pipelines) == 3
+    assert all(item["nodes"] for item in approval_pipelines)
+    assert approval_pipelines[0]["nodes"][0]["operator_version_id"] == (
+        "builtin.decode_check:1"
+    )
 
     balanced = next(
         item for item in second["representative_pipelines"] if item["strategy"] == "balanced"

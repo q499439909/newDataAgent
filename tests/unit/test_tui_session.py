@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from io import StringIO
+
+from rich.console import Console
 
 from apps.tui.app import TuiApp, parse_new_command
 from apps.tui.session import TuiSession
@@ -206,3 +209,54 @@ def test_tui_requirement_is_sent_to_conversation_without_local_prompt() -> None:
     assert session.work_order_id is None
     assert console.input_calls == 0
     assert any("DataAgent" in message for message in console.messages)
+
+
+def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    app = TuiApp(TuiSession(FakeControlPlaneClient()), console=console)
+    pipelines = []
+    for strategy, threshold in (
+        ("retention_first", 0.35),
+        ("balanced", 0.55),
+        ("quality_first", 0.75),
+    ):
+        pipelines.append(
+            {
+                "id": f"pipeline_{strategy}",
+                "strategy": strategy,
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "quality_filter",
+                        "operator_version_id": "builtin.quality_filter:1",
+                        "runtime_backend": "cpu",
+                        "parameters": {"confidence_threshold": threshold},
+                    },
+                    {
+                        "id": "image_classification",
+                        "operator_version_id": (
+                            "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                        ),
+                        "runtime_backend": "remote",
+                        "parameters": {"tag_field_name": "image_tags"},
+                    },
+                ],
+            }
+        )
+    app._render_turn(
+        {
+            "work_order_id": "work_order_1",
+            "thread_id": "thread_1",
+            "state": {"current_agent": "processing", "next_action": "approve_pipeline"},
+            "interrupts": [
+                {"value": {"kind": "pipeline_approval", "pipelines": pipelines}}
+            ],
+        }
+    )
+
+    output = stream.getvalue()
+    assert "builtin.quality_filter:1" in output
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in output
+    assert "Strategy differences" in output
+    assert "0.35" in output and "0.55" in output and "0.75" in output

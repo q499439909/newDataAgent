@@ -65,6 +65,7 @@ def approve_pipeline(state: WorkOrderGraphState) -> dict[str, Any]:
                     "strategy": item.strategy,
                     "version": item.version,
                     "node_count": len(item.nodes),
+                    "nodes": [node.model_dump(mode="json") for node in item.nodes],
                 }
                 for item in representatives
             ],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from enum import StrEnum
 from pathlib import Path
@@ -115,6 +116,9 @@ class ConversationService:
         resolution_decision = self._pending_resolution_decision(content, context)
         if resolution_decision is not None:
             return resolution_decision
+        pipeline_decision = self._pipeline_details_decision(content, context)
+        if pipeline_decision is not None:
+            return pipeline_decision
         fast = self._fast_decision(content)
         if fast is not None:
             return fast
@@ -388,6 +392,15 @@ class ConversationService:
                         "strategy": item.get("strategy"),
                         "version": item.get("version"),
                         "node_count": len(item.get("nodes", [])),
+                        "nodes": [
+                            {
+                                "id": node.get("id"),
+                                "operator_version_id": node.get("operator_version_id"),
+                                "runtime_backend": node.get("runtime_backend"),
+                                "parameters": node.get("parameters", {}),
+                            }
+                            for node in item.get("nodes", [])
+                        ],
                     }
                     for item in pipelines
                 ]
@@ -418,6 +431,78 @@ class ConversationService:
             "work_order_id": thread["work_order_id"],
             "messages": self.store.messages(thread["id"], thread["owner_id"]),
         }
+
+    @staticmethod
+    def _pipeline_details_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        normalized = content.strip().lower()
+        asks_for_pipeline = "pipeline" in normalized or "流水线" in normalized
+        asks_for_operator = any(
+            token in normalized
+            for token in ("什么算子", "哪些算子", "用了什么", "算子顺序", "什么顺序")
+        )
+        if not asks_for_operator and not (
+            asks_for_pipeline and any(token in normalized for token in ("具体", "详情", "节点"))
+        ):
+            return None
+        pipelines = context.get("pipeline_choices") or []
+        if not pipelines:
+            return None
+        return ConversationDecision(
+            intent=ConversationIntent.CHAT,
+            reply=ConversationService._pipeline_details_reply(pipelines),
+        )
+
+    @staticmethod
+    def _pipeline_details_reply(pipelines: list[dict[str, Any]]) -> str:
+        lines = ["以下是控制平面实际编译的算子流水线："]
+        for pipeline in pipelines:
+            lines.append(f"\n### {pipeline.get('strategy', 'unknown')}")
+            for index, node in enumerate(pipeline.get("nodes", []), start=1):
+                parameters = node.get("parameters") or {}
+                parameter_text = (
+                    f"；参数 `{json.dumps(parameters, ensure_ascii=False, sort_keys=True)}`"
+                    if parameters
+                    else ""
+                )
+                lines.append(
+                    f"{index}. `{node.get('operator_version_id', '-')}` "
+                    f"[{node.get('runtime_backend', '-')}]"
+                    f"{parameter_text}"
+                )
+
+        differences: dict[str, dict[str, str]] = {}
+        for pipeline in pipelines:
+            strategy = str(pipeline.get("strategy", "unknown"))
+            for node in pipeline.get("nodes", []):
+                node_id = str(node.get("id", "-"))
+                differences.setdefault(node_id, {})[strategy] = json.dumps(
+                    node.get("parameters") or {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+        varying = {
+            node_id: values
+            for node_id, values in differences.items()
+            if len(set(values.values())) > 1
+        }
+        if varying:
+            strategies = [str(item.get("strategy", "unknown")) for item in pipelines]
+            lines.extend(
+                [
+                    "\n### 策略差异",
+                    "| 节点 | " + " | ".join(strategies) + " |",
+                    "|---|" + "---|" * len(strategies),
+                ]
+            )
+            for node_id, values in varying.items():
+                lines.append(
+                    f"| `{node_id}` | "
+                    + " | ".join(f"`{values.get(strategy, '{}')}`" for strategy in strategies)
+                    + " |"
+                )
+        return "\n".join(lines)
 
     def _fallback_decision(
         self, content: str, context: dict[str, Any]
