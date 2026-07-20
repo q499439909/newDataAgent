@@ -103,7 +103,7 @@ def test_resolution_retry_enables_remote_and_reenters_retrieval() -> None:
         item["capability"]: item for item in recovered["capability_coverage"]
     }
     assert selected["image_classification"]["selected_operator_version_id"] == (
-        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     )
 
 

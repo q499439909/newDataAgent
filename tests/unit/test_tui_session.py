@@ -240,7 +240,7 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
                     {
                         "id": "image_classification",
                         "operator_version_id": (
-                            "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                            "datajuicer.image_tagging_vlm_mapper.remote_api:2"
                         ),
                         "runtime_backend": "remote",
                         "operator_status": "DRAFT",
@@ -263,7 +263,7 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
 
     output = stream.getvalue()
     assert "builtin.quality_filter:1" in output
-    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in output
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in output
     assert "Strategy differences" in output
     assert "PERSONAL_RELEASE" in output and "DRAFT" in output
     assert "yes" in output

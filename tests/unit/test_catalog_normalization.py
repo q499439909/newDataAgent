@@ -118,11 +118,13 @@ def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None
     }
 
     assert set(variants) == {
-        "datajuicer.image_tagging_vlm_mapper.remote_api:1",
+        "datajuicer.image_tagging_vlm_mapper.remote_api:2",
         "datajuicer.image_tagging_vlm_mapper.local_cuda:1",
     }
-    remote = variants["datajuicer.image_tagging_vlm_mapper.remote_api:1"]
+    remote = variants["datajuicer.image_tagging_vlm_mapper.remote_api:2"]
     local = variants["datajuicer.image_tagging_vlm_mapper.local_cuda:1"]
+    assert remote.version == 2
+    assert local.version == 1
     assert remote.family_id == local.family_id == (
         "datajuicer.image_tagging_vlm_mapper"
     )
@@ -186,7 +188,7 @@ def test_proxy_repairs_empty_container_types_from_cached_discovery_schema() -> N
     remote = next(
         item.spec
         for item in build_datajuicer_proxy_operators(provider, [raw])
-        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     )
 
     properties = remote.parameter_schema["properties"]
@@ -258,10 +260,10 @@ def test_hybrid_recall_finds_vlm_variants_without_hardcoded_provider_ref() -> No
     )
     by_id = {item.operator_version_id: item for item in matches}
 
-    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in by_id
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in by_id
     assert "datajuicer.image_tagging_vlm_mapper.local_cuda:1" in by_id
     assert "semantic" in by_id[
-        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     ].recall_sources
 
 
@@ -287,7 +289,7 @@ def test_hybrid_recall_records_rule_keyword_and_semantic_evidence() -> None:
         item
         for item in matches
         if item.operator_version_id
-        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
         and item.capability == "image_classification"
     )
 
@@ -327,7 +329,7 @@ def test_ranker_prefers_available_remote_vlm_over_unavailable_cuda() -> None:
         item
         for item in ranked
         if item.operator_version_id
-        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
         and item.capability == "image_classification"
     )
     local = next(
@@ -353,7 +355,7 @@ def test_remote_vlm_variant_validates_against_normalized_runtime_view() -> None:
     remote = next(
         item.spec
         for item in operators
-        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     )
     parameters = validate_parameters(remote.parameter_schema, {})
 
@@ -544,7 +546,7 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         CapabilityCoverageStatus.COVERED
     )
     assert coverage["image_classification"]["selected_operator_version_id"] == (
-        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     )
     assert coverage["authenticity_assessment"]["status"] == (
         CapabilityCoverageStatus.COVERED
@@ -617,7 +619,7 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         node
         for node in balanced.nodes
         if node.operator_version_id
-        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     ]
     assert len(remote_nodes) == 2
     assert all(node.parameters["is_api_model"] is True for node in remote_nodes)

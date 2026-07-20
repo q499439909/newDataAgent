@@ -48,6 +48,7 @@ class DataJuicerAdmission:
 @dataclass(frozen=True)
 class DataJuicerProxyVariant:
     id_suffix: str | None = None
+    version: int = 1
     display_name: str | None = None
     summary: str | None = None
     runtime_backends: tuple[RuntimeBackend, ...] | None = None
@@ -181,6 +182,7 @@ def _proxy_variants(
     return (
         DataJuicerProxyVariant(
             id_suffix="remote_api",
+            version=2,
             display_name="Data-Juicer Image Tagging VLM (Remote API)",
             summary="Generate governed image tags through a remote vision model API.",
             runtime_backends=(RuntimeBackend.REMOTE,),
@@ -440,14 +442,14 @@ def build_datajuicer_proxy_operators(
             )
             base_id = f"datajuicer.{descriptor.provider_operator_ref}"
             operator_id = (
-                f"{base_id}.{variant.id_suffix}:1"
+                f"{base_id}.{variant.id_suffix}:{variant.version}"
                 if variant.id_suffix
                 else f"{base_id}:1"
             )
             spec = OperatorSpecVersion(
                 id=operator_id,
                 family_id=base_id,
-                version=1,
+                version=variant.version if variant.id_suffix else 1,
                 created_by="system",
                 change_reason=(
                     "admitted Data-Juicer provider proxy"
@@ -493,6 +495,7 @@ def build_datajuicer_proxy_operators(
                     },
                     "provider_variant": {
                         "id_suffix": variant.id_suffix,
+                        "version": variant.version,
                         "parameter_bindings": dict(variant.parameter_bindings),
                     },
                 },

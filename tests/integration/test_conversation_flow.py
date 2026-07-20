@@ -585,7 +585,7 @@ def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
                 {
                     "id": "image_classification",
                     "operator_version_id": (
-                        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
                     ),
                     "runtime_backend": "remote",
                     "parameters": {"tag_field_name": "image_tags"},
@@ -600,7 +600,7 @@ def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
 
     assert decision is not None
     assert "builtin.quality_filter:1" in decision.reply
-    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in decision.reply
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in decision.reply
     assert "data_loader" not in decision.reply
 
     current_context = {
@@ -670,7 +670,7 @@ def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
             {
                 "id": "classification",
                 "operator_version_id": (
-                    "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                    "datajuicer.image_tagging_vlm_mapper.remote_api:2"
                 ),
                 "runtime_backend": "remote",
                 "operator_status": "PERSONAL_RELEASE",
@@ -708,7 +708,7 @@ def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
     assert "retention_first" in first.reply
     assert "3/37" in combined.reply
     assert "builtin.decode_check:1" in combined.reply
-    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in combined.reply
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in combined.reply
 
 
 def test_dataset_result_queries_use_materialized_paths_and_actual_classes(
