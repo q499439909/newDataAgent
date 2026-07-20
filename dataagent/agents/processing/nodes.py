@@ -63,12 +63,14 @@ _NODE_IDS = {
 
 _AUTHENTICITY_PROMPT = (
     "Judge whether the image is an authentic natural photograph or a synthetic "
-    "AI-generated image. Return concise tags including exactly one of: "
-    "authentic, synthetic, uncertain."
+    "AI-generated image. Return strict JSON only, without markdown or explanation, "
+    'using exactly this schema: {"tags":["authentic"]}. The tags array must contain '
+    "exactly one of: authentic, synthetic, uncertain."
 )
 _CLASSIFICATION_PROMPT = (
-    "Classify the visible animals for dataset partitioning. Return concise tags "
-    "including exactly one of: cat, dog, mixed, unknown."
+    "Classify the visible animals for dataset partitioning. Return strict JSON only, "
+    'without markdown or explanation, using exactly this schema: {"tags":["cat"]}. '
+    "The tags array must contain exactly one of: cat, dog, mixed, unknown."
 )
 
 

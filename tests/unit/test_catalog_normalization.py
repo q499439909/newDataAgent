@@ -44,7 +44,13 @@ def _raw_vlm_descriptor() -> ProviderOperatorDescriptor:
         provider_operator_type="mapper",
         display_name="image_tagging_vlm_mapper",
         description="Generate image tags with a VLM.",
-        parameter_schema={"type": "object", "properties": {}},
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "system_prompt": {"type": ["string", "null"], "default": None},
+                "tag_field_name": {"type": "string", "default": "image_tags"},
+            },
+        },
         tags=frozenset({"api", "gpu", "multimodal", "vllm"}),
         source_digest="raw-source-digest",
         suggested_category=OperatorCategory.UNDERSTANDING,
@@ -383,6 +389,10 @@ source = Path(recipe["dataset"]["configs"][0]["path"])
 row = json.loads(source.read_text(encoding="utf-8"))
 row["remote_key_present"] = bool(os.environ.get("OPENAI_API_KEY"))
 Path(recipe["export_path"]).write_text(json.dumps(row) + "\\n", encoding="utf-8")
+Path(recipe["export_path"]).with_name("output_stats.jsonl").write_text(
+    json.dumps({"__dj__meta__": {"image_tags": [["cat"]]}}) + "\\n",
+    encoding="utf-8",
+)
 """.strip(),
         encoding="utf-8",
     )
@@ -410,6 +420,11 @@ Path(recipe["export_path"]).write_text(json.dumps(row) + "\\n", encoding="utf-8"
                     input_data=OperatorInput(
                         source_path=str(source),
                         current_path=str(source),
+                        labels={
+                            "datajuicer_output": {
+                                "authenticity_tags": [["authentic"]]
+                            }
+                        },
                     ),
                 ),
             ),
@@ -420,10 +435,68 @@ Path(recipe["export_path"]).write_text(json.dumps(row) + "\\n", encoding="utf-8"
     assert result.ok is True
     output = result.items[0].result.labels["datajuicer_output"]
     assert output["remote_key_present"] is True
+    assert output["image_tags"] == [["cat"]]
+    assert output["authenticity_tags"] == [["authentic"]]
     recipe_text = next((tmp_path / "runtime").rglob("recipe.yaml")).read_text(
         encoding="utf-8"
     )
     assert "test-secret" not in recipe_text
+
+
+def test_remote_vlm_rejects_empty_semantic_stats(tmp_path, monkeypatch) -> None:
+    fake_process = tmp_path / "fake_empty_vlm.py"
+    fake_process.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+
+recipe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+source = Path(recipe["dataset"]["configs"][0]["path"])
+row = json.loads(source.read_text(encoding="utf-8"))
+output = Path(recipe["export_path"])
+output.write_text(json.dumps(row) + "\\n", encoding="utf-8")
+output.with_name("output_stats.jsonl").write_text(
+    json.dumps({"__dj__meta__": {"image_tags": [[]]}}) + "\\n",
+    encoding="utf-8",
+)
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.png"
+    Image.new("RGB", (16, 16), (10, 20, 30)).save(source)
+    monkeypatch.setenv("BAILIAN_API_KEY", "test-secret")
+    executor = DataJuicerProcessExecutor(
+        (sys.executable, fake_process),
+        runtime_root=tmp_path / "runtime",
+        timeout_seconds=10,
+    )
+
+    result = executor.execute_dataset(
+        ProviderDatasetExecuteRequest(
+            provider_operator_ref="image_tagging_vlm_mapper",
+            runtime_backend=RuntimeBackend.REMOTE,
+            context=OperatorContext(
+                run_id="run_empty",
+                work_order_id="work_order_1",
+                owner_id="user_1",
+            ),
+            items=(
+                ProviderDatasetItem(
+                    asset_id="asset_1",
+                    input_data=OperatorInput(
+                        source_path=str(source),
+                        current_path=str(source),
+                    ),
+                ),
+            ),
+            parameters={"is_api_model": True, "tag_field_name": "image_tags"},
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_type == "empty_provider_semantic_output"
+    assert "1/1 assets" in result.message
 
 
 def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None:
@@ -556,6 +629,11 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         for node in remote_nodes
     )
     assert all(node.parameters["accelerator"] == "cpu" for node in remote_nodes)
+    assert all(
+        '{"tags":[' in node.parameters["system_prompt"]
+        and "strict JSON only" in node.parameters["system_prompt"]
+        for node in remote_nodes
+    )
 
     base.providers.register(provider)
     runtime = AgentRuntime(include_datajuicer=False)

@@ -32,6 +32,16 @@ def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:].strip()
 
 
+def _has_semantic_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_has_semantic_value(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_semantic_value(item) for item in value)
+    return False
+
+
 class DataJuicerSubprocessSearcher:
     def __init__(
         self,
@@ -314,6 +324,18 @@ except ImportError:
                 stdout_tail=stdout_tail,
                 stderr_tail=stderr_tail,
             )
+        stats_path = export_path.with_name("output_stats.jsonl")
+        try:
+            stats_rows = self._read_jsonl(stats_path) if stats_path.is_file() else []
+        except Exception as exc:
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="invalid_provider_stats",
+                message=str(exc),
+                duration_seconds=duration,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
         rows_by_id = {
             str(row.get("_dataagent_asset_id")): row
             for row in rows
@@ -328,19 +350,78 @@ except ImportError:
                 stdout_tail=stdout_tail,
                 stderr_tail=stderr_tail,
             )
-        artifact = AssetRef(
-            uri=str(export_path),
-            media_type="application/x-ndjson",
-            sha256=hashlib.sha256(export_path.read_bytes()).hexdigest(),
-        )
+        stats_by_id: dict[str, dict[str, Any]] = {}
+        if stats_rows:
+            if len(stats_rows) != len(rows):
+                return ProviderDatasetExecuteResult(
+                    ok=False,
+                    error_type="provider_stats_alignment_error",
+                    message=(
+                        "Data-Juicer output rows and stats rows have different lengths: "
+                        f"{len(rows)} != {len(stats_rows)}"
+                    ),
+                    duration_seconds=duration,
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
+            stats_by_id = {
+                str(row.get("_dataagent_asset_id")): stats
+                for row, stats in zip(rows, stats_rows, strict=True)
+            }
+
+        output_fields_by_id: dict[str, dict[str, Any]] = {}
+        for internal_id, row in rows_by_id.items():
+            output_fields = {
+                key: value
+                for key, value in row.items()
+                if key not in {"_dataagent_asset_id", "images", "text"}
+            }
+            stats_meta = stats_by_id.get(internal_id, {}).get("__dj__meta__", {})
+            if isinstance(stats_meta, dict):
+                output_fields.update(stats_meta)
+            output_fields_by_id[internal_id] = output_fields
+
+        if request.provider_operator_ref == "image_tagging_vlm_mapper":
+            tag_field = str(request.parameters.get("tag_field_name") or "image_tags")
+            missing_tags = [
+                internal_id
+                for internal_id in internal_ids
+                if not _has_semantic_value(
+                    output_fields_by_id.get(internal_id, {}).get(tag_field)
+                )
+            ]
+            if missing_tags:
+                return ProviderDatasetExecuteResult(
+                    ok=False,
+                    error_type="empty_provider_semantic_output",
+                    message=(
+                        "Data-Juicer image_tagging_vlm_mapper produced no non-empty "
+                        f"{tag_field} for {len(missing_tags)}/{len(internal_ids)} assets"
+                    ),
+                    duration_seconds=duration,
+                    stdout_tail=stdout_tail,
+                    stderr_tail=stderr_tail,
+                )
+
+        artifacts = [
+            AssetRef(
+                uri=str(export_path),
+                media_type="application/x-ndjson",
+                sha256=hashlib.sha256(export_path.read_bytes()).hexdigest(),
+            )
+        ]
+        if stats_path.is_file():
+            artifacts.append(
+                AssetRef(
+                    uri=str(stats_path),
+                    media_type="application/x-ndjson",
+                    sha256=hashlib.sha256(stats_path.read_bytes()).hexdigest(),
+                )
+            )
         results: list[ProviderDatasetItemResult] = []
         for internal_id, (item, source) in internal_ids.items():
             kept = rows_by_id.get(internal_id)
-            output_fields = {
-                key: value
-                for key, value in (kept or {}).items()
-                if key not in {"_dataagent_asset_id", "images", "text"}
-            }
+            output_fields = output_fields_by_id.get(internal_id, {})
             output_path = str(source)
             images = (kept or {}).get("images", [])
             if isinstance(images, list) and images:
@@ -358,9 +439,19 @@ except ImportError:
                         labels={
                             **item.input_data.labels,
                             "datajuicer_operator": request.provider_operator_ref,
-                            "datajuicer_output": output_fields,
+                            "datajuicer_output": {
+                                **(
+                                    item.input_data.labels.get("datajuicer_output", {})
+                                    if isinstance(
+                                        item.input_data.labels.get("datajuicer_output"),
+                                        dict,
+                                    )
+                                    else {}
+                                ),
+                                **output_fields,
+                            },
                         },
-                        artifacts=[*item.input_data.artifacts, artifact],
+                        artifacts=[*item.input_data.artifacts, *artifacts],
                         annotations=item.input_data.annotations,
                         embeddings=item.input_data.embeddings,
                         decision="continue" if kept is not None else "reject",
