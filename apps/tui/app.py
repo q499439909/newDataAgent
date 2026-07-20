@@ -126,13 +126,18 @@ class TuiApp:
         self.console.print(table)
         if interrupts and interrupts[0]["value"].get("kind") == "pipeline_approval":
             pipelines = interrupts[0]["value"].get("pipelines", [])
-            choices = Table("Strategy", "Version", "Runnable", "Pipeline")
+            choices = Table(
+                "Strategy", "Version", "Runnable", "Blocked reason", "Pipeline"
+            )
             for item in pipelines:
-                eligible = item.get("execution_eligibility", {}).get("eligible")
+                eligibility = item.get("execution_eligibility", {})
+                eligible = eligibility.get("eligible")
+                violations = eligibility.get("violations") or []
                 choices.add_row(
                     item["strategy"],
                     str(item["version"]),
                     "yes" if eligible is True else "no" if eligible is False else "unknown",
+                    "; ".join(str(value) for value in violations) or "-",
                     item["id"],
                 )
             self.console.print(choices)

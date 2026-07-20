@@ -369,10 +369,10 @@ class ConversationService:
                 if eligibility.get("eligible") is False:
                     violations = eligibility.get("violations") or ["未知执行门禁错误"]
                     base["reply"] = (
-                        "这条 Pipeline 当前不能批准运行："
+                        f"{strategy} Pipeline 未获批准，工单仍停留在方案选择阶段。"
+                        "阻塞原因："
                         + "；".join(str(item) for item in violations)
                     )
-                    base["turn"] = turn
                     return base
                 command["pipeline_id"] = selected["id"]
             turn = self.agent_runtime.resume(

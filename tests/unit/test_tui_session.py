@@ -267,7 +267,44 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
     assert "Strategy differences" in output
     assert "PERSONAL_RELEASE" in output and "DRAFT" in output
     assert "yes" in output
+    assert "Blocked reason" in output
     assert "0.35" in output and "0.55" in output and "0.75" in output
+
+
+def test_tui_pipeline_table_shows_execution_block_reason() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    app = TuiApp(TuiSession(FakeControlPlaneClient()), console=console)
+    app._render_turn(
+        {
+            "work_order_id": "work_order_1",
+            "thread_id": "thread_1",
+            "state": {"current_agent": "processing", "next_action": "approve_pipeline"},
+            "interrupts": [
+                {
+                    "value": {
+                        "kind": "pipeline_approval",
+                        "pipelines": [
+                            {
+                                "id": "pipeline_quality",
+                                "strategy": "quality_first",
+                                "version": 1,
+                                "nodes": [],
+                                "execution_eligibility": {
+                                    "eligible": False,
+                                    "violations": ["provider parameter schema is invalid"],
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+        }
+    )
+
+    output = stream.getvalue()
+    assert "no" in output
+    assert "provider parameter schema is invalid" in output
 
 
 def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None:

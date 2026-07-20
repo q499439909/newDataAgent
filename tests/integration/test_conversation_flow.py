@@ -4,7 +4,7 @@ import pytest
 from time import perf_counter
 
 from dataagent.application.agent_runtime import AgentRuntime
-from dataagent.application.conversation import ConversationService
+from dataagent.application.conversation import ConversationDecision, ConversationService
 from dataagent.config import Settings
 from dataagent.gateway import ModelGatewayError
 
@@ -31,6 +31,35 @@ class FailingConversationGateway:
     def conversation_turn(self, *, history, context):
         self.calls += 1
         raise ModelGatewayError("structured response unavailable")
+
+
+class IneligiblePipelineRuntime:
+    def state(self, *, work_order_id, owner_id):
+        return {
+            "work_order_id": work_order_id,
+            "thread_id": "thread_1",
+            "state": {"next_action": "approve_pipeline"},
+            "interrupts": [
+                {
+                    "value": {
+                        "kind": "pipeline_approval",
+                        "pipelines": [
+                            {
+                                "id": "pipeline_quality",
+                                "strategy": "quality_first",
+                                "execution_eligibility": {
+                                    "eligible": False,
+                                    "violations": ["provider parameter schema is invalid"],
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+        }
+
+    def resume(self, **kwargs):
+        raise AssertionError("ineligible pipeline must not be resumed")
 
 
 def _settings(tmp_path) -> Settings:
@@ -441,3 +470,32 @@ def test_model_failure_is_visible_non_mutating_and_auditable(tmp_path) -> None:
     assert "ModelGatewayError" in stored["context"]["conversation_runtime"][
         "last_fallback_reason"
     ]
+
+
+def test_ineligible_pipeline_selection_does_not_redraw_approval_tables(tmp_path) -> None:
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=IneligiblePipelineRuntime(),
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway([]),
+    )
+
+    response = service._apply(
+        thread={
+            "id": "conversation_1",
+            "owner_id": "user_1",
+            "work_order_id": "work_order_1",
+            "context": {},
+        },
+        owner_id="user_1",
+        content="质量优先",
+        decision=ConversationDecision(
+            intent="APPROVE", strategy="quality_first", reply="选择质量优先"
+        ),
+    )
+
+    assert response["turn"] is None
+    assert "仍停留在方案选择阶段" in response["reply"]
+    assert "provider parameter schema is invalid" in response["reply"]
