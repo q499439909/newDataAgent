@@ -17,6 +17,10 @@ from ...domain.operators import (
     RuntimeProfile,
 )
 from ..protocol import OperatorContext, OperatorInput, OperatorResult
+from .catalog_normalization import (
+    normalize_provider_catalog,
+    normalize_provider_descriptor,
+)
 from .protocol import (
     OperatorProvider,
     ProviderDatasetExecuteRequest,
@@ -234,36 +238,39 @@ def build_datajuicer_proxy_operators(
 ) -> tuple[ProviderProxyOperator, ...]:
     admissions = {item.ref: item for item in DATAJUICER_ADMISSIONS}
     catalog_by_ref = {
-        item.provider_operator_ref: item for item in (catalog or ())
+        item.descriptor.provider_operator_ref: item
+        for item in normalize_provider_catalog(catalog or ())
     }
     for admission in DATAJUICER_ADMISSIONS:
         if provider.provider_version not in admission.compatible_versions:
             continue
+        descriptor = ProviderOperatorDescriptor(
+            provider_id=provider.provider_id,
+            provider_version=provider.provider_version,
+            provider_operator_ref=admission.ref,
+            provider_operator_type=(
+                "deduplicator"
+                if admission.category == OperatorCategory.DEDUPLICATION
+                else "filter"
+            ),
+            display_name=admission.display_name,
+            description=admission.summary,
+            parameter_schema=admission.parameter_schema,
+            tags=admission.tags,
+            source_digest=_digest(provider.provider_version, admission),
+            suggested_category=admission.category,
+            suggested_secondary_category=admission.secondary_category,
+            suggested_execution_scope=admission.execution_scope,
+            supported_runtime_backends=(RuntimeBackend.CPU,),
+        )
         catalog_by_ref.setdefault(
             admission.ref,
-            ProviderOperatorDescriptor(
-                provider_id=provider.provider_id,
-                provider_version=provider.provider_version,
-                provider_operator_ref=admission.ref,
-                provider_operator_type=(
-                    "deduplicator"
-                    if admission.category == OperatorCategory.DEDUPLICATION
-                    else "filter"
-                ),
-                display_name=admission.display_name,
-                description=admission.summary,
-                parameter_schema=admission.parameter_schema,
-                tags=admission.tags,
-                source_digest=_digest(provider.provider_version, admission),
-                suggested_category=admission.category,
-                suggested_secondary_category=admission.secondary_category,
-                suggested_execution_scope=admission.execution_scope,
-                supported_runtime_backends=(RuntimeBackend.CPU,),
-            ),
+            normalize_provider_descriptor(descriptor),
         )
     frozen_descriptors: list[ProviderOperatorDescriptor] = []
     operators: list[ProviderProxyOperator] = []
-    for descriptor in catalog_by_ref.values():
+    for normalized_entry in catalog_by_ref.values():
+        descriptor = normalized_entry.descriptor
         admission = admissions.get(descriptor.provider_operator_ref)
         is_admitted = bool(
             admission
@@ -358,6 +365,13 @@ def build_datajuicer_proxy_operators(
             supported_runtime_profiles=profiles,
             execution_scope=execution_scope,
             implementation_ref="dataagent.operators.providers.proxy:ProviderProxyOperator",
+            resource_requirements={
+                "catalog_normalization": {
+                    "overlay_ids": list(normalized_entry.overlay_ids),
+                    "digest": normalized_entry.normalization_digest,
+                    "raw_source_digest": normalized_entry.raw.source_digest,
+                }
+            },
             limitations=(
                 "Requires the isolated Data-Juicer provider environment.",
                 "Candidate status does not imply production admission."

@@ -1,3 +1,10 @@
+from .catalog_normalization import (
+    DATAJUICER_CATALOG_OVERLAYS,
+    NormalizedProviderDescriptor,
+    ProviderCatalogOverlay,
+    normalize_provider_catalog,
+    normalize_provider_descriptor,
+)
 from .datajuicer import DataJuicerOperatorProvider
 from .datajuicer_executor import (
     DataJuicerProcessExecutor,
@@ -25,15 +32,18 @@ from .proxy import (
 )
 
 __all__ = [
+    "DATAJUICER_CATALOG_OVERLAYS",
     "DataJuicerOperatorProvider",
     "DataJuicerProcessExecutor",
     "DataJuicerSubprocessSearcher",
     "NativeOperatorProvider",
+    "NormalizedProviderDescriptor",
     "OperatorProvider",
     "ProviderDatasetExecuteRequest",
     "ProviderDatasetExecuteResult",
     "ProviderDatasetItem",
     "ProviderDatasetItemResult",
+    "ProviderCatalogOverlay",
     "ProviderExecuteRequest",
     "ProviderExecuteResult",
     "ProviderHealth",
@@ -43,5 +53,7 @@ __all__ = [
     "DATAJUICER_ADMISSIONS",
     "ProviderProxyOperator",
     "build_datajuicer_proxy_operators",
+    "normalize_provider_catalog",
+    "normalize_provider_descriptor",
     "ProviderValidationResult",
 ]
