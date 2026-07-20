@@ -158,9 +158,15 @@ class ConversationService:
         pipeline_decision = self._pipeline_details_decision(content, context)
         if pipeline_decision is not None:
             return pipeline_decision
+        approval_decision = self._pending_pipeline_approval_decision(content, context)
+        if approval_decision is not None:
+            return approval_decision
         reselection_decision = self._pipeline_reselection_decision(content, context)
         if reselection_decision is not None:
             return reselection_decision
+        submission_decision = self._pending_run_submission_decision(content, context)
+        if submission_decision is not None:
+            return submission_decision
         fast = self._fast_decision(content)
         if fast is not None:
             return fast
@@ -989,6 +995,60 @@ class ConversationService:
                 f"当前可选策略：{', '.join(available) or '无'}。"
                 "选择后我会先生成新的批准版本，不会直接复用旧 Run。"
             ),
+        )
+
+    @staticmethod
+    def _pending_pipeline_approval_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        if context.get("agent_state", {}).get("waiting") != "pipeline_approval":
+            return None
+        normalized = content.strip().lower().replace(" ", "")
+        strategies = {
+            "保留优先": "retention_first",
+            "均衡": "balanced",
+            "质量优先": "quality_first",
+            "retention_first": "retention_first",
+            "balanced": "balanced",
+            "quality_first": "quality_first",
+        }
+        matches = [
+            strategy for label, strategy in strategies.items() if label in normalized
+        ]
+        if matches:
+            return ConversationDecision(
+                intent=ConversationIntent.APPROVE,
+                strategy=matches[0],
+                reply=f"正在批准 {matches[0]} Pipeline。",
+            )
+        if any(token in normalized for token in ("运行", "执行", "开始", "提交")):
+            return ConversationDecision(
+                intent=ConversationIntent.CHAT,
+                reply=(
+                    "当前还在 Pipeline 选择阶段。请先选择保留优先、均衡或质量优先；"
+                    "批准后再说“开始运行”。"
+                ),
+            )
+        return None
+
+    @staticmethod
+    def _pending_run_submission_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        agent_state = context.get("agent_state", {})
+        if agent_state.get("waiting") is not None or agent_state.get(
+            "next_action"
+        ) != "submit_dataset_run":
+            return None
+        normalized = content.strip().lower().replace(" ", "")
+        if not any(
+            token in normalized
+            for token in ("开始运行", "提交运行", "运行", "执行任务", "开始执行")
+        ):
+            return None
+        return ConversationDecision(
+            intent=ConversationIntent.SUBMIT_RUN,
+            reply="正在提交新的 Run。",
         )
 
     def _fallback_decision(

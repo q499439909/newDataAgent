@@ -172,6 +172,7 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
     )
     assert submitted["run"]["status"] == "QUEUED"
     assert submitted["run"]["work_order_id"] == created["work_order_id"]
+    assert gateway.calls == 1
 
     assert runtime.run_store is not None
     runtime.run_store.mark_failed(submitted["run"]["id"], "test failure")
@@ -578,6 +579,40 @@ def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
     assert "builtin.quality_filter:1" in decision.reply
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in decision.reply
     assert "data_loader" not in decision.reply
+
+
+def test_pipeline_approval_and_run_submission_are_bound_to_workflow_state() -> None:
+    approval_context = {
+        "agent_state": {
+            "waiting": "pipeline_approval",
+            "next_action": "approve_pipeline",
+        }
+    }
+
+    selection = ConversationService._pending_pipeline_approval_decision(
+        "运行保留优先的 pipeline", approval_context
+    )
+    premature_run = ConversationService._pending_pipeline_approval_decision(
+        "运行啊", approval_context
+    )
+    submission = ConversationService._pending_run_submission_decision(
+        "运行啊",
+        {
+            "agent_state": {
+                "waiting": None,
+                "next_action": "submit_dataset_run",
+            }
+        },
+    )
+
+    assert selection is not None
+    assert selection.intent == "APPROVE"
+    assert selection.strategy == "retention_first"
+    assert premature_run is not None
+    assert premature_run.intent == "CHAT"
+    assert "先选择" in premature_run.reply
+    assert submission is not None
+    assert submission.intent == "SUBMIT_RUN"
 
 
 def test_task_spec_supplement_is_revised_before_explicit_approval(tmp_path) -> None:
