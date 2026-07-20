@@ -162,6 +162,12 @@ def test_proxy_repairs_empty_container_types_from_cached_discovery_schema() -> N
             "parameter_schema": {
                 "type": "object",
                 "properties": {
+                    "is_api_model": {"type": "boolean", "default": False},
+                    "api_or_hf_model": {"type": "string", "default": "local-model"},
+                    "api_endpoint": {
+                        "type": ["string", "null"],
+                        "default": None,
+                    },
                     "model_params": {"type": [], "default": {}},
                     "sampling_params": {"type": [], "default": {}},
                 },
@@ -183,6 +189,13 @@ def test_proxy_repairs_empty_container_types_from_cached_discovery_schema() -> N
     normalized = validate_parameters(remote.parameter_schema, {})
     assert normalized["model_params"]["base_url"]
     assert normalized["sampling_params"] == {}
+    validation = provider.validate(
+        "image_tagging_vlm_mapper",
+        normalized,
+        RuntimeBackend.REMOTE,
+    )
+    assert validation.ok is True
+    assert validation.normalized_parameters["accelerator"] == "cpu"
 
 
 def test_normalization_does_not_rewrite_discovery_cache(tmp_path) -> None:

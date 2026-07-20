@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from copy import deepcopy
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -105,6 +106,36 @@ def _runtime_backends(tags: frozenset[str]) -> tuple[RuntimeBackend, ...]:
     if "gpu" in tags:
         backends.append(RuntimeBackend.CUDA)
     return tuple(backends)
+
+
+def _runtime_schema_type(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "null" if value is None else None
+
+
+def _runtime_validation_schema(
+    schema: dict[str, Any], parameters: dict[str, Any]
+) -> dict[str, Any]:
+    repaired = deepcopy(schema)
+    for name, property_schema in repaired.get("properties", {}).items():
+        if property_schema.get("type") != []:
+            continue
+        value = parameters.get(name, property_schema.get("default"))
+        inferred = _runtime_schema_type(value)
+        if inferred is not None:
+            property_schema["type"] = inferred
+    return repaired
 
 
 class DataJuicerOperatorProvider:
@@ -219,10 +250,35 @@ class DataJuicerOperatorProvider:
             errors.append("The current DataAgent executor accepts image operators only")
         if errors:
             return ProviderValidationResult(ok=False, errors=tuple(errors))
+        schema_parameters = dict(parameters)
+        runtime_parameters: dict[str, Any] = {}
+        schema_properties = descriptor.parameter_schema.get("properties", {})
+        if "accelerator" in schema_parameters and "accelerator" not in schema_properties:
+            accelerator = schema_parameters.pop("accelerator")
+            expected = "cpu" if runtime_backend in {
+                RuntimeBackend.CPU,
+                RuntimeBackend.REMOTE,
+            } else runtime_backend.value
+            if accelerator != expected:
+                return ProviderValidationResult(
+                    ok=False,
+                    errors=(
+                        f"Runtime control accelerator must be {expected!r}; "
+                        f"got {accelerator!r}",
+                    ),
+                )
+            runtime_parameters["accelerator"] = accelerator
         try:
-            normalized = validate_parameters(descriptor.parameter_schema, parameters)
+            normalized = validate_parameters(
+                _runtime_validation_schema(
+                    descriptor.parameter_schema,
+                    schema_parameters,
+                ),
+                schema_parameters,
+            )
         except ParameterValidationError as exc:
             return ProviderValidationResult(ok=False, errors=(str(exc),))
+        normalized.update(runtime_parameters)
         return ProviderValidationResult(ok=True, normalized_parameters=normalized)
 
     def execute(self, request: ProviderExecuteRequest) -> ProviderExecuteResult:
