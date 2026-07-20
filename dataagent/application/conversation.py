@@ -763,12 +763,92 @@ class ConversationService:
             "ok",
         }
         if normalized not in review_defaults | continue_with_defaults:
-            return None
+            return ConversationService._clarification_answer_decision(
+                content, ambiguities
+            )
         return ConversationDecision(
             intent=ConversationIntent.EDIT_TASK_SPEC,
             reply="正在将推荐默认值写入 TaskSpec。",
             task_spec_patch=recommended_clarification_patch(ambiguities),
             confirm_after_edit=normalized in continue_with_defaults,
+        )
+
+    @staticmethod
+    def _clarification_answer_decision(
+        content: str, ambiguities: tuple[str, ...]
+    ) -> ConversationDecision | None:
+        normalized = content.strip().lower()
+        if normalized.endswith(("?", "？")) or normalized.startswith(
+            ("为什么", "怎么", "如何", "什么", "能不能", "是否可以")
+        ):
+            return None
+
+        accepts_remaining_defaults = bool(
+            re.search(
+                r"(?:^|[。.!！,，;；\s])(?:好|好的|可以|同意)[。.!！,，;；\s]*$",
+                normalized,
+            )
+        )
+        patch: dict[str, Any] = {
+            "hard_constraints": {},
+            "preferences": {},
+            "semantic_requirements": [],
+            "exclusion_requirements": [],
+        }
+        exclusion_labels = {
+            "ai生成": "排除 AI 生成图片",
+            "插画": "排除插画",
+            "截图": "排除截图",
+            "明显合成": "排除明显合成图片",
+            "美颜": "排除重度美颜图片",
+            "滤镜": "排除重度滤镜图片",
+            "后期调色": "排除明显后期调色图片",
+        }
+        exclusions = [
+            label for token, label in exclusion_labels.items() if token in normalized
+        ]
+        if exclusions:
+            patch["hard_constraints"]["authenticity_scope"] = "；".join(exclusions)
+            patch["exclusion_requirements"].extend(exclusions)
+
+        preferences = patch["preferences"]
+        if "复核" in normalized:
+            preferences.update({"mixed_policy": "review", "unknown_policy": "review"})
+        elif "猫狗都有" in normalized:
+            preferences["mixed_policy"] = "keep"
+        if any(token in normalized for token in ("输出到", "分别输出", "文件夹", "目录")):
+            preferences["output_layout"] = "versioned_class_directories"
+        if any(
+            token in normalized
+            for token in ("源目录只读", "保持源目录", "不修改源", "复制到")
+        ):
+            patch["hard_constraints"]["preserve_source"] = True
+
+        has_explicit_answer = any(
+            bool(patch[key])
+            for key in (
+                "hard_constraints",
+                "preferences",
+                "semantic_requirements",
+                "exclusion_requirements",
+            )
+        )
+        if not has_explicit_answer:
+            return None
+
+        if accepts_remaining_defaults:
+            defaults = recommended_clarification_patch(ambiguities)
+            for key in ("hard_constraints", "preferences"):
+                merged = dict(defaults.get(key) or {})
+                merged.update(patch[key])
+                patch[key] = merged
+            for key in ("semantic_requirements", "exclusion_requirements"):
+                patch[key] = [*(defaults.get(key) or []), *patch[key]]
+
+        return ConversationDecision(
+            intent=ConversationIntent.EDIT_TASK_SPEC,
+            reply="正在把你的澄清写入 TaskSpec。",
+            task_spec_patch=patch,
         )
 
     @staticmethod

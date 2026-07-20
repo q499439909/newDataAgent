@@ -388,6 +388,87 @@ def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -
     assert "已采纳剩余推荐值" in continued["reply"]
 
 
+def test_clarification_answer_is_parsed_without_model_and_normalized(tmp_path) -> None:
+    source = tmp_path / "mix"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FailingConversationGateway()
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+    service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"去掉不真实、非实拍直出的图片，把猫和狗分开',
+    )
+
+    revised = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="排除插画、截图、明显合成。输出到猫狗都有的文件夹。好",
+    )
+
+    spec = revised["turn"]["state"]["task_spec"]
+    assert gateway.calls == 0
+    assert spec["hard_constraints"]["preserve_source"] is True
+    assert spec["preferences"]["mixed_policy"] == "keep"
+    assert spec["preferences"]["unknown_policy"] == "review"
+    assert spec["preferences"]["output_layout"] == "versioned_class_directories"
+    assert "排除插画" in spec["exclusion_requirements"]
+    assert all(not item.startswith("{") for item in spec["exclusion_requirements"])
+    assert spec["ambiguities"] == []
+    assert spec["confirmed"] is False
+
+
+def test_structured_requirement_patch_uses_description_instead_of_dict_repr(
+    tmp_path,
+) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway([]),
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"去掉不真实图片',
+    )
+    thread = runtime.conversation_store.get(conversation["id"], "user_1")
+
+    revised = service._apply(
+        thread=thread,
+        owner_id="user_1",
+        content="排除插画和截图",
+        decision=ConversationDecision(
+            intent="EDIT_TASK_SPEC",
+            task_spec_patch={
+                "exclusion_requirements": [
+                    {
+                        "id": "exclude_non_authentic",
+                        "description": "排除插画和截图",
+                        "rules": ["排除插画", "排除截图"],
+                    }
+                ]
+            },
+        ),
+    )
+
+    requirements = revised["turn"]["state"]["task_spec"]["exclusion_requirements"]
+    assert requirements == ["排除插画和截图"]
+    assert created["work_order_id"] == revised["turn"]["state"]["work_order_id"]
+
+
 def test_quoted_standalone_path_continues_pending_requirement_without_model(tmp_path) -> None:
     source = tmp_path / "images"
     source.mkdir()

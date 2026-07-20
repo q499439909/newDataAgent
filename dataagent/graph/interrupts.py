@@ -18,9 +18,19 @@ from ..agents.requirement.clarification import infer_task_ambiguities
 
 
 def _merge_unique(current: tuple[str, ...], additions: Any) -> tuple[str, ...]:
-    if not isinstance(additions, (list, tuple)):
-        return current
-    return tuple(dict.fromkeys([*current, *(str(item) for item in additions if str(item).strip())]))
+    def requirement_texts(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, dict):
+            description = value.get("description")
+            if isinstance(description, str) and description.strip():
+                return [description.strip()]
+            return requirement_texts(value.get("rules"))
+        if isinstance(value, (list, tuple)):
+            return [text for item in value for text in requirement_texts(item)]
+        return []
+
+    return tuple(dict.fromkeys([*current, *requirement_texts(additions)]))
 
 
 _CONVERSATION_FILLERS = {
@@ -60,8 +70,8 @@ def revise_task_spec_version(
     semantic_requirements = _remove_conversation_fillers(
         _merge_unique(spec.semantic_requirements, patch.get("semantic_requirements"))
     )
-    exclusion_requirements = _merge_unique(
-        spec.exclusion_requirements, patch.get("exclusion_requirements")
+    exclusion_requirements = _remove_conversation_fillers(
+        _merge_unique(spec.exclusion_requirements, patch.get("exclusion_requirements"))
     )
     planning_text = " ".join(
         [objective, *semantic_requirements, *exclusion_requirements]
