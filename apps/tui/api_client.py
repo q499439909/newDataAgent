@@ -106,5 +106,14 @@ class ControlPlaneClient:
                 detail = response.json().get("detail", response.text)
             except ValueError:
                 detail = response.text
-            raise ControlPlaneError(f"{response.status_code}: {detail}")
+            prefix = {
+                404: "没有找到对应资源",
+                409: "当前状态与请求冲突",
+                422: "请求未执行",
+                503: "控制平面暂时不可用",
+            }.get(
+                response.status_code,
+                f"控制平面请求失败（HTTP {response.status_code}）",
+            )
+            raise ControlPlaneError(f"{prefix}：{detail}")
         return response.json()

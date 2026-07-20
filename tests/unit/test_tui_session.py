@@ -3,9 +3,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from io import StringIO
 
+import httpx
+import pytest
 from rich.console import Console
 
 from apps.tui.app import TuiApp, parse_new_command
+from apps.tui.api_client import ControlPlaneClient, ControlPlaneError
 from apps.tui.session import TuiSession
 
 
@@ -265,3 +268,30 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
     assert "PERSONAL_RELEASE" in output and "DRAFT" in output
     assert "yes" in output
     assert "0.35" in output and "0.55" in output and "0.75" in output
+
+
+def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": "Pipeline cannot be approved for execution"},
+        )
+
+    client = ControlPlaneClient(
+        base_url="http://dataagent.test",
+        owner_id="user_1",
+    )
+    client._client.close()
+    client._client = httpx.Client(
+        base_url="http://dataagent.test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ControlPlaneError) as exc_info:
+        client.state("work_order_1")
+
+    message = str(exc_info.value)
+    assert message.startswith("请求未执行：")
+    assert "Pipeline cannot be approved for execution" in message
+    assert not message.startswith("422:")
+    client.close()
