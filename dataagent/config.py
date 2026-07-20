@@ -54,6 +54,7 @@ class Settings:
     datajuicer_timeout_seconds: int = 300
     allow_datajuicer_candidate_execution: bool = True
     fast_text_model: str = "glm-5.2"
+    vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     image_generation_model: str = "wan2.7-image"
     image_generation_pro_model: str = "wan2.7-image-pro"
     text_image_model: str = "qwen-image-2.0-pro"
@@ -111,6 +112,10 @@ class Settings:
                 "DATAAGENT_ALLOW_DATAJUICER_CANDIDATES", True
             ),
             fast_text_model=os.getenv("FAST_TEXT_MODEL", "glm-5.2"),
+            vision_api_base_url=os.getenv(
+                "VISION_API_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ).rstrip("/"),
             image_generation_model=os.getenv(
                 "IMAGE_GENERATION_MODEL", "wan2.7-image"
             ),

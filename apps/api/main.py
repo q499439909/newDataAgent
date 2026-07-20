@@ -87,6 +87,8 @@ def create_app(
             settings.allow_datajuicer_candidate_execution
         ),
         remote_operator_available=bool(settings.api_key),
+        vision_model=settings.vision_model,
+        vision_api_base_url=settings.vision_api_base_url,
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service

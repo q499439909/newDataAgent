@@ -52,6 +52,8 @@ class AgentRuntime:
         datajuicer_timeout_seconds: int = 300,
         allow_datajuicer_candidate_execution: bool = True,
         remote_operator_available: bool = False,
+        vision_model: str = "qwen3.7-plus",
+        vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -89,6 +91,8 @@ class AgentRuntime:
             if self.home is not None
             else None,
             datajuicer_timeout_seconds=datajuicer_timeout_seconds,
+            vision_model=vision_model,
+            vision_api_base_url=vision_api_base_url,
         )
         self.builtin_operators = self.operator_library.operators
         self.operator_registry = self.operator_library.registry

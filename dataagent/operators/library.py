@@ -38,6 +38,8 @@ def build_operator_library(
     datajuicer_process_bin: Path | None = None,
     datajuicer_runtime_root: Path | None = None,
     datajuicer_timeout_seconds: int = 300,
+    vision_model: str = "qwen3.7-plus",
+    vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
 ) -> OperatorLibrary:
     model_manager = ModelManager(
         (MockModelBackend(),), allow_download=allow_model_download
@@ -96,7 +98,12 @@ def build_operator_library(
             except Exception:
                 catalog = []
             operators.extend(
-                build_datajuicer_proxy_operators(datajuicer_provider, catalog)
+                build_datajuicer_proxy_operators(
+                    datajuicer_provider,
+                    catalog,
+                    vision_model=vision_model,
+                    vision_api_base_url=vision_api_base_url,
+                )
             )
     operators_tuple = tuple(operators)
     registry = OperatorRegistry(operator.spec for operator in operators_tuple)

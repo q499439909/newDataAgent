@@ -147,6 +147,9 @@ def _bind_parameters(
 
 def _proxy_variants(
     descriptor: ProviderOperatorDescriptor,
+    *,
+    vision_model: str = "qwen3.7-plus",
+    vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
 ) -> tuple[DataJuicerProxyVariant, ...]:
     if descriptor.provider_operator_ref != "image_tagging_vlm_mapper":
         return (DataJuicerProxyVariant(),)
@@ -160,11 +163,10 @@ def _proxy_variants(
             remove_tags=frozenset({"gpu", "vllm"}),
             parameter_bindings=(
                 ("is_api_model", True),
-                ("api_or_hf_model", "qwen3.7-plus"),
-                (
-                    "api_endpoint",
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                ),
+                ("api_or_hf_model", vision_model),
+                ("api_endpoint", "/chat/completions"),
+                ("model_params", {"base_url": vision_api_base_url}),
+                ("accelerator", "cpu"),
             ),
             output_schema="ImageTagSet",
         ),
@@ -302,6 +304,9 @@ class ProviderProxyOperator:
 def build_datajuicer_proxy_operators(
     provider: OperatorProvider,
     catalog: list[ProviderOperatorDescriptor] | None = None,
+    *,
+    vision_model: str = "qwen3.7-plus",
+    vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
 ) -> tuple[ProviderProxyOperator, ...]:
     admissions = {item.ref: item for item in DATAJUICER_ADMISSIONS}
     catalog_by_ref = {
@@ -338,7 +343,11 @@ def build_datajuicer_proxy_operators(
     operators: list[ProviderProxyOperator] = []
     for normalized_entry in catalog_by_ref.values():
         descriptor = normalized_entry.descriptor
-        for variant in _proxy_variants(descriptor):
+        for variant in _proxy_variants(
+            descriptor,
+            vision_model=vision_model,
+            vision_api_base_url=vision_api_base_url,
+        ):
             admission = admissions.get(descriptor.provider_operator_ref)
             is_admitted = bool(
                 admission

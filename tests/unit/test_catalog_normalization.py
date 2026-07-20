@@ -99,7 +99,12 @@ def test_proxy_records_normalization_provenance() -> None:
 def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None:
     provider = DataJuicerOperatorProvider(provider_version="1.5.3")
 
-    operators = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = build_datajuicer_proxy_operators(
+        provider,
+        [_raw_vlm_descriptor()],
+        vision_model="configured-vision-model",
+        vision_api_base_url="https://vision.example/v1",
+    )
     variants = {
         item.spec.id: item.spec
         for item in operators
@@ -124,9 +129,16 @@ def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None
         "enum": [True],
     }
     assert remote.parameter_schema["properties"]["api_or_hf_model"] == {
-        "default": "qwen3.7-plus",
-        "enum": ["qwen3.7-plus"],
+        "default": "configured-vision-model",
+        "enum": ["configured-vision-model"],
     }
+    assert remote.parameter_schema["properties"]["api_endpoint"]["default"] == (
+        "/chat/completions"
+    )
+    assert remote.parameter_schema["properties"]["model_params"]["default"] == {
+        "base_url": "https://vision.example/v1"
+    }
+    assert remote.parameter_schema["properties"]["accelerator"]["default"] == "cpu"
     assert "remote" in remote.capability_tags
     assert "gpu" not in remote.capability_tags
     assert {profile.backend for profile in local.supported_runtime_profiles} == {
@@ -302,9 +314,11 @@ def test_remote_vlm_variant_validates_against_normalized_runtime_view() -> None:
     assert validation.ok is True
     assert validation.normalized_parameters["is_api_model"] is True
     assert validation.normalized_parameters["api_or_hf_model"] == "qwen3.7-plus"
-    assert validation.normalized_parameters["api_endpoint"].endswith(
-        "/compatible-mode/v1"
-    )
+    assert validation.normalized_parameters["api_endpoint"] == "/chat/completions"
+    assert validation.normalized_parameters["model_params"] == {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    }
+    assert validation.normalized_parameters["accelerator"] == "cpu"
 
 
 def test_remote_executor_injects_api_key_without_writing_it_to_recipe(
@@ -489,7 +503,13 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
     assert len(remote_nodes) == 2
     assert all(node.parameters["is_api_model"] is True for node in remote_nodes)
     assert all(node.parameters["api_or_hf_model"] == "qwen3.7-plus" for node in remote_nodes)
-    assert all(node.parameters["api_endpoint"].endswith("/compatible-mode/v1") for node in remote_nodes)
+    assert all(node.parameters["api_endpoint"] == "/chat/completions" for node in remote_nodes)
+    assert all(
+        node.parameters["model_params"]["base_url"]
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        for node in remote_nodes
+    )
+    assert all(node.parameters["accelerator"] == "cpu" for node in remote_nodes)
 
     base.providers.register(provider)
     runtime = AgentRuntime(include_datajuicer=False)
