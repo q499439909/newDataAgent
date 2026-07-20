@@ -16,6 +16,7 @@ class WorkOrderGraphState(TypedDict, total=False):
     retrieval_plan: dict[str, Any]
     candidate_sufficient: bool
     operator_candidates: list[dict[str, Any]]
+    capability_coverage: list[dict[str, Any]]
 
     pipeline_variants: list[dict[str, Any]]
     representative_pipelines: list[dict[str, Any]]

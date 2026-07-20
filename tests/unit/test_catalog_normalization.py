@@ -10,6 +10,9 @@ from dataagent.domain.operators import (
     OperatorCategory,
     RuntimeBackend,
 )
+from dataagent.domain.plans import CapabilityCoverageStatus
+from dataagent.agents.requirement.nodes import generate_task_spec
+from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
     DataJuicerOperatorProvider,
@@ -358,3 +361,59 @@ Path(recipe["export_path"]).write_text(json.dumps(row) + "\\n", encoding="utf-8"
         encoding="utf-8"
     )
     assert "test-secret" not in recipe_text
+
+
+def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    proxies = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = (*base.operators, *proxies)
+    registry = OperatorRegistry(item.spec for item in operators)
+    requirement = "去掉里面不真实、不清晰的图片，把猫和狗的图片分开"
+    task_result = generate_task_spec(
+        {
+            "work_order_id": "work_order_1",
+            "owner_id": "user_1",
+            "requirement": requirement,
+            "data_sources": [
+                {
+                    "type": "local_directory",
+                    "uri": "D:/images",
+                    "mapping": {},
+                }
+            ],
+            "trace": [],
+        }
+    )
+
+    retrieval = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": task_result["task_spec"],
+            "trace": [],
+        },
+        operator_registry=registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset(
+            {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+        ),
+    )
+    coverage = {
+        item["capability"]: item for item in retrieval["capability_coverage"]
+    }
+
+    assert coverage["image_decode"]["status"] == CapabilityCoverageStatus.COVERED
+    assert coverage["image_quality"]["status"] == CapabilityCoverageStatus.COVERED
+    assert coverage["image_classification"]["status"] == (
+        CapabilityCoverageStatus.COVERED
+    )
+    assert coverage["image_classification"]["selected_operator_version_id"] == (
+        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+    )
+    assert coverage["authenticity_assessment"]["status"] == (
+        CapabilityCoverageStatus.MISSING
+    )
+    assert coverage["class_resolution"]["status"] == CapabilityCoverageStatus.MISSING
+    assert coverage["dataset_partition"]["status"] == CapabilityCoverageStatus.MISSING
+    assert coverage["manifest"]["status"] == CapabilityCoverageStatus.COVERED
+    assert retrieval["retrieval_plan"]["sufficient"] is False

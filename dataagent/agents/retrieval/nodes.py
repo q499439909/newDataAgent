@@ -1,13 +1,126 @@
 from __future__ import annotations
 
 from ...domain.common import new_id
-from ...domain.operators import RuntimeBackend
-from ...domain.plans import RetrievalPlanVersion
+from ...domain.operators import OperatorStatus, RuntimeBackend
+from ...domain.plans import (
+    CapabilityCandidateEvidence,
+    CapabilityCoverage,
+    CapabilityCoverageStatus,
+    RetrievalPlanVersion,
+)
 from ...domain.specs import TaskSpecVersion
 from ...operators.catalog_matching import DataJuicerCatalogMatcher
 from ...operators.catalog_ranking import OperatorCandidateRanker, OperatorRankingPolicy
 from ...operators.registry import OperatorRegistry
 from ..shared import WorkOrderGraphState, append_trace
+
+
+_NATIVE_CAPABILITY_TAGS: dict[str, frozenset[str]] = {
+    "image_decode": frozenset({"decode"}),
+    "image_quality": frozenset({"quality"}),
+    "perceptual_deduplication": frozenset({"deduplication"}),
+    "manifest": frozenset({"manifest"}),
+}
+
+
+def _capability_coverage(
+    spec: TaskSpecVersion,
+    operator_candidates: tuple,
+    *,
+    operator_registry: OperatorRegistry,
+    available_runtime_backends: frozenset[RuntimeBackend],
+) -> tuple[CapabilityCoverage, ...]:
+    requested = list(spec.capability_requirements)
+    if not requested:
+        requested = [
+            {
+                "id": capability,
+                "capability": capability,
+                "description": "",
+                "required": True,
+            }
+            for capability in spec.required_capabilities
+        ]
+    coverage: list[CapabilityCoverage] = []
+    all_operators = operator_registry.search(include_drafts=True)
+    for requested_item in requested:
+        if isinstance(requested_item, dict):
+            capability_id = requested_item["id"]
+            capability = requested_item["capability"]
+            description = requested_item.get("description", "")
+            required = bool(requested_item.get("required", True))
+        else:
+            capability_id = requested_item.id
+            capability = requested_item.capability
+            description = requested_item.description
+            required = requested_item.required
+        evidence = [
+            CapabilityCandidateEvidence(
+                operator_version_id=item.operator_version_id,
+                provider_id=item.provider_id,
+                runtime_backend=item.runtime_backend.value,
+                lifecycle_status=item.status.value,
+                executable=item.executable,
+                score=item.score,
+                blocked_reason=item.blocked_reason,
+            )
+            for item in operator_candidates
+            if (item.capability or item.intent) == capability
+        ]
+        native_tags = _NATIVE_CAPABILITY_TAGS.get(capability, frozenset())
+        for operator in all_operators:
+            if operator.provider.provider_id != "native" or not native_tags:
+                continue
+            if not native_tags.intersection(operator.capability_tags):
+                continue
+            supported = {
+                profile.backend for profile in operator.supported_runtime_profiles
+            }
+            available = supported.intersection(available_runtime_backends)
+            executable = bool(available) and operator.status not in {
+                OperatorStatus.DRAFT,
+                OperatorStatus.DEPRECATED,
+            }
+            backend = next(
+                iter(available or supported),
+                RuntimeBackend.CPU,
+            )
+            evidence.append(
+                CapabilityCandidateEvidence(
+                    operator_version_id=operator.id,
+                    provider_id="native",
+                    runtime_backend=backend.value,
+                    lifecycle_status=operator.status.value,
+                    executable=executable,
+                    score=500 if executable else 0,
+                    blocked_reason=None
+                    if executable
+                    else "Native operator runtime or lifecycle is unavailable",
+                )
+            )
+        evidence.sort(key=lambda item: (not item.executable, -item.score, item.operator_version_id))
+        selected = next((item for item in evidence if item.executable), None)
+        status = (
+            CapabilityCoverageStatus.COVERED
+            if selected is not None
+            else CapabilityCoverageStatus.BLOCKED
+            if evidence
+            else CapabilityCoverageStatus.MISSING
+        )
+        coverage.append(
+            CapabilityCoverage(
+                capability_id=capability_id,
+                capability=capability,
+                description=description,
+                required=required,
+                status=status,
+                selected_operator_version_id=(
+                    selected.operator_version_id if selected is not None else None
+                ),
+                candidates=tuple(evidence),
+            )
+        )
+    return tuple(coverage)
 
 
 def generate_retrieval_plan(
@@ -42,6 +155,16 @@ def generate_retrieval_plan(
         if operator_registry is not None
         else ()
     )
+    coverage = (
+        _capability_coverage(
+            spec,
+            operator_candidates,
+            operator_registry=operator_registry,
+            available_runtime_backends=available_runtime_backends,
+        )
+        if operator_registry is not None
+        else ()
+    )
     target = max(sum(spec.quotas.values()) * 3, 1000)
     routes = tuple(
         {
@@ -56,9 +179,13 @@ def generate_retrieval_plan(
         }
         for source in spec.data_sources
     )
-    blocked_candidates = [
+    coverage_complete = bool(coverage) and all(
+        not item.required or item.status == CapabilityCoverageStatus.COVERED
+        for item in coverage
+    )
+    legacy_sufficient = not any(
         item for item in operator_candidates if not item.executable
-    ]
+    )
     plan = RetrievalPlanVersion(
         id=new_id("retrieval_plan"),
         version=1,
@@ -67,16 +194,18 @@ def generate_retrieval_plan(
         task_spec_version_id=spec.id,
         routes=routes,
         target_candidate_count=target,
-        sufficient=not blocked_candidates,
+        sufficient=coverage_complete if coverage else legacy_sufficient,
         operator_candidates=tuple(
             item.model_dump(mode="json") for item in operator_candidates
         ),
+        capability_coverage=coverage,
     )
     return {
         "retrieval_plan": plan.model_dump(mode="json"),
         "operator_candidates": [
             item.model_dump(mode="json") for item in operator_candidates
         ],
+        "capability_coverage": [item.model_dump(mode="json") for item in coverage],
         "current_agent": "retrieval",
         "trace": append_trace(state, "retrieval:plan_generated"),
     }

@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 from pydantic import Field
 
-from ..common.models import VersionedModel
+from ..common.models import DomainModel, VersionedModel
+
+
+class CapabilityCoverageStatus(StrEnum):
+    COVERED = "covered"
+    BLOCKED = "blocked"
+    MISSING = "missing"
+
+
+class CapabilityCandidateEvidence(DomainModel):
+    operator_version_id: str
+    provider_id: str
+    runtime_backend: str
+    lifecycle_status: str
+    executable: bool
+    score: int = 0
+    blocked_reason: str | None = None
+
+
+class CapabilityCoverage(DomainModel):
+    capability_id: str
+    capability: str
+    description: str = ""
+    required: bool = True
+    status: CapabilityCoverageStatus
+    selected_operator_version_id: str | None = None
+    candidates: tuple[CapabilityCandidateEvidence, ...] = ()
 
 
 class RetrievalPlanVersion(VersionedModel):
@@ -14,6 +41,7 @@ class RetrievalPlanVersion(VersionedModel):
     estimated_cost: float = Field(default=0, ge=0)
     sufficient: bool = False
     operator_candidates: tuple[dict[str, Any], ...] = ()
+    capability_coverage: tuple[CapabilityCoverage, ...] = ()
 
 
 class CurationPlanVersion(VersionedModel):
