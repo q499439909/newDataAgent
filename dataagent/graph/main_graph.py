@@ -59,7 +59,11 @@ def build_main_graph(
     graph.add_conditional_edges(
         "confirm_task_spec",
         route_after_spec_approval,
-        {"retrieval": "retrieval_agent", "end": END},
+        {
+            "confirm": "confirm_task_spec",
+            "retrieval": "retrieval_agent",
+            "end": END,
+        },
     )
     graph.add_conditional_edges(
         "retrieval_agent",

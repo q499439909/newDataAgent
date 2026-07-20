@@ -9,6 +9,55 @@ from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.specs import TaskSpecVersion
 from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
+from ..operators.planning import decompose_task_capabilities, infer_output_actions
+
+
+def _merge_unique(current: tuple[str, ...], additions: Any) -> tuple[str, ...]:
+    if not isinstance(additions, (list, tuple)):
+        return current
+    return tuple(dict.fromkeys([*current, *(str(item) for item in additions if str(item).strip())]))
+
+
+def _revise_task_spec(
+    spec: TaskSpecVersion,
+    *,
+    patch: dict[str, Any],
+    actor: str,
+) -> TaskSpecVersion:
+    hard_constraints = dict(spec.hard_constraints)
+    if isinstance(patch.get("hard_constraints"), dict):
+        hard_constraints.update(patch["hard_constraints"])
+    preferences = dict(spec.preferences)
+    if isinstance(patch.get("preferences"), dict):
+        preferences.update(patch["preferences"])
+    objective = str(patch.get("objective") or spec.objective).strip()
+    semantic_requirements = _merge_unique(
+        spec.semantic_requirements, patch.get("semantic_requirements")
+    )
+    exclusion_requirements = _merge_unique(
+        spec.exclusion_requirements, patch.get("exclusion_requirements")
+    )
+    planning_text = " ".join(
+        [objective, *semantic_requirements, *exclusion_requirements]
+    )
+    capabilities = decompose_task_capabilities(planning_text)
+    return spec.model_copy(
+        update={
+            "id": new_id("spec"),
+            "version": spec.version + 1,
+            "parent_version_id": spec.id,
+            "created_by": actor,
+            "change_reason": "TaskSpec revised from conversation",
+            "objective": objective,
+            "hard_constraints": hard_constraints,
+            "semantic_requirements": semantic_requirements,
+            "exclusion_requirements": exclusion_requirements,
+            "preferences": preferences,
+            "capability_requirements": capabilities,
+            "output_actions": infer_output_actions(capabilities),
+            "confirmed": False,
+        }
+    )
 
 
 def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
@@ -22,6 +71,20 @@ def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
             "allowed_actions": ["approve", "reject", "edit_spec", "terminate"],
         }
     )
+    if isinstance(decision, dict) and decision.get("action") == "edit_spec":
+        spec = TaskSpecVersion.model_validate(state["task_spec"])
+        revised = _revise_task_spec(
+            spec,
+            patch=decision.get("task_spec_patch") or {},
+            actor=state["owner_id"],
+        )
+        return {
+            "task_spec": revised.model_dump(mode="json"),
+            "task_spec_confirmed": False,
+            "task_spec_approval": decision,
+            "next_action": "confirm_task_spec",
+            "trace": append_trace(state, "hitl:task_spec_revised"),
+        }
     approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
     if not approved:
         return {

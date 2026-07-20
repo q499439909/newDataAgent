@@ -84,7 +84,6 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
                 "reply": "我先记录需求。",
                 "requirement": "筛选清晰的人像图片并去重",
             },
-            {"intent": "APPROVE", "reply": "确认 TaskSpec。"},
             {
                 "intent": "APPROVE",
                 "reply": "选择质量优先。",
@@ -277,3 +276,77 @@ def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
     assert "builtin.quality_filter:1" in decision.reply
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in decision.reply
     assert "data_loader" not in decision.reply
+
+
+def test_task_spec_supplement_is_revised_before_explicit_approval(tmp_path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            {
+                "intent": "START_WORK_ORDER",
+                "reply": "Please provide the image directory.",
+                "requirement": "筛选清晰的猫狗图片",
+            },
+            {
+                # Guard against the observed model mistake: supplemental text is not approval.
+                "intent": "APPROVE",
+                "reply": "TaskSpec approved.",
+                "task_spec_patch": {
+                    "exclusion_requirements": [
+                        "Exclude AI-generated or obviously composited images"
+                    ],
+                    "preferences": {"output_layout": "separate_classes"},
+                },
+            },
+        ]
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+    service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="筛选清晰的猫狗图片",
+    )
+    created = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content=str(source)
+    )
+    original_version = created["turn"]["state"]["task_spec"]["version"]
+
+    details = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="TaskSpec show details"
+    )
+    assert "筛选清晰的猫狗图片" in details["reply"]
+    assert gateway.calls == 1
+
+    revised = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="Exclude generated images and write separate class folders",
+    )
+    revised_spec = revised["turn"]["state"]["task_spec"]
+    assert revised["turn"]["interrupts"][0]["value"]["kind"] == (
+        "task_spec_confirmation"
+    )
+    assert revised_spec["version"] == original_version + 1
+    assert revised_spec["confirmed"] is False
+    assert revised_spec["exclusion_requirements"] == [
+        "Exclude AI-generated or obviously composited images"
+    ]
+    assert revised_spec["preferences"]["output_layout"] == "separate_classes"
+
+    approved = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="确认"
+    )
+    assert approved["turn"]["state"]["task_spec"]["confirmed"] is True
+    assert approved["turn"]["interrupts"][0]["value"]["kind"] == (
+        "capability_resolution"
+    )
+    assert gateway.calls == 2

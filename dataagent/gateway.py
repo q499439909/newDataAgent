@@ -135,10 +135,14 @@ class ModelGateway:
             "START_WORK_ORDER requires a concrete data-production requirement; greetings, product "
             "questions, capability questions, and usage questions are CHAT. A filesystem path by "
             "itself is PROVIDE_SOURCE only when pending_requirement is present. APPROVE, REJECT, "
-            "SUBMIT_RUN, RUN_STATUS, and CONTROL_RUN require explicit user intent. Return JSON only "
-            "with keys: intent, reply, requirement, source, strategy, action. Allowed intents are "
-            "CHAT, START_WORK_ORDER, PROVIDE_SOURCE, APPROVE, REJECT, SUBMIT_RUN, RUN_STATUS, "
-            "CONTROL_RUN. strategy may be retention_first, balanced, quality_first, or null. "
+            "SUBMIT_RUN, RUN_STATUS, and CONTROL_RUN require explicit user intent. When a TaskSpec "
+            "is waiting for confirmation, new constraints or answers to follow-up questions are "
+            "EDIT_TASK_SPEC, not APPROVE. Put only user-provided changes in task_spec_patch using "
+            "hard_constraints, semantic_requirements, exclusion_requirements, preferences, or "
+            "objective. Return JSON only with keys: intent, reply, requirement, source, strategy, "
+            "action, task_spec_patch. Allowed intents are CHAT, START_WORK_ORDER, PROVIDE_SOURCE, "
+            "EDIT_TASK_SPEC, APPROVE, REJECT, SUBMIT_RUN, RUN_STATUS, CONTROL_RUN. strategy may be "
+            "retention_first, balanced, quality_first, or null. "
             "action may be pause, resume, cancel, or null."
         )
         payload = {

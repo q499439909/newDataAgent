@@ -19,6 +19,7 @@ class ConversationIntent(StrEnum):
     CHAT = "CHAT"
     START_WORK_ORDER = "START_WORK_ORDER"
     PROVIDE_SOURCE = "PROVIDE_SOURCE"
+    EDIT_TASK_SPEC = "EDIT_TASK_SPEC"
     APPROVE = "APPROVE"
     REJECT = "REJECT"
     SUBMIT_RUN = "SUBMIT_RUN"
@@ -37,6 +38,7 @@ class ConversationDecision(BaseModel):
     strategy: str | None = None
     action: str | None = None
     runtime_backend: str | None = None
+    task_spec_patch: dict[str, Any] | None = None
 
 
 class ConversationService:
@@ -116,6 +118,9 @@ class ConversationService:
         resolution_decision = self._pending_resolution_decision(content, context)
         if resolution_decision is not None:
             return resolution_decision
+        task_spec_decision = self._task_spec_details_decision(content, context)
+        if task_spec_decision is not None:
+            return task_spec_decision
         pipeline_decision = self._pipeline_details_decision(content, context)
         if pipeline_decision is not None:
             return pipeline_decision
@@ -144,6 +149,20 @@ class ConversationService:
             "pending_requirement"
         ):
             return decision.model_copy(update={"intent": ConversationIntent.CHAT})
+        if (
+            context.get("agent_state", {}).get("waiting")
+            == "task_spec_confirmation"
+            and decision.intent == ConversationIntent.APPROVE
+            and not self._is_explicit_approval(content)
+        ):
+            return decision.model_copy(
+                update={
+                    "intent": ConversationIntent.EDIT_TASK_SPEC,
+                    "reply": "我会先把这段补充写入 TaskSpec，再请你确认。",
+                    "task_spec_patch": decision.task_spec_patch
+                    or {"semantic_requirements": [content]},
+                }
+            )
         return decision
 
     def _fast_decision(self, content: str) -> ConversationDecision | None:
@@ -186,6 +205,11 @@ class ConversationService:
                     f"复杂规划由 {self.settings.planning_model} 处理。"
                 )
             )
+        if self._is_explicit_approval(content):
+            return ConversationDecision(
+                intent=ConversationIntent.APPROVE,
+                reply="正在确认。",
+            )
         if normalized in {"谢谢", "感谢", "thanks", "thank you"}:
             return ConversationDecision(reply="不客气。继续说你的需求就好。")
         if normalized in {"再见", "拜拜", "bye", "goodbye"}:
@@ -215,6 +239,34 @@ class ConversationService:
             return self._maybe_start(thread, owner_id, context, base)
         if not work_order_id:
             base["reply"] = "当前还没有工单。请先告诉我需要生产什么图片数据。"
+            return base
+        if decision.intent == ConversationIntent.EDIT_TASK_SPEC:
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id, owner_id=owner_id
+            )
+            if not turn["interrupts"] or turn["interrupts"][0]["value"].get(
+                "kind"
+            ) != "task_spec_confirmation":
+                base["reply"] = "当前没有等待修改的 TaskSpec 草案。"
+                base["turn"] = turn
+                return base
+            patch = decision.task_spec_patch or {
+                "semantic_requirements": [content]
+            }
+            turn = self.agent_runtime.resume(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision={
+                    "action": "edit_spec",
+                    "task_spec_patch": patch,
+                    "channel": "conversation",
+                },
+            )
+            base["turn"] = turn
+            base["reply"] = (
+                "TaskSpec 已生成修订版本，仍在等待确认。\n\n"
+                + self._task_spec_details_reply(turn["state"]["task_spec"])
+            )
             return base
         if decision.intent in {ConversationIntent.APPROVE, ConversationIntent.REJECT}:
             turn = self.agent_runtime.state(
@@ -378,13 +430,7 @@ class ConversationService:
                 ),
             }
             if task_spec := turn["state"].get("task_spec"):
-                context["task_spec"] = {
-                    "objective": task_spec.get("objective"),
-                    "hard_constraints": task_spec.get("hard_constraints", {}),
-                    "semantic_requirements": task_spec.get("semantic_requirements", []),
-                    "exclusion_requirements": task_spec.get("exclusion_requirements", []),
-                    "confirmed": task_spec.get("confirmed", False),
-                }
+                context["task_spec"] = task_spec
             if pipelines := turn["state"].get("representative_pipelines"):
                 context["pipeline_choices"] = [
                     {
@@ -430,6 +476,71 @@ class ConversationService:
             "id": thread["id"],
             "work_order_id": thread["work_order_id"],
             "messages": self.store.messages(thread["id"], thread["owner_id"]),
+        }
+
+    @staticmethod
+    def _task_spec_details_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        normalized = content.strip().lower()
+        asks_for_spec = normalized in {"草案内容", "查看草案", "任务草案"} or (
+            "taskspec" in normalized
+            and any(token in normalized for token in ("内容", "详情", "查看", "show"))
+        )
+        task_spec = context.get("task_spec")
+        if not asks_for_spec or not task_spec:
+            return None
+        return ConversationDecision(
+            intent=ConversationIntent.CHAT,
+            reply=ConversationService._task_spec_details_reply(task_spec),
+        )
+
+    @staticmethod
+    def _task_spec_details_reply(task_spec: dict[str, Any]) -> str:
+        sources = ", ".join(
+            str(item.get("uri", "-")) for item in task_spec.get("data_sources", [])
+        ) or "-"
+        capabilities = [
+            str(item.get("capability", item.get("id", "-")))
+            for item in task_spec.get("capability_requirements", [])
+        ]
+        lines = [
+            "### 当前 TaskSpec",
+            f"- 版本：`{task_spec.get('version', '-')}`",
+            f"- 目标：{task_spec.get('objective', '-')}",
+            f"- 数据源：`{sources}`",
+            "- 输出动作："
+            + (", ".join(task_spec.get("output_actions", [])) or "无"),
+            "- 能力需求：" + (", ".join(capabilities) or "无"),
+            "- 硬约束：`"
+            + json.dumps(
+                task_spec.get("hard_constraints", {}),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "`",
+            "- 语义需求："
+            + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
+            "- 排除需求："
+            + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
+            f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _is_explicit_approval(content: str) -> bool:
+        normalized = content.strip().lower().strip("!！。.?？")
+        return normalized in {
+            "确认",
+            "通过",
+            "批准",
+            "同意",
+            "没问题",
+            "就这样",
+            "按这个执行",
+            "approve",
+            "approved",
+            "yes",
         }
 
     @staticmethod

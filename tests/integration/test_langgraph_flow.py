@@ -83,3 +83,35 @@ def test_rejected_task_spec_terminates_before_retrieval() -> None:
     assert final["terminated"] is True
     assert "retrieval_plan" not in final
     assert final["next_action"] == "terminated"
+
+
+def test_task_spec_can_be_revised_before_confirmation() -> None:
+    graph = build_main_graph(InMemorySaver())
+    config = {"configurable": {"thread_id": "thread_spec_revision"}}
+    first = graph.invoke(initial_state(), config)
+
+    revised = graph.invoke(
+        Command(
+            resume={
+                "action": "edit_spec",
+                "task_spec_patch": {
+                    "exclusion_requirements": ["Exclude synthetic images"],
+                    "preferences": {"output_layout": "by_class"},
+                },
+            }
+        ),
+        config,
+    )
+
+    assert revised["__interrupt__"][0].value["kind"] == "task_spec_confirmation"
+    assert revised["task_spec"]["version"] == first["task_spec"]["version"] + 1
+    assert revised["task_spec"]["confirmed"] is False
+    assert revised["task_spec"]["exclusion_requirements"] == [
+        "Exclude synthetic images"
+    ]
+    assert revised["task_spec"]["preferences"]["output_layout"] == "by_class"
+    assert revised["trace"][-1] == "hitl:task_spec_revised"
+
+    approved = graph.invoke(Command(resume={"approved": True}), config)
+    assert approved["task_spec"]["confirmed"] is True
+    assert approved["__interrupt__"][0].value["kind"] == "capability_resolution"

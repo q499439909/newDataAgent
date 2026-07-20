@@ -4,6 +4,8 @@ from ..agents.shared import WorkOrderGraphState
 
 
 def route_after_spec_approval(state: WorkOrderGraphState) -> str:
+    if state.get("next_action") == "confirm_task_spec":
+        return "confirm"
     return "end" if state.get("terminated") else "retrieval"
 
 
