@@ -320,6 +320,12 @@ class DatasetRunExecutor:
             output_hash: str | None = None
             if decision == "keep":
                 source_output = Path(current.current_path).resolve()
+                requested_relative_path = current.labels.get("output_relative_path")
+                if requested_relative_path:
+                    requested = Path(str(requested_relative_path))
+                    if requested.is_absolute() or ".." in requested.parts:
+                        raise ValueError("Operator produced an unsafe output_relative_path")
+                    relative_path = requested
                 destination = staging_files / relative_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source_output, destination)

@@ -6,6 +6,7 @@ from pathlib import Path
 from .builtin import (
     builtin_image_operators,
     builtin_model_operators,
+    builtin_semantic_operators,
     builtin_utility_operators,
 )
 from .models import MockModelBackend, ModelManager
@@ -43,6 +44,7 @@ def build_operator_library(
     )
     native_operators = (
         *builtin_image_operators(),
+        *builtin_semantic_operators(),
         *builtin_utility_operators(),
         *builtin_model_operators(model_manager),
     )
