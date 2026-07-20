@@ -8,6 +8,7 @@ from ..agents.shared import WorkOrderGraphState, append_trace
 from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.specs import TaskSpecVersion
+from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 
 
 def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
@@ -108,4 +109,91 @@ def approve_pipeline(state: WorkOrderGraphState) -> dict[str, Any]:
         "pipeline_approval": decision if isinstance(decision, dict) else {"approved": True},
         "next_action": "run_strategy_agent",
         "trace": append_trace(state, "hitl:pipeline_approved"),
+    }
+
+
+def resolve_capability_gaps(state: WorkOrderGraphState) -> dict[str, Any]:
+    gaps = [
+        CapabilityCoverage.model_validate(item)
+        for item in state.get("capability_coverage", [])
+        if item.get("required")
+        and item.get("status") != CapabilityCoverageStatus.COVERED
+    ]
+    if not gaps:
+        return {
+            "candidate_sufficient": True,
+            "next_action": "generate_pipeline_candidates",
+            "trace": append_trace(state, "hitl:capability_resolution_not_needed"),
+        }
+    decision = interrupt(
+        {
+            "kind": "capability_resolution",
+            "work_order_id": state["work_order_id"],
+            "attempt": state.get("capability_resolution_attempt", 0) + 1,
+            "gaps": [item.model_dump(mode="json") for item in gaps],
+            "options": [
+                {
+                    "id": "retry",
+                    "label": "重新检索",
+                    "action": "retry",
+                },
+                {
+                    "id": "enable_remote",
+                    "label": "启用远程模型后重试",
+                    "action": "retry",
+                    "enable_runtime_backends": ["remote"],
+                },
+                {
+                    "id": "revise_task",
+                    "label": "修改 TaskSpec",
+                    "action": "revise_task",
+                },
+                {
+                    "id": "terminate",
+                    "label": "终止工单",
+                    "action": "terminate",
+                },
+            ],
+            "allowed_actions": ["retry", "revise_task", "terminate"],
+        }
+    )
+    payload = decision if isinstance(decision, dict) else {"action": "retry"}
+    action = str(payload.get("action", "retry"))
+    if action == "terminate":
+        return {
+            "capability_resolution": payload,
+            "capability_resolution_attempt": state.get(
+                "capability_resolution_attempt", 0
+            )
+            + 1,
+            "terminated": True,
+            "next_action": "terminated",
+            "trace": append_trace(state, "hitl:capability_resolution_terminated"),
+        }
+    if action == "revise_task":
+        return {
+            "capability_resolution": payload,
+            "capability_resolution_attempt": state.get(
+                "capability_resolution_attempt", 0
+            )
+            + 1,
+            "next_action": "edit_task_spec",
+            "trace": append_trace(state, "hitl:capability_resolution_revise_task"),
+        }
+    if action != "retry":
+        raise ValueError(f"Unsupported capability resolution action: {action}")
+    enabled = {
+        *state.get("runtime_backend_overrides", []),
+        *(str(item) for item in payload.get("enable_runtime_backends", [])),
+    }
+    invalid = enabled.difference({"cpu", "cuda", "remote"})
+    if invalid:
+        raise ValueError(f"Unsupported runtime backend overrides: {sorted(invalid)}")
+    return {
+        "capability_resolution": payload,
+        "capability_resolution_attempt": state.get("capability_resolution_attempt", 0)
+        + 1,
+        "runtime_backend_overrides": sorted(enabled),
+        "next_action": "run_retrieval_agent",
+        "trace": append_trace(state, "hitl:capability_resolution_retry"),
     }

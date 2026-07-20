@@ -133,6 +133,15 @@ def generate_retrieval_plan(
     ),
 ) -> dict:
     spec = TaskSpecVersion.model_validate(state["task_spec"])
+    effective_runtime_backends = frozenset(
+        {
+            *available_runtime_backends,
+            *(
+                RuntimeBackend(item)
+                for item in state.get("runtime_backend_overrides", [])
+            ),
+        }
+    )
     recalled_candidates = (
         DataJuicerCatalogMatcher(operator_registry).match(
             spec.objective,
@@ -147,7 +156,7 @@ def generate_retrieval_plan(
         OperatorCandidateRanker(operator_registry).rank(
             recalled_candidates,
             policy=OperatorRankingPolicy(
-                available_runtime_backends=available_runtime_backends,
+                available_runtime_backends=effective_runtime_backends,
                 allow_draft_candidates=allow_draft_candidates,
                 cost_preference=str(spec.preferences.get("cost_preference", "balanced")),
             ),
@@ -160,7 +169,7 @@ def generate_retrieval_plan(
             spec,
             operator_candidates,
             operator_registry=operator_registry,
-            available_runtime_backends=available_runtime_backends,
+            available_runtime_backends=effective_runtime_backends,
         )
         if operator_registry is not None
         else ()
@@ -186,11 +195,15 @@ def generate_retrieval_plan(
     legacy_sufficient = not any(
         item for item in operator_candidates if not item.executable
     )
+    previous_plan = state.get("retrieval_plan")
     plan = RetrievalPlanVersion(
         id=new_id("retrieval_plan"),
-        version=1,
+        version=int(previous_plan.get("version", 0)) + 1 if previous_plan else 1,
+        parent_version_id=previous_plan.get("id") if previous_plan else None,
         created_by=state["owner_id"],
-        change_reason="initial retrieval planning",
+        change_reason=(
+            "capability resolution retry" if previous_plan else "initial retrieval planning"
+        ),
         task_spec_version_id=spec.id,
         routes=routes,
         target_candidate_count=target,

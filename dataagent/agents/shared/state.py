@@ -17,6 +17,9 @@ class WorkOrderGraphState(TypedDict, total=False):
     candidate_sufficient: bool
     operator_candidates: list[dict[str, Any]]
     capability_coverage: list[dict[str, Any]]
+    capability_resolution: dict[str, Any]
+    capability_resolution_attempt: int
+    runtime_backend_overrides: list[str]
 
     pipeline_variants: list[dict[str, Any]]
     representative_pipelines: list[dict[str, Any]]

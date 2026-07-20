@@ -10,10 +10,11 @@ from ..agents.requirement import build_requirement_graph
 from ..agents.retrieval import build_retrieval_graph
 from ..agents.shared import WorkOrderGraphState
 from ..agents.strategy import build_strategy_graph
-from .interrupts import approve_pipeline, confirm_task_spec
+from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
 from .routing import (
     route_after_pipeline_approval,
     route_after_retrieval,
+    route_after_capability_resolution,
     route_after_spec_approval,
 )
 
@@ -46,6 +47,7 @@ def build_main_graph(
         ),
     )
     graph.add_node("processing_agent", build_processing_graph(operator_library))
+    graph.add_node("resolve_capability_gaps", resolve_capability_gaps)
     graph.add_node("approve_pipeline", approve_pipeline)
     graph.add_node("strategy_agent", build_strategy_graph())
 
@@ -59,7 +61,15 @@ def build_main_graph(
     graph.add_conditional_edges(
         "retrieval_agent",
         route_after_retrieval,
-        {"processing": "processing_agent", "end": END},
+        {
+            "processing": "processing_agent",
+            "resolution": "resolve_capability_gaps",
+        },
+    )
+    graph.add_conditional_edges(
+        "resolve_capability_gaps",
+        route_after_capability_resolution,
+        {"retrieval": "retrieval_agent", "end": END},
     )
     graph.add_edge("processing_agent", "approve_pipeline")
     graph.add_conditional_edges(

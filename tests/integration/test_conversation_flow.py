@@ -228,3 +228,17 @@ def test_blocked_operator_candidates_are_explained_after_confirmation() -> None:
 
     assert "image_tagging_mapper" in reply
     assert "cuda" in reply
+
+
+def test_numeric_resolution_choices_bind_to_pending_interrupt() -> None:
+    context = {"agent_state": {"waiting": "capability_resolution"}}
+
+    retry = ConversationService._pending_resolution_decision("1", context)
+    remote = ConversationService._pending_resolution_decision("2", context)
+    revise = ConversationService._pending_resolution_decision("3", context)
+    terminate = ConversationService._pending_resolution_decision("4", context)
+
+    assert retry is not None and retry.action == "retry"
+    assert remote is not None and remote.runtime_backend == "remote"
+    assert revise is not None and revise.action == "revise_task"
+    assert terminate is not None and terminate.action == "terminate"

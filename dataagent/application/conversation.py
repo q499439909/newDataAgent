@@ -23,6 +23,7 @@ class ConversationIntent(StrEnum):
     SUBMIT_RUN = "SUBMIT_RUN"
     RUN_STATUS = "RUN_STATUS"
     CONTROL_RUN = "CONTROL_RUN"
+    RESOLVE_GAP = "RESOLVE_GAP"
 
 
 class ConversationDecision(BaseModel):
@@ -34,6 +35,7 @@ class ConversationDecision(BaseModel):
     source: str | None = None
     strategy: str | None = None
     action: str | None = None
+    runtime_backend: str | None = None
 
 
 class ConversationService:
@@ -110,6 +112,9 @@ class ConversationService:
         source_decision = self._source_or_pending_task_decision(content, context)
         if source_decision is not None:
             return source_decision
+        resolution_decision = self._pending_resolution_decision(content, context)
+        if resolution_decision is not None:
+            return resolution_decision
         fast = self._fast_decision(content)
         if fast is not None:
             return fast
@@ -216,6 +221,13 @@ class ConversationService:
                 base["turn"] = turn
                 return base
             value = turn["interrupts"][0]["value"]
+            if (
+                value.get("kind") == "capability_resolution"
+                and decision.intent == ConversationIntent.APPROVE
+            ):
+                base["turn"] = turn
+                base["reply"] = self._capability_resolution_reply(value)
+                return base
             approved = decision.intent == ConversationIntent.APPROVE
             command: dict[str, Any] = {
                 "approved": approved,
@@ -245,6 +257,27 @@ class ConversationService:
             )
             base["turn"] = turn
             base["reply"] = self._turn_reply(turn, approved)
+            return base
+        if decision.intent == ConversationIntent.RESOLVE_GAP:
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id, owner_id=owner_id
+            )
+            if not turn["interrupts"] or turn["interrupts"][0]["value"].get(
+                "kind"
+            ) != "capability_resolution":
+                base["reply"] = "当前没有等待处理的能力缺口。"
+                base["turn"] = turn
+                return base
+            command: dict[str, Any] = {"action": decision.action or "retry"}
+            if decision.runtime_backend:
+                command["enable_runtime_backends"] = [decision.runtime_backend]
+            turn = self.agent_runtime.resume(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision=command,
+            )
+            base["turn"] = turn
+            base["reply"] = self._turn_reply(turn, True)
             return base
         if decision.intent == ConversationIntent.SUBMIT_RUN:
             run = self.agent_runtime.submit_dataset_run(
@@ -463,6 +496,41 @@ class ConversationService:
             )
         return None
 
+    @staticmethod
+    def _pending_resolution_decision(
+        content: str,
+        context: dict[str, Any],
+    ) -> ConversationDecision | None:
+        if context.get("agent_state", {}).get("waiting") != "capability_resolution":
+            return None
+        normalized = content.strip().lower()
+        if normalized in {"1", "重试", "重新检索", "retry"}:
+            return ConversationDecision(
+                intent=ConversationIntent.RESOLVE_GAP,
+                action="retry",
+                reply="重新检索能力候选。",
+            )
+        if normalized in {"2", "启用远程", "使用远程", "remote"}:
+            return ConversationDecision(
+                intent=ConversationIntent.RESOLVE_GAP,
+                action="retry",
+                runtime_backend="remote",
+                reply="启用远程 Runtime 后重新检索。",
+            )
+        if normalized in {"3", "修改需求", "修改 taskspec", "revise"}:
+            return ConversationDecision(
+                intent=ConversationIntent.RESOLVE_GAP,
+                action="revise_task",
+                reply="返回 TaskSpec 修改阶段。",
+            )
+        if normalized in {"4", "终止工单", "终止任务", "terminate"}:
+            return ConversationDecision(
+                intent=ConversationIntent.RESOLVE_GAP,
+                action="terminate",
+                reply="终止当前工单。",
+            )
+        return None
+
     @classmethod
     def _extract_source(cls, content: str) -> tuple[str | None, str]:
         quoted = re.search(
@@ -538,6 +606,10 @@ class ConversationService:
             kind = turn["interrupts"][0]["value"].get("kind")
             if kind == "pipeline_approval":
                 return "TaskSpec 已确认。现在有保留优先、均衡和质量优先三条 Pipeline 等你选择。"
+            if kind == "capability_resolution":
+                return ConversationService._capability_resolution_reply(
+                    turn["interrupts"][0]["value"]
+                )
         if turn["state"].get("next_action") == "submit_dataset_run":
             return "Pipeline 已批准，SamplingPlan 已生成。你可以说“开始运行”。"
         if turn["state"].get("next_action") == "expand_retrieval":
@@ -553,7 +625,20 @@ class ConversationService:
                 )
                 return f"需求已确认，但匹配算子当前不可执行：{details}。"
             return "需求已确认，但当前算子目录不足以生成可执行 Pipeline。"
+        if turn["state"].get("next_action") == "edit_task_spec":
+            return "能力缺口尚未解决，工单已返回 TaskSpec 修改阶段。"
         return "已确认，流程继续。"
+
+    @staticmethod
+    def _capability_resolution_reply(value: dict[str, Any]) -> str:
+        gaps = value.get("gaps", [])
+        details = "、".join(
+            f"{item.get('capability')}（{item.get('status')}）" for item in gaps
+        )
+        return (
+            f"当前仍有能力缺口：{details}。请选择："
+            "1 重新检索；2 启用远程模型后重试；3 修改 TaskSpec；4 终止工单。"
+        )
 
     @staticmethod
     def _run_reply(run: dict[str, Any]) -> str:
