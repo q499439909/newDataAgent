@@ -76,15 +76,26 @@ def build_operator_library(
                     f"Data-Juicer process executable not found: {datajuicer_process_bin}"
                 )
         datajuicer_provider = DataJuicerOperatorProvider(
-                searcher_factory=(lambda: searcher) if searcher is not None else None,
-                executor=executor,
-                provider_version=provider_version,
-                allow_model_download=allow_model_download,
-                availability_error=availability_error,
-            )
+            searcher_factory=(lambda: searcher) if searcher is not None else None,
+            executor=executor,
+            provider_version=provider_version,
+            allow_model_download=allow_model_download,
+            availability_error=availability_error,
+            catalog_cache_path=(
+                datajuicer_runtime_root / f"catalog-{provider_version}.json"
+                if datajuicer_runtime_root is not None and provider_version
+                else None
+            ),
+        )
         providers.register(datajuicer_provider)
         if executor is not None and not availability_error:
-            operators.extend(build_datajuicer_proxy_operators(datajuicer_provider))
+            try:
+                catalog = datajuicer_provider.discover()
+            except Exception:
+                catalog = []
+            operators.extend(
+                build_datajuicer_proxy_operators(datajuicer_provider, catalog)
+            )
     operators_tuple = tuple(operators)
     registry = OperatorRegistry(operator.spec for operator in operators_tuple)
     runtime = OperatorRuntime(operators_tuple)

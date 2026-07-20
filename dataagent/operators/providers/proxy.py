@@ -128,9 +128,24 @@ def _digest(provider_version: str, admission: DataJuicerAdmission) -> str:
 
 
 class ProviderProxyOperator:
-    def __init__(self, spec: OperatorSpecVersion, provider: OperatorProvider) -> None:
+    def __init__(
+        self,
+        spec: OperatorSpecVersion,
+        provider: OperatorProvider,
+        *,
+        provider_operator_type: str,
+    ) -> None:
         self.spec = spec
         self.provider = provider
+        self.provider_operator_type = provider_operator_type
+        self.supports_dataset_batch = (
+            self.spec.execution_scope == ExecutionScope.DATASET
+            or (
+                provider_operator_type == "filter"
+                and "cpu" in self.spec.capability_tags
+                and "image" in self.spec.capability_tags
+            )
+        )
 
     def execute(
         self,
@@ -138,9 +153,11 @@ class ProviderProxyOperator:
         input_data: OperatorInput,
         parameters: dict[str, Any],
     ) -> OperatorResult:
+        node_id = str(context.shared.get("active_node_id", ""))
+        prepared = context.shared.get("dataset_operator_results", {}).get(node_id, {})
+        if input_data.source_path in prepared:
+            return self._merge_prepared(prepared[input_data.source_path], input_data)
         if self.spec.execution_scope == ExecutionScope.DATASET:
-            node_id = str(context.shared.get("active_node_id", ""))
-            prepared = context.shared.get("dataset_operator_results", {}).get(node_id, {})
             try:
                 return prepared[input_data.source_path]
             except KeyError as exc:
@@ -151,7 +168,9 @@ class ProviderProxyOperator:
         response = self.provider.execute(
             ProviderExecuteRequest(
                 provider_operator_ref=self.spec.provider.provider_operator_ref,
-                runtime_backend=RuntimeBackend.CPU,
+                runtime_backend=RuntimeBackend(
+                    context.shared.get("active_runtime_backend", RuntimeBackend.CPU)
+                ),
                 context=context,
                 input_data=input_data,
                 parameters=parameters,
@@ -160,6 +179,26 @@ class ProviderProxyOperator:
         if not response.ok or response.result is None:
             raise RuntimeError(response.message or response.error_type or "Provider failed")
         return response.result
+
+    @staticmethod
+    def _merge_prepared(
+        result: OperatorResult,
+        input_data: OperatorInput,
+    ) -> OperatorResult:
+        def merge_unique(current: list, prepared: list) -> list:
+            return [*current, *(item for item in prepared if item not in current)]
+
+        return result.model_copy(
+            update={
+                "metrics": {**input_data.metrics, **result.metrics},
+                "labels": {**input_data.labels, **result.labels},
+                "artifacts": merge_unique(input_data.artifacts, result.artifacts),
+                "annotations": merge_unique(
+                    input_data.annotations, result.annotations
+                ),
+                "embeddings": merge_unique(input_data.embeddings, result.embeddings),
+            }
+        )
 
     def prepare_dataset(
         self,
@@ -191,72 +230,158 @@ class ProviderProxyOperator:
 
 def build_datajuicer_proxy_operators(
     provider: OperatorProvider,
+    catalog: list[ProviderOperatorDescriptor] | None = None,
 ) -> tuple[ProviderProxyOperator, ...]:
-    descriptors: list[ProviderOperatorDescriptor] = []
-    operators: list[ProviderProxyOperator] = []
+    admissions = {item.ref: item for item in DATAJUICER_ADMISSIONS}
+    catalog_by_ref = {
+        item.provider_operator_ref: item for item in (catalog or ())
+    }
     for admission in DATAJUICER_ADMISSIONS:
         if provider.provider_version not in admission.compatible_versions:
             continue
-        source_digest = _digest(provider.provider_version, admission)
-        descriptor = ProviderOperatorDescriptor(
-            provider_id=provider.provider_id,
-            provider_version=provider.provider_version,
-            provider_operator_ref=admission.ref,
-            display_name=admission.display_name,
-            description=admission.summary,
-            parameter_schema=admission.parameter_schema,
-            tags=admission.tags,
-            source_digest=source_digest,
-            suggested_category=admission.category,
-            suggested_secondary_category=admission.secondary_category,
+        catalog_by_ref.setdefault(
+            admission.ref,
+            ProviderOperatorDescriptor(
+                provider_id=provider.provider_id,
+                provider_version=provider.provider_version,
+                provider_operator_ref=admission.ref,
+                provider_operator_type=(
+                    "deduplicator"
+                    if admission.category == OperatorCategory.DEDUPLICATION
+                    else "filter"
+                ),
+                display_name=admission.display_name,
+                description=admission.summary,
+                parameter_schema=admission.parameter_schema,
+                tags=admission.tags,
+                source_digest=_digest(provider.provider_version, admission),
+                suggested_category=admission.category,
+                suggested_secondary_category=admission.secondary_category,
+                suggested_execution_scope=admission.execution_scope,
+                supported_runtime_backends=(RuntimeBackend.CPU,),
+            ),
         )
-        descriptors.append(descriptor)
-        operator_id = f"datajuicer.{admission.ref}:1"
+    frozen_descriptors: list[ProviderOperatorDescriptor] = []
+    operators: list[ProviderProxyOperator] = []
+    for descriptor in catalog_by_ref.values():
+        admission = admissions.get(descriptor.provider_operator_ref)
+        is_admitted = bool(
+            admission
+            and provider.provider_version in admission.compatible_versions
+        )
+        if is_admitted:
+            assert admission is not None
+            source_digest = _digest(provider.provider_version, admission)
+            category = admission.category
+            secondary = admission.secondary_category
+            tags = admission.tags
+            parameter_schema = admission.parameter_schema
+            execution_scope = admission.execution_scope
+            display_name = admission.display_name
+            summary = admission.summary
+            dependencies = admission.dependencies
+            frozen_descriptors.append(
+                descriptor.model_copy(
+                    update={
+                        "display_name": display_name,
+                        "description": summary,
+                        "parameter_schema": parameter_schema,
+                        "tags": tags,
+                        "source_digest": source_digest,
+                        "suggested_category": category,
+                        "suggested_secondary_category": secondary,
+                        "suggested_execution_scope": execution_scope,
+                        "supported_runtime_backends": (RuntimeBackend.CPU,),
+                    }
+                )
+            )
+        else:
+            source_digest = descriptor.source_digest
+            category = descriptor.suggested_category or OperatorCategory.UNDERSTANDING
+            secondary = descriptor.suggested_secondary_category or "classification"
+            tags = frozenset({*descriptor.tags, "datajuicer", "candidate"})
+            parameter_schema = descriptor.parameter_schema
+            execution_scope = descriptor.suggested_execution_scope
+            display_name = descriptor.display_name
+            summary = descriptor.description or (
+                f"Candidate proxy for Data-Juicer {descriptor.provider_operator_ref}."
+            )
+            dependencies = (f"py-data-juicer=={provider.provider_version}",)
+        runtime_backends = descriptor.supported_runtime_backends or (
+            RuntimeBackend.CPU,
+        )
+        profiles = tuple(
+            RuntimeProfile(
+                backend=backend,
+                memory_mb=2048 if backend == RuntimeBackend.CUDA else 1024,
+                gpu_count=1 if backend == RuntimeBackend.CUDA else 0,
+            )
+            for backend in runtime_backends
+        )
+        operator_id = f"datajuicer.{descriptor.provider_operator_ref}:1"
         spec = OperatorSpecVersion(
             id=operator_id,
             family_id=operator_id.rsplit(":", 1)[0],
             version=1,
             created_by="system",
-            change_reason="admitted Data-Juicer provider proxy",
-            display_name=admission.display_name,
-            summary=admission.summary,
-            description=(
-                f"Versioned DataAgent proxy for Data-Juicer {admission.ref}; "
-                "execution is isolated and source images remain immutable."
+            change_reason=(
+                "admitted Data-Juicer provider proxy"
+                if is_admitted
+                else "auto-generated Data-Juicer candidate proxy"
             ),
-            primary_category=admission.category,
-            secondary_category=admission.secondary_category,
-            capability_tags=admission.tags,
-            input_schema="ImageAssetRef",
+            display_name=display_name,
+            summary=summary,
+            description=(
+                f"Versioned DataAgent proxy for Data-Juicer "
+                f"{descriptor.provider_operator_ref} ({descriptor.provider_operator_type}); "
+                "candidate proxies require admission evidence before production use."
+            ),
+            primary_category=category,
+            secondary_category=secondary,
+            capability_tags=tags,
+            input_schema=("ImageAssetRef" if "image" in tags else "ProviderDatasetRecord"),
             output_schema="ProviderDecision",
-            parameter_schema=admission.parameter_schema,
+            parameter_schema=parameter_schema,
             provider=ProviderRef(
                 provider_id=provider.provider_id,
                 provider_version=provider.provider_version,
-                provider_operator_ref=admission.ref,
+                provider_operator_ref=descriptor.provider_operator_ref,
                 source_digest=source_digest,
             ),
             implementation=ImplementationSpec(
                 implementation_type=ImplementationType.EXTERNAL_SERVICE,
                 entrypoint="dataagent.operators.providers.proxy:ProviderProxyOperator",
                 dependency_lock_digest=hashlib.sha256(
-                    "\n".join(admission.dependencies).encode("utf-8")
+                    "\n".join(dependencies).encode("utf-8")
                 ).hexdigest(),
             ),
-            supported_runtime_profiles=(
-                RuntimeProfile(backend=RuntimeBackend.CPU, memory_mb=1024),
-            ),
-            execution_scope=admission.execution_scope,
+            supported_runtime_profiles=profiles,
+            execution_scope=execution_scope,
             implementation_ref="dataagent.operators.providers.proxy:ProviderProxyOperator",
-            limitations=("Requires the isolated Data-Juicer provider environment.",),
-            status=OperatorStatus.PERSONAL_RELEASE,
+            limitations=(
+                "Requires the isolated Data-Juicer provider environment.",
+                "Candidate status does not imply production admission."
+                if not is_admitted
+                else "Released only for the verified provider version.",
+            ),
+            status=(
+                OperatorStatus.PERSONAL_RELEASE
+                if is_admitted
+                else OperatorStatus.DRAFT
+            ),
             owner_id="system",
             visibility="private",
         )
-        operators.append(ProviderProxyOperator(spec, provider))
+        operators.append(
+            ProviderProxyOperator(
+                spec,
+                provider,
+                provider_operator_type=descriptor.provider_operator_type,
+            )
+        )
     admit = getattr(provider, "admit", None)
     if callable(admit):
-        admit(descriptors)
+        admit(frozen_descriptors)
     return tuple(operators)
 
 

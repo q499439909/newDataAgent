@@ -83,6 +83,9 @@ def create_app(
         datajuicer_python=settings.datajuicer_python,
         datajuicer_process_bin=settings.datajuicer_process_bin,
         datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
+        allow_datajuicer_candidate_execution=(
+            settings.allow_datajuicer_candidate_execution
+        ),
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
@@ -182,13 +185,25 @@ def create_app(
     @app.get("/api/operators")
     def list_operators(
         category: OperatorCategory | None = None,
+        include_drafts: bool = False,
+        provider_id: str | None = None,
+        tag: str | None = None,
         owner_id: str = Depends(require_owner),
         agent_runtime: AgentRuntime = Depends(get_runtime),
     ) -> list[dict[str, Any]]:
         del owner_id
+        operators = agent_runtime.operator_registry.search(
+            category=category,
+            tags={tag.lower()} if tag else None,
+            include_drafts=include_drafts,
+        )
+        if provider_id:
+            operators = [
+                item for item in operators if item.provider.provider_id == provider_id
+            ]
         return [
             item.model_dump(mode="json")
-            for item in agent_runtime.operator_registry.search(category=category)
+            for item in operators
         ]
 
     @app.get("/api/operator-providers")
@@ -204,6 +219,9 @@ def create_app(
         provider_id: str,
         query: str | None = None,
         limit: int = 100,
+        operator_type: str | None = None,
+        tag: str | None = None,
+        refresh: bool = False,
         owner_id: str = Depends(require_owner),
         agent_runtime: AgentRuntime = Depends(get_runtime),
     ) -> list[dict[str, Any]]:
@@ -213,6 +231,9 @@ def create_app(
                 provider_id=provider_id,
                 query=query,
                 limit=limit,
+                operator_type=operator_type,
+                tag=tag,
+                refresh=refresh,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

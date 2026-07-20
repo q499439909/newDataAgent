@@ -5,7 +5,12 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...domain.operators import OperatorCategory, OperatorSpecVersion, RuntimeBackend
+from ...domain.operators import (
+    ExecutionScope,
+    OperatorCategory,
+    OperatorSpecVersion,
+    RuntimeBackend,
+)
 from ..protocol import OperatorContext, OperatorInput, OperatorResult
 
 
@@ -30,6 +35,7 @@ class ProviderOperatorDescriptor(BaseModel):
     provider_id: str
     provider_version: str
     provider_operator_ref: str
+    provider_operator_type: str = ""
     display_name: str
     description: str
     parameter_schema: dict[str, Any] = Field(default_factory=dict)
@@ -37,6 +43,8 @@ class ProviderOperatorDescriptor(BaseModel):
     source_digest: str = ""
     suggested_category: OperatorCategory | None = None
     suggested_secondary_category: str | None = None
+    suggested_execution_scope: ExecutionScope = ExecutionScope.ASSET
+    supported_runtime_backends: tuple[RuntimeBackend, ...] = ()
     operator_spec: OperatorSpecVersion | None = None
 
 

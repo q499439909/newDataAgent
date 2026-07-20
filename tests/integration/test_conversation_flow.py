@@ -84,11 +84,6 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
                 "reply": "我先记录需求。",
                 "requirement": "筛选清晰的人像图片并去重",
             },
-            {
-                "intent": "PROVIDE_SOURCE",
-                "reply": "我来检查目录。",
-                "source": str(source),
-            },
             {"intent": "APPROVE", "reply": "确认 TaskSpec。"},
             {
                 "intent": "APPROVE",
@@ -136,3 +131,100 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
     )
     assert submitted["run"]["status"] == "QUEUED"
     assert submitted["run"]["work_order_id"] == created["work_order_id"]
+
+
+def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) -> None:
+    source = tmp_path / "cats_dogs_mixed" / "images"
+    source.mkdir(parents=True)
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway([])
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=(
+            f'"{source}"去掉里面不真实、不清晰的图片，把猫和狗的图片分开'
+        ),
+    )
+
+    assert response["work_order_id"] is not None
+    assert response["turn"]["interrupts"][0]["value"]["kind"] == (
+        "task_spec_confirmation"
+    )
+    assert response["turn"]["state"]["task_spec"]["objective"] == (
+        "去掉里面不真实、不清晰的图片，把猫和狗的图片分开"
+    )
+    assert response["turn"]["state"]["task_spec"]["data_sources"][0]["uri"] == str(
+        source.resolve()
+    )
+    assert gateway.calls == 0
+
+
+def test_quoted_standalone_path_continues_pending_requirement_without_model(tmp_path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            {
+                "intent": "START_WORK_ORDER",
+                "reply": "请提供目录。",
+                "requirement": "筛选清晰图片并去重",
+            }
+        ]
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+    service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="帮我筛选清晰图片并去重",
+    )
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"',
+    )
+
+    assert response["work_order_id"] is not None
+    assert response["turn"]["interrupts"][0]["value"]["kind"] == (
+        "task_spec_confirmation"
+    )
+    assert gateway.calls == 1
+
+
+def test_blocked_operator_candidates_are_explained_after_confirmation() -> None:
+    reply = ConversationService._turn_reply(
+        {
+            "interrupts": [],
+            "state": {
+                "next_action": "expand_retrieval",
+                "operator_candidates": [
+                    {
+                        "provider_operator_ref": "image_tagging_mapper",
+                        "executable": False,
+                        "blocked_reason": "Runtime backend cuda is not available",
+                    }
+                ],
+            },
+        },
+        approved=True,
+    )
+
+    assert "image_tagging_mapper" in reply
+    assert "cuda" in reply

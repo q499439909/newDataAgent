@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, get_args, get_origin
 
-from ...domain.operators import OperatorCategory, RuntimeBackend
+from ...domain.operators import ExecutionScope, OperatorCategory, RuntimeBackend
 from ..validation import ParameterValidationError, validate_parameters
 from .protocol import (
     ProviderDatasetExecuteRequest,
@@ -68,7 +70,29 @@ def _suggest_category(op_type: str, name: str) -> tuple[OperatorCategory, str]:
         return OperatorCategory.UNDERSTANDING, secondary
     if op_type == "mapper":
         return OperatorCategory.TRANSFORMATION, "annotation_conversion"
+    if op_type == "selector":
+        secondary = "random_sampling" if "random" in lowered else "stratified_sampling"
+        return OperatorCategory.SAMPLING, secondary
+    if op_type in {"aggregator", "grouper"}:
+        return OperatorCategory.EVALUATION, "distribution_profile"
+    if op_type == "pipeline":
+        return OperatorCategory.TRANSFORMATION, "annotation_conversion"
     return OperatorCategory.UNDERSTANDING, "classification"
+
+
+def _execution_scope(op_type: str) -> ExecutionScope:
+    if op_type in {"deduplicator", "selector", "aggregator", "grouper", "pipeline"}:
+        return ExecutionScope.DATASET
+    return ExecutionScope.ASSET
+
+
+def _runtime_backends(tags: frozenset[str]) -> tuple[RuntimeBackend, ...]:
+    backends: list[RuntimeBackend] = []
+    if "cpu" in tags:
+        backends.append(RuntimeBackend.CPU)
+    if "gpu" in tags:
+        backends.append(RuntimeBackend.CUDA)
+    return tuple(backends)
 
 
 class DataJuicerOperatorProvider:
@@ -82,13 +106,18 @@ class DataJuicerOperatorProvider:
         provider_version: str | None = None,
         allow_model_download: bool = False,
         availability_error: str | None = None,
+        catalog_cache_path: Path | None = None,
     ) -> None:
         self._searcher_factory = searcher_factory
         self._executor = executor
         self.provider_version = provider_version or self._installed_version()
         self.allow_model_download = allow_model_download
         self.availability_error = availability_error
-        self._descriptors: dict[str, ProviderOperatorDescriptor] | None = None
+        self.catalog_cache_path = (
+            catalog_cache_path.expanduser().resolve() if catalog_cache_path else None
+        )
+        self._catalog_descriptors: dict[str, ProviderOperatorDescriptor] | None = None
+        self._admitted_descriptors: dict[str, ProviderOperatorDescriptor] = {}
 
     @staticmethod
     def _installed_version() -> str:
@@ -107,23 +136,41 @@ class DataJuicerOperatorProvider:
         return OPSearcher(include_formatter=False)
 
     def discover(self) -> list[ProviderOperatorDescriptor]:
-        if self._descriptors is None:
-            searcher = self._searcher()
-            records = searcher.search()
-            self._descriptors = {
-                descriptor.provider_operator_ref: descriptor
-                for descriptor in (self._descriptor(record) for record in records)
-            }
-        return list(self._descriptors.values())
+        if self._catalog_descriptors is None:
+            self._catalog_descriptors = self._load_catalog_cache()
+        if self._catalog_descriptors is None:
+            self._catalog_descriptors = self._search_catalog()
+            self._save_catalog_cache(self._catalog_descriptors.values())
+        return list(self._catalog_descriptors.values())
+
+    def refresh_catalog(self) -> list[ProviderOperatorDescriptor]:
+        self._catalog_descriptors = self._search_catalog()
+        self._save_catalog_cache(self._catalog_descriptors.values())
+        return list(self._catalog_descriptors.values())
+
+    def _search_catalog(self) -> dict[str, ProviderOperatorDescriptor]:
+        records = self._searcher().search()
+        return {
+            descriptor.provider_operator_ref: descriptor
+            for descriptor in (self._descriptor(record) for record in records)
+        }
 
     def describe(self, provider_operator_ref: str) -> ProviderOperatorDescriptor:
-        if self._descriptors is None:
-            self.discover()
-        assert self._descriptors is not None
         try:
-            return self._descriptors[provider_operator_ref]
+            catalog = {
+                item.provider_operator_ref: item for item in self.discover()
+            }
+        except Exception:
+            catalog = {}
+        try:
+            return catalog[provider_operator_ref]
         except KeyError as exc:
-            raise KeyError(f"Data-Juicer operator not found: {provider_operator_ref}") from exc
+            try:
+                return self._admitted_descriptors[provider_operator_ref]
+            except KeyError:
+                raise KeyError(
+                    f"Data-Juicer operator not found: {provider_operator_ref}"
+                ) from exc
 
     def validate(
         self,
@@ -131,17 +178,14 @@ class DataJuicerOperatorProvider:
         parameters: dict[str, Any],
         runtime_backend: RuntimeBackend,
     ) -> ProviderValidationResult:
-        descriptor = self.describe(provider_operator_ref)
+        descriptor = self._admitted_descriptors.get(provider_operator_ref)
+        if descriptor is None:
+            descriptor = self.describe(provider_operator_ref)
         errors: list[str] = []
         if runtime_backend != RuntimeBackend.CPU:
             errors.append("Data-Juicer execution currently supports the CPU backend only")
-        if descriptor.suggested_category not in {
-            OperatorCategory.FILTERING,
-            OperatorCategory.DEDUPLICATION,
-        }:
-            errors.append(
-                "Only admitted Data-Juicer filters and deduplicators can execute locally"
-            )
+        if "image" not in descriptor.tags:
+            errors.append("The current DataAgent executor accepts image operators only")
         if "cpu" not in descriptor.tags:
             errors.append("The operator is not declared as CPU-compatible")
         if not self.allow_model_download and any(
@@ -205,12 +249,46 @@ class DataJuicerOperatorProvider:
         return self._executor.execute_dataset(normalized)
 
     def admit(self, descriptors: list[ProviderOperatorDescriptor]) -> None:
-        """Seed immutable descriptors for formal proxies without runtime discovery."""
-        if self._descriptors is None:
-            self._descriptors = {}
-        self._descriptors.update(
+        """Store frozen release descriptors without changing discovery catalog results."""
+        self._admitted_descriptors.update(
             {item.provider_operator_ref: item for item in descriptors}
         )
+
+    def admitted(self) -> list[ProviderOperatorDescriptor]:
+        return list(self._admitted_descriptors.values())
+
+    def _load_catalog_cache(self) -> dict[str, ProviderOperatorDescriptor] | None:
+        path = self.catalog_cache_path
+        if path is None or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("provider_version") != self.provider_version:
+                return None
+            descriptors = [
+                ProviderOperatorDescriptor.model_validate(item)
+                for item in payload.get("operators", [])
+            ]
+        except (OSError, ValueError, TypeError):
+            return None
+        return {item.provider_operator_ref: item for item in descriptors}
+
+    def _save_catalog_cache(self, descriptors: Any) -> None:
+        path = self.catalog_cache_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "provider_id": self.provider_id,
+            "provider_version": self.provider_version,
+            "operators": [item.model_dump(mode="json") for item in descriptors],
+        }
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
 
     def health(self) -> ProviderHealth:
         if self.availability_error:
@@ -283,11 +361,23 @@ class DataJuicerOperatorProvider:
                 "additionalProperties": False,
             }
         category, secondary = _suggest_category(op_type, name)
-        digest_source = f"{self.provider_version}|{name}|{op_type}|{description}|{parameter_schema}"
+        digest_source = json.dumps(
+            {
+                "provider_version": self.provider_version,
+                "name": name,
+                "type": op_type,
+                "description": description,
+                "parameter_schema": parameter_schema,
+                "tags": sorted(tags),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
         return ProviderOperatorDescriptor(
             provider_id=self.provider_id,
             provider_version=self.provider_version,
             provider_operator_ref=name,
+            provider_operator_type=op_type,
             display_name=name,
             description=description,
             parameter_schema=parameter_schema,
@@ -295,6 +385,8 @@ class DataJuicerOperatorProvider:
             source_digest=hashlib.sha256(digest_source.encode("utf-8")).hexdigest(),
             suggested_category=category,
             suggested_secondary_category=secondary,
+            suggested_execution_scope=_execution_scope(op_type),
+            supported_runtime_backends=_runtime_backends(tags),
         )
 
 

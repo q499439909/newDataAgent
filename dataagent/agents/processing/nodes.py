@@ -8,8 +8,9 @@ from ...domain.pipelines import (
     PipelineVersion,
 )
 from ...domain.specs import TaskSpecVersion
-from ...domain.operators import OperatorCategory, RuntimeBackend
-from ...operators import build_operator_library
+from ...domain.operators import ExecutionScope, OperatorCategory, RuntimeBackend
+from ...operators import OperatorLibrary, build_operator_library
+from ...operators.catalog_matching import OperatorCatalogMatch
 from ...operators.planning import (
     MODEL_CAPABILITY_REQUIREMENTS,
     OperatorRequirement,
@@ -73,10 +74,16 @@ _BASE_REQUIREMENTS = (
 )
 
 
-def _compile_nodes(spec: TaskSpecVersion, threshold: float) -> tuple[PipelineNode, ...]:
-    library = build_operator_library(include_datajuicer=False)
+def _compile_nodes(
+    spec: TaskSpecVersion,
+    threshold: float,
+    *,
+    operator_library: OperatorLibrary | None = None,
+    operator_candidates: list[dict] | None = None,
+) -> tuple[PipelineNode, ...]:
+    library = operator_library or build_operator_library(include_datajuicer=False)
     selector = OperatorSelector(library.registry)
-    selected: list[PipelineNode] = []
+    base_nodes: dict[str, PipelineNode] = {}
     for node_id, requirement, parameters, required in _BASE_REQUIREMENTS:
         operator = selector.select(requirement)
         resolved_parameters = parameters
@@ -84,26 +91,55 @@ def _compile_nodes(spec: TaskSpecVersion, threshold: float) -> tuple[PipelineNod
             resolved_parameters = {"confidence_threshold": threshold}
         elif node_id == "deduplicate":
             resolved_parameters = {"distance_threshold": max(1, round(threshold * 10))}
-        selected.append(
-            PipelineNode(
-                id=node_id,
-                operator_version_id=operator.id,
-                name=operator.display_name,
-                category=operator.primary_category.value,
-                parameters=resolved_parameters or {},
-                runtime_backend=requirement.runtime_backend or RuntimeBackend.CPU,
-                required=required,
+        base_nodes[node_id] = PipelineNode(
+            id=node_id,
+            operator_version_id=operator.id,
+            name=operator.display_name,
+            category=operator.primary_category.value,
+            parameters=resolved_parameters or {},
+            runtime_backend=requirement.runtime_backend or RuntimeBackend.CPU,
+            required=required,
+        )
+
+    matches = [
+        OperatorCatalogMatch.model_validate(item)
+        for item in (operator_candidates or [])
+        if item.get("executable")
+    ]
+    candidate_nodes: list[tuple[OperatorCatalogMatch, PipelineNode]] = []
+    for match in matches:
+        operator = library.registry.get(match.operator_version_id)
+        candidate_nodes.append(
+            (
+                match,
+                PipelineNode(
+                    id=f"datajuicer_{match.intent}",
+                    operator_version_id=operator.id,
+                    name=operator.display_name,
+                    category=operator.primary_category.value,
+                    parameters=match.parameters,
+                    runtime_backend=match.runtime_backend,
+                    required=True,
+                ),
             )
         )
 
-    insert_at = 1
+    selected: list[PipelineNode] = [base_nodes["ingest"]]
+    selected.extend(
+        node
+        for match, node in candidate_nodes
+        if library.registry.get(match.operator_version_id).execution_scope
+        == ExecutionScope.DATASET
+    )
+    covered_capabilities = {match.intent for match, _ in candidate_nodes}
     for capability in spec.required_capabilities:
+        if capability in covered_capabilities:
+            continue
         requirement = MODEL_CAPABILITY_REQUIREMENTS.get(capability)
         if requirement is None:
             raise ValueError(f"No operator requirement is registered for: {capability}")
         operator = selector.select(requirement)
-        selected.insert(
-            insert_at,
+        selected.append(
             PipelineNode(
                 id=f"understand_{capability}",
                 operator_version_id=operator.id,
@@ -113,7 +149,30 @@ def _compile_nodes(spec: TaskSpecVersion, threshold: float) -> tuple[PipelineNod
                 required=True,
             ),
         )
-        insert_at += 1
+    selected.extend(
+        node
+        for match, node in candidate_nodes
+        if library.registry.get(match.operator_version_id).execution_scope
+        == ExecutionScope.ASSET
+        and library.registry.get(match.operator_version_id).primary_category
+        == OperatorCategory.FILTERING
+    )
+    selected.append(base_nodes["filter"])
+    selected.extend(
+        node
+        for match, node in candidate_nodes
+        if library.registry.get(match.operator_version_id).execution_scope
+        == ExecutionScope.ASSET
+        and library.registry.get(match.operator_version_id).primary_category
+        != OperatorCategory.FILTERING
+    )
+    if not any(
+        library.registry.get(match.operator_version_id).primary_category
+        == OperatorCategory.DEDUPLICATION
+        for match, _ in candidate_nodes
+    ):
+        selected.append(base_nodes["deduplicate"])
+    selected.append(base_nodes["manifest"])
     return tuple(selected)
 
 
@@ -124,9 +183,16 @@ def _build_variant(
     variant_index: int,
     spec: TaskSpecVersion,
     owner_id: str,
+    operator_library: OperatorLibrary | None = None,
+    operator_candidates: list[dict] | None = None,
 ) -> PipelineVersion:
     family_id = f"pipeline_{strategy.value}"
-    nodes = _compile_nodes(spec, threshold)
+    nodes = _compile_nodes(
+        spec,
+        threshold,
+        operator_library=operator_library,
+        operator_candidates=operator_candidates,
+    )
     edges = tuple(
         PipelineEdge(source=source.id, target=target.id)
         for source, target in zip(nodes, nodes[1:])
@@ -145,7 +211,11 @@ def _build_variant(
     )
 
 
-def generate_pipeline_variants(state: WorkOrderGraphState) -> dict:
+def generate_pipeline_variants(
+    state: WorkOrderGraphState,
+    *,
+    operator_library: OperatorLibrary | None = None,
+) -> dict:
     spec = TaskSpecVersion.model_validate(state["task_spec"])
     variants = []
     for strategy, thresholds in STRATEGY_THRESHOLDS.items():
@@ -157,6 +227,8 @@ def generate_pipeline_variants(state: WorkOrderGraphState) -> dict:
                     variant_index=index,
                     spec=spec,
                     owner_id=state["owner_id"],
+                    operator_library=operator_library,
+                    operator_candidates=state.get("operator_candidates", []),
                 ).model_dump(mode="json")
             )
     return {

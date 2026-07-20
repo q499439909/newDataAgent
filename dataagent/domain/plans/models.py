@@ -13,6 +13,7 @@ class RetrievalPlanVersion(VersionedModel):
     target_candidate_count: int = Field(ge=1)
     estimated_cost: float = Field(default=0, ge=0)
     sufficient: bool = False
+    operator_candidates: tuple[dict[str, Any], ...] = ()
 
 
 class CurationPlanVersion(VersionedModel):

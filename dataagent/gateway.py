@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
 
 
@@ -36,6 +37,7 @@ class ModelGateway:
     def __init__(self, settings: Settings, timeout: float = 90.0):
         self.settings = settings
         self.timeout = timeout
+        self.routing = ModelRoutingPolicy.from_settings(settings)
 
     @property
     def configured(self) -> bool:
@@ -110,8 +112,9 @@ class ModelGateway:
         )
 
     def healthcheck(self) -> ModelResult:
+        route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)
         return self._messages(
-            self.settings.planning_model,
+            route.model_id,
             "You are a health check. Answer with the exact word OK.",
             "OK",
             max_tokens=16,
@@ -123,6 +126,7 @@ class ModelGateway:
         history: list[dict[str, str]],
         context: dict[str, Any],
     ) -> tuple[dict[str, Any], ModelUsage]:
+        route = self.routing.route(ModelTaskKind.CONVERSATION)
         system = (
             "You are DataAgent's conversational control assistant. Reply naturally in Chinese "
             "unless the user uses another language. You can explain the product and discuss the "
@@ -138,12 +142,12 @@ class ModelGateway:
             "action may be pause, resume, cancel, or null."
         )
         payload = {
-            "configured_model": self.settings.planning_model,
+            "configured_model": route.model_id,
             "conversation": history[-20:],
             "control_context": context,
         }
         result = self._messages(
-            self.settings.planning_model,
+            route.model_id,
             system,
             json.dumps(payload, ensure_ascii=False),
             max_tokens=700,
@@ -151,6 +155,7 @@ class ModelGateway:
         return _extract_json(result.text), result.usage
 
     def plan_task(self, requirement: str, source_path: str) -> tuple[TaskSpec, ModelUsage]:
+        route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)
         schema = TaskSpec.model_json_schema()
         system = (
             "You are the planning model for DataAgent, an image data production system. "
@@ -165,13 +170,14 @@ class ModelGateway:
             {"requirement": requirement, "source_type": "local", "source_path": source_path},
             ensure_ascii=False,
         )
-        result = self._messages(self.settings.planning_model, system, user, max_tokens=3000)
+        result = self._messages(route.model_id, system, user, max_tokens=3000)
         data = _extract_json(result.text)
         data["source_type"] = "local"
         data["source_path"] = source_path
         return TaskSpec.model_validate(data), result.usage
 
     def evaluate_image(self, image_path: Path, spec: TaskSpec) -> tuple[dict[str, Any], ModelUsage]:
+        route = self.routing.route(ModelTaskKind.VISION_EVALUATION)
         media_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
         if media_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
             media_type = "image/jpeg"
@@ -195,7 +201,7 @@ class ModelGateway:
             },
             {"type": "text", "text": json.dumps(criteria, ensure_ascii=False)},
         ]
-        result = self._messages(self.settings.vision_model, system, content, max_tokens=500)
+        result = self._messages(route.model_id, system, content, max_tokens=500)
         data = _extract_json(result.text)
         return {
             "meets_requirement": bool(data.get("meets_requirement", False)),

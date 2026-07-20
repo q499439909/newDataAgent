@@ -11,7 +11,7 @@ from langgraph.types import Command
 
 from ..domain.common import new_id
 from ..domain.evaluations import QCReport
-from ..domain.operators import OperatorStatus, RuntimeBackend
+from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBackend
 from ..domain.pipelines import PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
@@ -48,6 +48,7 @@ class AgentRuntime:
         datajuicer_python: Path | None = None,
         datajuicer_process_bin: Path | None = None,
         datajuicer_timeout_seconds: int = 300,
+        allow_datajuicer_candidate_execution: bool = True,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -73,7 +74,9 @@ class AgentRuntime:
             saver = SqliteSaver(self._checkpoint_connection)
             saver.setup()
             self.checkpointer = saver
-        self.graph = build_main_graph(self.checkpointer)
+        self.allow_datajuicer_candidate_execution = (
+            allow_datajuicer_candidate_execution
+        )
         self.operator_library = build_operator_library(
             include_datajuicer=include_datajuicer,
             allow_model_download=allow_model_download,
@@ -86,6 +89,13 @@ class AgentRuntime:
         )
         self.builtin_operators = self.operator_library.operators
         self.operator_registry = self.operator_library.registry
+        self.graph = build_main_graph(
+            self.checkpointer,
+            operator_library=self.operator_library,
+            allow_draft_datajuicer_candidates=(
+                self.allow_datajuicer_candidate_execution
+            ),
+        )
 
     def start(
         self,
@@ -182,12 +192,28 @@ class AgentRuntime:
         provider_id: str,
         query: str | None = None,
         limit: int = 100,
+        operator_type: str | None = None,
+        tag: str | None = None,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         provider = self.operator_library.providers.get(provider_id)
         health = provider.health()
         if health.status == "unavailable":
             raise RuntimeError(health.message or f"Provider is unavailable: {provider_id}")
-        descriptors = provider.discover()
+        refresh_catalog = getattr(provider, "refresh_catalog", None)
+        descriptors = (
+            refresh_catalog()
+            if refresh and callable(refresh_catalog)
+            else provider.discover()
+        )
+        if operator_type:
+            descriptors = [
+                item
+                for item in descriptors
+                if item.provider_operator_type == operator_type.lower()
+            ]
+        if tag:
+            descriptors = [item for item in descriptors if tag.lower() in item.tags]
         normalized_query = " ".join((query or "").lower().split())
         if normalized_query:
             descriptors = [
@@ -321,7 +347,12 @@ class AgentRuntime:
         violations: list[str] = []
         for node in pipeline.nodes:
             spec = self.operator_registry.get(node.operator_version_id)
-            if spec.status not in released:
+            candidate_allowed = self._candidate_operator_is_executable(
+                spec=spec,
+                runtime_backend=node.runtime_backend,
+                parameters=node.parameters,
+            )
+            if spec.status not in released and not candidate_allowed:
                 violations.append(f"{spec.id} has status {spec.status}")
             if node.runtime_backend == RuntimeBackend.MOCK:
                 violations.append(f"{spec.id} uses the mock runtime")
@@ -330,6 +361,38 @@ class AgentRuntime:
                 "Pipeline is not eligible for production execution: "
                 + "; ".join(violations)
             )
+
+    def _candidate_operator_is_executable(
+        self,
+        *,
+        spec: OperatorSpecVersion,
+        runtime_backend: RuntimeBackend,
+        parameters: dict[str, Any],
+    ) -> bool:
+        if not self.allow_datajuicer_candidate_execution:
+            return False
+        if spec.status != OperatorStatus.DRAFT:
+            return False
+        if spec.provider.provider_id != "datajuicer":
+            return False
+        if runtime_backend != RuntimeBackend.CPU:
+            return False
+        if not {"cpu", "image"}.issubset(spec.capability_tags):
+            return False
+        if any(tag in spec.capability_tags for tag in {"gpu", "llm", "model"}):
+            return False
+        try:
+            provider = self.operator_library.providers.get("datajuicer")
+        except KeyError:
+            return False
+        if provider.provider_version != spec.provider.provider_version:
+            return False
+        validation = provider.validate(
+            spec.provider.provider_operator_ref,
+            parameters,
+            runtime_backend,
+        )
+        return validation.ok
 
     def get_run(self, *, run_id: str, owner_id: str) -> dict[str, Any]:
         if self.run_store is None:

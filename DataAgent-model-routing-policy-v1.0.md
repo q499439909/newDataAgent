@@ -1,6 +1,7 @@
 # DataAgent 模型路由与多 Agent 上下文策略 v1.0
 
 > 日期：2026-07-18  
+> 最近修订：2026-07-19
 > 状态：设计基线  
 > 适用范围：规划模型、四 Agent、TUI 对话、视觉评估、代码生成和图片生成 Operator
 
@@ -10,7 +11,7 @@ DataAgent 当前不需要为每个 Agent 配置一个不同模型，也不应让
 近期采用三个核心能力槽即可：
 
 ```text
-FAST_TEXT_MODEL=qwen3.6-flash
+FAST_TEXT_MODEL=glm-5.2
 REASONING_MODEL=glm-5.2
 VISION_MODEL=qwen3.7-plus
 ```
@@ -25,9 +26,9 @@ TEXT_IMAGE_MODEL=qwen-image-2.0-pro
 
 核心原则：
 
-- GLM-5.2 继续作为规划、复杂推理和代码任务的主模型；
+- GLM-5.2 作为普通对话、规划、复杂推理和代码任务的正式默认模型；
 - Qwen3.7-Plus 负责视觉理解，不替代专业分割、人脸或检测模型；
-- Qwen3.6-Flash 负责低延迟、低风险的短文本任务；
+- `FAST_TEXT_MODEL` 仍保留为独立能力槽，当前与 `REASONING_MODEL` 共同映射到 GLM-5.2；
 - Requirement、Processing、Strategy 可以共享同一个推理模型；
 - 不根据厂商推荐页直接决定模型优劣，必须使用 DataAgent 自己的评测集；
 - 新模型只有在角色级 Golden Set 上证明收益后，才加入正式路由。
@@ -87,7 +88,7 @@ Terminal Bench 等编码评测上具有很强竞争力。厂商基准不能代�
 
 | 能力槽 | 主模型 | 适用任务 |
 |---|---|---|
-| `FAST_TEXT_MODEL` | `qwen3.6-flash` | TUI 意图分类、短摘要、简单查询改写、低风险抽取 |
+| `FAST_TEXT_MODEL` | `glm-5.2` | TUI 意图分类、普通对话、短摘要、简单查询改写和低风险抽取 |
 | `REASONING_MODEL` | `glm-5.2` | TaskSpec、Pipeline、复杂约束、策略、代码和故障分析 |
 | `VISION_MODEL` | `qwen3.7-plus` | 图片语义判断、OCR、标签、视觉复核和困难样本解释 |
 
@@ -98,7 +99,7 @@ Terminal Bench 等编码评测上具有很强竞争力。厂商基准不能代�
 | Agent | 默认模型 | 说明 |
 |---|---|---|
 | Requirement Agent | `glm-5.2` | 需求澄清、约束拆解、TaskSpec 生成 |
-| Retrieval Agent | `qwen3.6-flash` | 查询改写和字段映射；复杂检索规划升级到 GLM-5.2 |
+| Retrieval Agent | `glm-5.2` | 查询改写、字段映射和复杂检索规划 |
 | Processing Agent | `glm-5.2` | Operator 选择、参数生成、Pipeline 设计和代码类任务 |
 | Strategy Agent | `glm-5.2` | 多方案比较、成本质量权衡和迭代策略 |
 
@@ -110,8 +111,8 @@ Requirement、Processing 和 Strategy 不需要因为名称不同就使用不同
 TUI 路由建议：
 
 1. “你好”“帮助”“你是什么模型”等确定性请求继续使用本地快速路径，不调用模型；
-2. 普通聊天、意图识别使用 `qwen3.6-flash`；
-3. 明确的数据任务、复杂澄清和方案解释升级到 `glm-5.2`；
+2. 普通聊天、意图识别使用 `FAST_TEXT_MODEL`，当前正式默认值为 `glm-5.2`；
+3. 明确的数据任务、复杂澄清和方案解释使用 `REASONING_MODEL`，当前同样为 `glm-5.2`；
 4. 涉及图片内容时调用 `qwen3.7-plus`，不把图片发送给纯文本模型。
 
 ## 5. 可选模型的定位
@@ -276,19 +277,19 @@ PRIMARY_VISION_MODEL=qwen3.7-plus
 
 先不要切换现有主模型，补齐 GLM-5.2 thinking 参数的 API 探测和回归测试。
 
-### 阶段二：增加快速文本槽
+### 阶段二：保留独立快速文本槽
 
 新增：
 
 ```env
-FAST_TEXT_MODEL=qwen3.6-flash
+FAST_TEXT_MODEL=glm-5.2
 ```
 
-仅将 TUI 普通对话、意图识别和短文本任务迁移到 Flash。
+TUI 普通对话、意图识别和短文本任务继续通过独立能力槽调用；当前因模型可用性验证结果，正式映射到 GLM-5.2。
 
 ### 阶段三：实现能力路由和升级
 
-- 默认短文本走 Flash；
+- 默认短文本走 `FAST_TEXT_MODEL`，当前为 GLM-5.2；
 - 复杂规划和代码走 GLM-5.2；
 - 图片输入走 Qwen3.7-Plus；
 - Schema 校验失败、低置信度或高风险任务允许升级；
@@ -304,8 +305,7 @@ FAST_TEXT_MODEL=qwen3.6-flash
 近期 DataAgent 的推荐组合是：
 
 ```text
-GLM-5.2          -> 核心规划、Agent 推理、Pipeline 和代码
-Qwen3.6-Flash    -> TUI 低延迟文本任务
+GLM-5.2          -> TUI 对话、核心规划、Agent 推理、Pipeline 和代码
 Qwen3.7-Plus     -> 图片理解和视觉评估
 Wan2.7-Image     -> 普通图片生成 Operator
 Wan2.7-Image-Pro -> 高质量图片生成 Operator
@@ -314,3 +314,19 @@ Qwen-Image-2.0-Pro -> 文字密集和负向提示词图片生成
 
 这不是按厂商划分 Agent，而是按能力划分任务。模型切换不会天然破坏上下文；上下文连续性由
 DataAgent 的结构化状态、版本对象和 Router 负责。
+
+## 12. 2026-07-18 实施状态
+
+本轮已完成第一版代码落地：
+
+- 新增 `ModelRoutingPolicy`，按 `task_kind` 和能力槽路由，不以 Agent 名称作为路由键；
+- 普通对话和意图理解使用 `FAST_TEXT_MODEL`；
+- Requirement、Processing、Strategy 和代码类任务统一映射到 `REASONING_MODEL`；
+- 图片语义评估使用 `VISION_MODEL`；
+- 三个图片生成模型已登记为独立 Operator 路由配置，不接入普通对话 Gateway；当前尚未实现可执行的生图 Operator；
+- 保留 `CODE_MODEL`、`PRIMARY_VISION_MODEL` 作为旧环境变量兼容入口，新配置优先；
+- 2026-07-19 起，`FAST_TEXT_MODEL` 的正式默认值改为 `glm-5.2`；Qwen3.6-Flash 因当前 API Key 返回模型级 `403 AccessDenied`，不再作为默认值；
+- 当前继续关闭 thinking，待百炼接口能力探测与角色级 Golden Set 通过后再启用。
+
+尚未完成的部分包括：低置信度自动升级、WorkOrder 路由版本冻结、逐次路由证据持久化、可执行
+生图 Operator，以及候选模型的角色级 Golden Set。新模型在这些评测完成前不得加入正式能力槽。

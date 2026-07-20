@@ -60,6 +60,7 @@ class OperatorRuntime:
         if runtime_backend == RuntimeBackend.MOCK and context.purpose == "production":
             raise PermissionError("Mock operators cannot execute in production runs")
         normalized = validate_parameters(operator.spec.parameter_schema, parameters)
+        context.shared["active_runtime_backend"] = runtime_backend
         result = operator.execute(context, input_data, normalized)
         return OperatorResult.model_validate(result)
 
@@ -74,7 +75,8 @@ class OperatorRuntime:
         runtime_backend: RuntimeBackend = RuntimeBackend.CPU,
     ) -> bool:
         operator = self.get(operator_version_id)
-        if operator.spec.execution_scope != ExecutionScope.DATASET:
+        supports_batch = bool(getattr(operator, "supports_dataset_batch", False))
+        if operator.spec.execution_scope != ExecutionScope.DATASET and not supports_batch:
             return False
         prepare = getattr(operator, "prepare_dataset", None)
         if not callable(prepare):

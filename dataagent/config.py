@@ -52,6 +52,11 @@ class Settings:
     datajuicer_python: Path | None = None
     datajuicer_process_bin: Path | None = None
     datajuicer_timeout_seconds: int = 300
+    allow_datajuicer_candidate_execution: bool = True
+    fast_text_model: str = "glm-5.2"
+    image_generation_model: str = "wan2.7-image"
+    image_generation_pro_model: str = "wan2.7-image-pro"
+    text_image_model: str = "qwen-image-2.0-pro"
 
     @classmethod
     def load(cls, cwd: Path | None = None) -> "Settings":
@@ -81,8 +86,16 @@ class Settings:
             base_url=os.getenv(
                 "BAILIAN_BASE_URL", "https://dashscope.aliyuncs.com/apps/anthropic"
             ).rstrip("/"),
-            planning_model=os.getenv("CODE_MODEL", "glm-5.2"),
-            vision_model=os.getenv("PRIMARY_VISION_MODEL", "qwen3.7-plus"),
+            planning_model=(
+                os.getenv("REASONING_MODEL")
+                or os.getenv("CODE_MODEL")
+                or "glm-5.2"
+            ),
+            vision_model=(
+                os.getenv("VISION_MODEL")
+                or os.getenv("PRIMARY_VISION_MODEL")
+                or "qwen3.7-plus"
+            ),
             home=home.resolve(),
             owner=os.getenv("DATAAGENT_OWNER", os.getenv("USERNAME", "local")),
             env_path=env_path,
@@ -93,6 +106,19 @@ class Settings:
             datajuicer_process_bin=_env_path("DATAAGENT_DATAJUICER_PROCESS_BIN"),
             datajuicer_timeout_seconds=int(
                 os.getenv("DATAAGENT_DATAJUICER_TIMEOUT_SECONDS", "300")
+            ),
+            allow_datajuicer_candidate_execution=_env_bool(
+                "DATAAGENT_ALLOW_DATAJUICER_CANDIDATES", True
+            ),
+            fast_text_model=os.getenv("FAST_TEXT_MODEL", "glm-5.2"),
+            image_generation_model=os.getenv(
+                "IMAGE_GENERATION_MODEL", "wan2.7-image"
+            ),
+            image_generation_pro_model=os.getenv(
+                "IMAGE_GENERATION_PRO_MODEL", "wan2.7-image-pro"
+            ),
+            text_image_model=os.getenv(
+                "TEXT_IMAGE_MODEL", "qwen-image-2.0-pro"
             ),
         )
 

@@ -93,7 +93,7 @@ class ConversationService:
             role="assistant",
             content=response["reply"],
             intent=decision.intent,
-            model=self.settings.planning_model if self.gateway.configured else "local-fallback",
+            model=self.settings.fast_text_model if self.gateway.configured else "local-fallback",
         )
         updated_thread = self.store.get(thread_id, owner_id)
         response["conversation_id"] = thread_id
@@ -107,6 +107,9 @@ class ConversationService:
         history: list[dict[str, Any]],
         context: dict[str, Any],
     ) -> ConversationDecision:
+        source_decision = self._source_or_pending_task_decision(content, context)
+        if source_decision is not None:
+            return source_decision
         fast = self._fast_decision(content)
         if fast is not None:
             return fast
@@ -169,7 +172,10 @@ class ConversationService:
             for token in ("什么模型", "哪个模型", "what model", "which model")
         ):
             return ConversationDecision(
-                reply=f"当前需要模型理解的对话由 {self.settings.planning_model} 处理。"
+                reply=(
+                    f"当前普通对话由 {self.settings.fast_text_model} 处理，"
+                    f"复杂规划由 {self.settings.planning_model} 处理。"
+                )
             )
         if normalized in {"谢谢", "感谢", "thanks", "thank you"}:
             return ConversationDecision(reply="不客气。继续说你的需求就好。")
@@ -281,7 +287,7 @@ class ConversationService:
         response: dict[str, Any],
     ) -> dict[str, Any]:
         requirement = str(context.get("pending_requirement", "")).strip()
-        source = str(context.get("pending_source", "")).strip()
+        source = self._normalize_source(str(context.get("pending_source", "")))
         if not requirement:
             response["reply"] = "请先描述你希望生产什么样的图片数据。"
         elif not source:
@@ -392,7 +398,10 @@ class ConversationService:
             )
         if "什么模型" in normalized or "哪个模型" in normalized:
             return ConversationDecision(
-                reply=f"当前对话由配置的 {self.settings.planning_model} 模型处理。"
+                reply=(
+                    f"当前普通对话由 {self.settings.fast_text_model} 处理，"
+                    f"复杂规划由 {self.settings.planning_model} 处理。"
+                )
             )
         if context.get("pending_requirement") and self._looks_like_path(content):
             return ConversationDecision(
@@ -421,6 +430,65 @@ class ConversationService:
             )
         return ConversationDecision(reply="我可以继续回答，也可以帮你创建图片数据生产任务。")
 
+    @classmethod
+    def _source_or_pending_task_decision(
+        cls,
+        content: str,
+        context: dict[str, Any],
+    ) -> ConversationDecision | None:
+        source, remainder = cls._extract_source(content)
+        if source:
+            if remainder and cls._looks_like_data_requirement(remainder):
+                return ConversationDecision(
+                    intent=ConversationIntent.START_WORK_ORDER,
+                    requirement=remainder,
+                    source=source,
+                    reply="我来检查目录并创建图片数据任务。",
+                )
+            return ConversationDecision(
+                intent=ConversationIntent.PROVIDE_SOURCE,
+                source=source,
+                reply="我来检查这个目录。",
+            )
+        normalized = content.strip().lower()
+        if context.get("pending_requirement") and any(
+            token in normalized
+            for token in ("创建数据处理任务", "创建任务", "开始创建", "create task")
+        ):
+            return ConversationDecision(
+                intent=ConversationIntent.START_WORK_ORDER,
+                requirement=str(context["pending_requirement"]),
+                source=context.get("pending_source"),
+                reply="我继续创建刚才的数据任务。",
+            )
+        return None
+
+    @classmethod
+    def _extract_source(cls, content: str) -> tuple[str | None, str]:
+        quoted = re.search(
+            r"[\"'“”](?P<path>(?:[a-zA-Z]:[\\/]|\\\\|/)[^\"'“”\r\n]+)[\"'“”]",
+            content,
+        )
+        if quoted:
+            source = cls._normalize_source(quoted.group("path"))
+            remainder = (content[: quoted.start()] + content[quoted.end() :]).strip()
+            return source, remainder.lstrip("，,。.:：;；| ")
+
+        stripped = cls._normalize_source(content)
+        if cls._looks_like_path(stripped) and Path(stripped).is_dir():
+            return stripped, ""
+
+        unquoted = re.match(
+            r"^(?P<path>(?:[a-zA-Z]:[\\/]|\\\\|/)\S+)(?:\s+|[，,;；|])(?P<rest>.+)$",
+            content.strip(),
+        )
+        if unquoted:
+            return (
+                cls._normalize_source(unquoted.group("path")),
+                unquoted.group("rest").strip(),
+            )
+        return None, content.strip()
+
     @staticmethod
     def _looks_like_data_requirement(content: str) -> bool:
         return any(
@@ -444,7 +512,12 @@ class ConversationService:
 
     @staticmethod
     def _looks_like_path(content: str) -> bool:
-        return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|/|\\\\)", content.strip()))
+        normalized = ConversationService._normalize_source(content)
+        return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|/|\\\\)", normalized))
+
+    @staticmethod
+    def _normalize_source(content: str) -> str:
+        return content.strip().strip("\"'“”").strip()
 
     @staticmethod
     def _normalize_strategy(strategy: str) -> str:
@@ -467,6 +540,19 @@ class ConversationService:
                 return "TaskSpec 已确认。现在有保留优先、均衡和质量优先三条 Pipeline 等你选择。"
         if turn["state"].get("next_action") == "submit_dataset_run":
             return "Pipeline 已批准，SamplingPlan 已生成。你可以说“开始运行”。"
+        if turn["state"].get("next_action") == "expand_retrieval":
+            blocked = [
+                item
+                for item in turn["state"].get("operator_candidates", [])
+                if not item.get("executable")
+            ]
+            if blocked:
+                details = "；".join(
+                    f"{item['provider_operator_ref']}：{item.get('blocked_reason') or '不可执行'}"
+                    for item in blocked
+                )
+                return f"需求已确认，但匹配算子当前不可执行：{details}。"
+            return "需求已确认，但当前算子目录不足以生成可执行 Pipeline。"
         return "已确认，流程继续。"
 
     @staticmethod

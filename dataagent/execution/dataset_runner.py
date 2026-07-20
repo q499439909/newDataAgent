@@ -221,14 +221,27 @@ class DatasetRunExecutor:
             )
             for item in planned
         )
+        batchable_prefix = True
         for node in ordered_nodes:
             context.shared["active_node_id"] = node.id
             operator = self.operator_runtime.get(node.operator_version_id)
-            if operator.spec.execution_scope != ExecutionScope.DATASET:
+            is_dataset = operator.spec.execution_scope == ExecutionScope.DATASET
+            is_batch_filter = (
+                batchable_prefix
+                and operator.spec.primary_category == OperatorCategory.FILTERING
+                and bool(getattr(operator, "supports_dataset_batch", False))
+            )
+            if not is_dataset and not is_batch_filter:
+                if operator.spec.primary_category not in {
+                    OperatorCategory.INGESTION,
+                    OperatorCategory.FILTERING,
+                    OperatorCategory.DEDUPLICATION,
+                }:
+                    batchable_prefix = False
                 continue
             self.run_store.add_event(
                 run["id"],
-                "dataset_node_started",
+                "provider_batch_node_started" if is_batch_filter else "dataset_node_started",
                 {"operator_version_id": node.operator_version_id, "asset_count": len(raw_inputs)},
                 node_id=node.id,
                 provider_id=operator.spec.provider.provider_id,
@@ -243,7 +256,7 @@ class DatasetRunExecutor:
             )
             self.run_store.add_event(
                 run["id"],
-                "dataset_node_completed",
+                "provider_batch_node_completed" if is_batch_filter else "dataset_node_completed",
                 {"operator_version_id": node.operator_version_id, "asset_count": len(raw_inputs)},
                 node_id=node.id,
                 provider_id=operator.spec.provider.provider_id,

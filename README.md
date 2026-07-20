@@ -71,7 +71,7 @@ TUI 启动后会创建持久 `ConversationThread`，普通文本由配置的规�
 
 TUI 只调用 FastAPI，不直接访问 SQLite。当前版本尚未接入附件、流式 token 输出、服务端事件订阅和 Web 图片审核深链接，这些能力会在 Web 工作台里程碑继续补齐。
 
-DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。配置示例见 `.env.example`。
+DataAgent 默认依次读取当前目录的 `model.env`、`model.env.txt` 和 `.env`。真实密钥文件已被 `.gitignore` 排除。普通文本对话和复杂推理当前均默认使用 `glm-5.2`，视觉任务默认使用 `qwen3.7-plus`；可分别通过 `FAST_TEXT_MODEL`、`REASONING_MODEL` 和 `VISION_MODEL` 覆盖。配置示例见 `.env.example`。
 
 ## 环境检查
 
@@ -183,14 +183,16 @@ $env:DATAAGENT_ALLOW_MODEL_DOWNLOAD = "false"
 $env:DATAAGENT_DATAJUICER_ENABLED = "true"
 $env:DATAAGENT_DATAJUICER_PYTHON = "D:\path\to\data-juicer-env\python.exe"
 $env:DATAAGENT_DATAJUICER_PROCESS_BIN = "D:\path\to\data-juicer-env\Scripts\dj-process.exe"
+$env:DATAAGENT_ALLOW_DATAJUICER_CANDIDATES = "true"
 ```
 
-也可以复制 `dataagent.local.env.example` 为被 Git 忽略的 `dataagent.local.env`。Data-Juicer 是可选 Provider；建议指向独立环境，控制面不会导入它的重依赖。发现阶段只读取元数据，不实例化模型；当前执行阶段只放行带 `cpu` 标签的 Filter。未允许下载时，执行器会同时启用 Hugging Face、uv、pip 离线策略，并阻止 Data-Juicer LazyLoader 自动安装依赖。真实模型后端需要固定 revision、SHA256 和许可证后再单独接入。
+也可以复制 `dataagent.local.env.example` 为被 Git 忽略的 `dataagent.local.env`。Data-Juicer 是可选 Provider；建议指向独立环境，控制面不会导入它的重依赖。Provider 会发现完整目录并为每个算子生成版本化 Candidate Proxy。启用 Candidate 执行后，Retrieval Agent 会按需求检索 Catalog，并把匹配的 CPU 图片算子自动编译进 Pipeline；提交时再次校验 Provider 版本、标签、Runtime 和参数。当前正式发布 3 个 CPU 图片算子，其余匹配项仍保留 Draft 身份和运行证据。GPU、模型和非图片算子不会在当前机器自动执行。未允许下载时，执行器会同时启用 Hugging Face、uv、pip 离线策略，并阻止 Data-Juicer LazyLoader 自动安装依赖。
 
 控制面接口：
 
 - `GET /api/operator-providers`：Provider 健康状态；
-- `GET /api/operator-providers/datajuicer/operators?query=shape`：检索外部算子；
+- `GET /api/operator-providers/datajuicer/operators?limit=500`：查看完整外部目录；
+- `GET /api/operators?provider_id=datajuicer&include_drafts=true`：查看版本化 Proxy，包括 Draft；
 - `POST /api/work-orders/{work_order_id}/operator-providers/datajuicer/execute`：在 WorkOrder 已确认的本地数据目录内执行 CPU Filter。
 
 ## 当前 CLI 边界

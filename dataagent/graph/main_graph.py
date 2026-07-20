@@ -3,6 +3,7 @@ from __future__ import annotations
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
+from ..operators import OperatorLibrary
 from ..agents.processing import build_processing_graph
 from ..agents.requirement import build_requirement_graph
 from ..agents.retrieval import build_retrieval_graph
@@ -16,7 +17,12 @@ from .routing import (
 )
 
 
-def build_main_graph(checkpointer: BaseCheckpointSaver | None = None):
+def build_main_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    operator_library: OperatorLibrary | None = None,
+    allow_draft_datajuicer_candidates: bool = False,
+):
     """Build the four-agent decision graph.
 
     The graph deliberately stops after SamplingPlan creation. Dataset execution,
@@ -27,8 +33,14 @@ def build_main_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node("requirement_agent", build_requirement_graph())
     graph.add_node("confirm_task_spec", confirm_task_spec)
-    graph.add_node("retrieval_agent", build_retrieval_graph())
-    graph.add_node("processing_agent", build_processing_graph())
+    graph.add_node(
+        "retrieval_agent",
+        build_retrieval_graph(
+            operator_library.registry if operator_library is not None else None,
+            allow_draft_candidates=allow_draft_datajuicer_candidates,
+        ),
+    )
+    graph.add_node("processing_agent", build_processing_graph(operator_library))
     graph.add_node("approve_pipeline", approve_pipeline)
     graph.add_node("strategy_agent", build_strategy_graph())
 
