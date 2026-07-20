@@ -231,6 +231,7 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
                         "id": "quality_filter",
                         "operator_version_id": "builtin.quality_filter:1",
                         "runtime_backend": "cpu",
+                        "operator_status": "PERSONAL_RELEASE",
                         "parameters": {"confidence_threshold": threshold},
                     },
                     {
@@ -239,9 +240,11 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
                             "datajuicer.image_tagging_vlm_mapper.remote_api:1"
                         ),
                         "runtime_backend": "remote",
+                        "operator_status": "DRAFT",
                         "parameters": {"tag_field_name": "image_tags"},
                     },
                 ],
+                "execution_eligibility": {"eligible": True, "violations": []},
             }
         )
     app._render_turn(
@@ -259,4 +262,6 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
     assert "builtin.quality_filter:1" in output
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in output
     assert "Strategy differences" in output
+    assert "PERSONAL_RELEASE" in output and "DRAFT" in output
+    assert "yes" in output
     assert "0.35" in output and "0.55" in output and "0.75" in output

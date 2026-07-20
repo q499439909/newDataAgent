@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from ..infrastructure import (
 from ..operators import build_operator_library
 from ..operators.protocol import OperatorContext, OperatorInput
 from ..operators.providers import ProviderExecuteRequest
+from ..operators.validation import ParameterValidationError, validate_parameters
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,38 @@ class AgentRuntime:
         decision: dict[str, Any],
     ) -> dict[str, Any]:
         record = self._get_authorized(work_order_id, owner_id)
+        snapshot = self.graph.get_state(self._config(record))
+        if (
+            decision.get("approved")
+            and snapshot.interrupts
+            and getattr(snapshot.interrupts[0], "value", {}).get("kind")
+            == "pipeline_approval"
+        ):
+            representatives = [
+                PipelineVersion.model_validate(item)
+                for item in snapshot.values.get("representative_pipelines", [])
+            ]
+            selected_id = decision.get("pipeline_id")
+            selected = next(
+                (
+                    item
+                    for item in representatives
+                    if item.id == selected_id
+                    or (
+                        selected_id is None
+                        and item.strategy.value == "balanced"
+                    )
+                ),
+                None,
+            )
+            if selected is None:
+                raise ValueError("Selected pipeline is not available for approval")
+            eligibility = self.pipeline_execution_eligibility(selected)
+            if not eligibility["eligible"]:
+                raise ValueError(
+                    "Pipeline cannot be approved for execution: "
+                    + "; ".join(eligibility["violations"])
+                )
         result = self.graph.invoke(Command(resume=decision), self._config(record))
         self._capture_versions(record, result)
         return self._public_result(record, result)
@@ -350,64 +384,93 @@ class AgentRuntime:
         return self._run_payload(run)
 
     def _validate_production_pipeline(self, pipeline: PipelineVersion) -> None:
-        self.operator_library.runtime.validate_pipeline(pipeline)
+        eligibility = self.pipeline_execution_eligibility(pipeline)
+        if not eligibility["eligible"]:
+            raise ValueError(
+                "Pipeline is not eligible for production execution: "
+                + "; ".join(eligibility["violations"])
+            )
+
+    def pipeline_execution_eligibility(
+        self, pipeline: PipelineVersion
+    ) -> dict[str, Any]:
         released = {
             OperatorStatus.PERSONAL_RELEASE,
             OperatorStatus.PUBLIC_RELEASE,
         }
         violations: list[str] = []
+        try:
+            self.operator_library.runtime.validate_pipeline(pipeline)
+        except (KeyError, ValueError) as exc:
+            violations.append(str(exc))
         for node in pipeline.nodes:
-            spec = self.operator_registry.get(node.operator_version_id)
-            candidate_allowed = self._candidate_operator_is_executable(
+            try:
+                spec = self.operator_registry.get(node.operator_version_id)
+            except KeyError as exc:
+                violations.append(str(exc))
+                continue
+            try:
+                normalized_parameters = validate_parameters(
+                    spec.parameter_schema,
+                    node.parameters,
+                )
+            except ParameterValidationError as exc:
+                violations.append(f"{spec.id} has invalid parameters: {exc}")
+                continue
+            candidate_allowed, candidate_reason = self._candidate_operator_eligibility(
                 spec=spec,
                 runtime_backend=node.runtime_backend,
-                parameters=node.parameters,
+                parameters=normalized_parameters,
             )
             if spec.status not in released and not candidate_allowed:
-                violations.append(f"{spec.id} has status {spec.status}")
+                violations.append(
+                    f"{spec.id} has status {spec.status}: {candidate_reason}"
+                )
             if node.runtime_backend == RuntimeBackend.MOCK:
                 violations.append(f"{spec.id} uses the mock runtime")
-        if violations:
-            raise ValueError(
-                "Pipeline is not eligible for production execution: "
-                + "; ".join(violations)
-            )
+        unique_violations = list(dict.fromkeys(violations))
+        return {
+            "eligible": not unique_violations,
+            "violations": unique_violations,
+        }
 
-    def _candidate_operator_is_executable(
+    def _candidate_operator_eligibility(
         self,
         *,
         spec: OperatorSpecVersion,
         runtime_backend: RuntimeBackend,
         parameters: dict[str, Any],
-    ) -> bool:
+    ) -> tuple[bool, str]:
         if not self.allow_datajuicer_candidate_execution:
-            return False
+            return False, "draft candidate execution is disabled"
         if spec.status != OperatorStatus.DRAFT:
-            return False
+            return False, "operator is not a draft candidate"
         if spec.provider.provider_id != "datajuicer":
-            return False
+            return False, "operator is not a governed Data-Juicer candidate"
         if runtime_backend == RuntimeBackend.CPU:
             if not {"cpu", "image"}.issubset(spec.capability_tags):
-                return False
+                return False, "CPU image capability tags are missing"
             if any(tag in spec.capability_tags for tag in {"gpu", "llm", "model"}):
-                return False
+                return False, "model-backed candidates require a governed non-CPU runtime"
         elif runtime_backend == RuntimeBackend.REMOTE:
             if not {"remote", "api", "image"}.issubset(spec.capability_tags):
-                return False
+                return False, "remote API image capability tags are missing"
         else:
-            return False
+            return False, f"runtime backend {runtime_backend} is not candidate-eligible"
         try:
             provider = self.operator_library.providers.get("datajuicer")
         except KeyError:
-            return False
+            return False, "Data-Juicer provider is unavailable"
         if provider.provider_version != spec.provider.provider_version:
-            return False
+            return False, "provider version does not match the operator version"
         validation = provider.validate(
             spec.provider.provider_operator_ref,
             parameters,
             runtime_backend,
         )
-        return validation.ok
+        if not validation.ok:
+            return False, "provider validation failed: " + "; ".join(validation.errors)
+        return True, "candidate policy and provider validation passed"
 
     def get_run(self, *, run_id: str, owner_id: str) -> dict[str, Any]:
         if self.run_store is None:
@@ -524,15 +587,35 @@ class AgentRuntime:
     def _config(record: AgentThread) -> dict[str, dict[str, str]]:
         return {"configurable": {"thread_id": record.thread_id}}
 
-    @staticmethod
-    def _public_result(record: AgentThread, result: dict[str, Any]) -> dict[str, Any]:
+    def _public_result(self, record: AgentThread, result: dict[str, Any]) -> dict[str, Any]:
         state = {key: value for key, value in result.items() if key != "__interrupt__"}
+        representatives = {
+            item["id"]: item for item in state.get("representative_pipelines", [])
+        }
         interrupts = []
         for item in result.get("__interrupt__", ()):
+            value = deepcopy(getattr(item, "value", item))
+            if isinstance(value, dict) and value.get("kind") == "pipeline_approval":
+                for pipeline_payload in value.get("pipelines", []):
+                    pipeline = PipelineVersion.model_validate(
+                        representatives.get(pipeline_payload.get("id"), pipeline_payload)
+                    )
+                    pipeline_payload["execution_eligibility"] = (
+                        self.pipeline_execution_eligibility(pipeline)
+                    )
+                    for node in pipeline_payload.get("nodes", []):
+                        try:
+                            spec = self.operator_registry.get(
+                                node["operator_version_id"]
+                            )
+                        except KeyError:
+                            node["operator_status"] = "UNAVAILABLE"
+                        else:
+                            node["operator_status"] = spec.status.value
             interrupts.append(
                 {
                     "id": getattr(item, "id", None),
-                    "value": getattr(item, "value", item),
+                    "value": value,
                 }
             )
         return {

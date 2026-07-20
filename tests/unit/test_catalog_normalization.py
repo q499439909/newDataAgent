@@ -14,6 +14,7 @@ from dataagent.domain.plans import CapabilityCoverageStatus
 from dataagent.agents.processing.nodes import generate_pipeline_variants
 from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
+from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.domain.pipelines import PipelineVersion
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
@@ -474,3 +475,30 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         "balanced": "review",
         "quality_first": "reject",
     }
+    balanced = next(
+        pipeline
+        for pipeline in pipelines
+        if pipeline.strategy.value == "balanced"
+    )
+    remote_nodes = [
+        node
+        for node in balanced.nodes
+        if node.operator_version_id
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+    ]
+    assert len(remote_nodes) == 2
+    assert all(node.parameters["is_api_model"] is True for node in remote_nodes)
+    assert all(node.parameters["api_or_hf_model"] == "qwen3.7-plus" for node in remote_nodes)
+    assert all(node.parameters["api_endpoint"].endswith("/compatible-mode/v1") for node in remote_nodes)
+
+    base.providers.register(provider)
+    runtime = AgentRuntime(include_datajuicer=False)
+    runtime.operator_library = OperatorLibrary(
+        operators=operators,
+        registry=registry,
+        runtime=OperatorRuntime(operators),
+        providers=base.providers,
+    )
+    runtime.operator_registry = registry
+    eligibility = runtime.pipeline_execution_eligibility(balanced)
+    assert eligibility == {"eligible": True, "violations": []}

@@ -126,9 +126,15 @@ class TuiApp:
         self.console.print(table)
         if interrupts and interrupts[0]["value"].get("kind") == "pipeline_approval":
             pipelines = interrupts[0]["value"].get("pipelines", [])
-            choices = Table("Strategy", "Version", "Pipeline")
+            choices = Table("Strategy", "Version", "Runnable", "Pipeline")
             for item in pipelines:
-                choices.add_row(item["strategy"], str(item["version"]), item["id"])
+                eligible = item.get("execution_eligibility", {}).get("eligible")
+                choices.add_row(
+                    item["strategy"],
+                    str(item["version"]),
+                    "yes" if eligible is True else "no" if eligible is False else "unknown",
+                    item["id"],
+                )
             self.console.print(choices)
             self._render_pipeline_details(pipelines)
 
@@ -139,6 +145,7 @@ class TuiApp:
                 "Node",
                 "Operator version",
                 "Backend",
+                "Status",
                 "Parameters",
                 title=f"{pipeline['strategy']} pipeline",
             )
@@ -149,6 +156,7 @@ class TuiApp:
                     str(node.get("id", "-")),
                     str(node.get("operator_version_id", "-")),
                     str(node.get("runtime_backend", "-")),
+                    str(node.get("operator_status", "unknown")),
                     json.dumps(parameters, ensure_ascii=False, sort_keys=True),
                 )
             self.console.print(nodes)

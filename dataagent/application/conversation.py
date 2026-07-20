@@ -350,6 +350,15 @@ class ConversationService:
                     base["reply"] = "没有找到对应策略，请选择保留优先、均衡或质量优先。"
                     base["turn"] = turn
                     return base
+                eligibility = selected.get("execution_eligibility") or {}
+                if eligibility.get("eligible") is False:
+                    violations = eligibility.get("violations") or ["未知执行门禁错误"]
+                    base["reply"] = (
+                        "这条 Pipeline 当前不能批准运行："
+                        + "；".join(str(item) for item in violations)
+                    )
+                    base["turn"] = turn
+                    return base
                 command["pipeline_id"] = selected["id"]
             turn = self.agent_runtime.resume(
                 work_order_id=work_order_id,
@@ -476,7 +485,19 @@ class ConversationService:
             }
             if task_spec := turn["state"].get("task_spec"):
                 context["task_spec"] = task_spec
-            if pipelines := turn["state"].get("representative_pipelines"):
+            approval_pipelines = []
+            if (
+                turn["interrupts"]
+                and turn["interrupts"][0]["value"].get("kind")
+                == "pipeline_approval"
+            ):
+                approval_pipelines = turn["interrupts"][0]["value"].get(
+                    "pipelines", []
+                )
+            if pipelines := (
+                approval_pipelines
+                or turn["state"].get("representative_pipelines")
+            ):
                 context["pipeline_choices"] = [
                     {
                         "id": item.get("id"),
@@ -488,10 +509,12 @@ class ConversationService:
                                 "id": node.get("id"),
                                 "operator_version_id": node.get("operator_version_id"),
                                 "runtime_backend": node.get("runtime_backend"),
+                                "operator_status": node.get("operator_status"),
                                 "parameters": node.get("parameters", {}),
                             }
                             for node in item.get("nodes", [])
                         ],
+                        "execution_eligibility": item.get("execution_eligibility"),
                     }
                     for item in pipelines
                 ]
@@ -614,7 +637,17 @@ class ConversationService:
     def _pipeline_details_reply(pipelines: list[dict[str, Any]]) -> str:
         lines = ["以下是控制平面实际编译的算子流水线："]
         for pipeline in pipelines:
-            lines.append(f"\n### {pipeline.get('strategy', 'unknown')}")
+            eligibility = pipeline.get("execution_eligibility") or {}
+            eligibility_text = (
+                "可运行"
+                if eligibility.get("eligible") is True
+                else "不可运行"
+                if eligibility.get("eligible") is False
+                else "未评估"
+            )
+            lines.append(
+                f"\n### {pipeline.get('strategy', 'unknown')}（{eligibility_text}）"
+            )
             for index, node in enumerate(pipeline.get("nodes", []), start=1):
                 parameters = node.get("parameters") or {}
                 parameter_text = (
@@ -624,7 +657,8 @@ class ConversationService:
                 )
                 lines.append(
                     f"{index}. `{node.get('operator_version_id', '-')}` "
-                    f"[{node.get('runtime_backend', '-')}]"
+                    f"[{node.get('runtime_backend', '-')} / "
+                    f"{node.get('operator_status', 'unknown')}]"
                     f"{parameter_text}"
                 )
 

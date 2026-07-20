@@ -14,6 +14,7 @@ from ...domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ...domain.specs import TaskSpecVersion
 from ...operators import OperatorLibrary, build_operator_library
 from ...operators.catalog_matching import OperatorCatalogMatch
+from ...operators.validation import validate_parameters
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -159,12 +160,16 @@ def _node(
     candidates: dict[str, OperatorCatalogMatch],
 ) -> PipelineNode:
     operator = library.registry.get(operator_id)
+    normalized_parameters = validate_parameters(
+        operator.parameter_schema,
+        parameters,
+    )
     return PipelineNode(
         id=node_id,
         operator_version_id=operator_id,
         name=operator.display_name,
         category=operator.primary_category.value,
-        parameters=parameters,
+        parameters=normalized_parameters,
         runtime_backend=_runtime_for(
             operator_id, library=library, candidates=candidates
         ),

@@ -41,6 +41,16 @@ def test_web_and_tui_can_share_and_resume_one_agent_thread() -> None:
     second = spec_approved.json()
     assert second["thread_id"] == first["thread_id"]
     assert second["interrupts"][0]["value"]["kind"] == "pipeline_approval"
+    approval_pipelines = second["interrupts"][0]["value"]["pipelines"]
+    assert all(
+        item["execution_eligibility"] == {"eligible": True, "violations": []}
+        for item in approval_pipelines
+    )
+    assert all(
+        node["operator_status"] in {"PERSONAL_RELEASE", "PUBLIC_RELEASE"}
+        for item in approval_pipelines
+        for node in item["nodes"]
+    )
 
     balanced = next(
         item
