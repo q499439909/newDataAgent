@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,18 @@ class DataJuicerAdmission:
     execution_scope: ExecutionScope = ExecutionScope.ASSET
     compatible_versions: frozenset[str] = frozenset({"1.5.3"})
     dependencies: tuple[str, ...] = ("py-data-juicer==1.5.3",)
+
+
+@dataclass(frozen=True)
+class DataJuicerProxyVariant:
+    id_suffix: str | None = None
+    display_name: str | None = None
+    summary: str | None = None
+    runtime_backends: tuple[RuntimeBackend, ...] | None = None
+    add_tags: frozenset[str] = frozenset()
+    remove_tags: frozenset[str] = frozenset()
+    parameter_bindings: tuple[tuple[str, Any], ...] = ()
+    output_schema: str = "ProviderDecision"
 
 
 DATAJUICER_ADMISSIONS = (
@@ -115,6 +128,56 @@ DATAJUICER_ADMISSIONS = (
         ),
     ),
 )
+
+
+def _bind_parameters(
+    schema: dict[str, Any],
+    bindings: tuple[tuple[str, Any], ...],
+) -> dict[str, Any]:
+    bound = deepcopy(schema)
+    properties = bound.setdefault("properties", {})
+    for name, value in bindings:
+        property_schema = properties.setdefault(name, {})
+        property_schema["default"] = value
+        property_schema["enum"] = [value]
+    bound.setdefault("type", "object")
+    bound.setdefault("additionalProperties", False)
+    return bound
+
+
+def _proxy_variants(
+    descriptor: ProviderOperatorDescriptor,
+) -> tuple[DataJuicerProxyVariant, ...]:
+    if descriptor.provider_operator_ref != "image_tagging_vlm_mapper":
+        return (DataJuicerProxyVariant(),)
+    return (
+        DataJuicerProxyVariant(
+            id_suffix="remote_api",
+            display_name="Data-Juicer Image Tagging VLM (Remote API)",
+            summary="Generate governed image tags through a remote vision model API.",
+            runtime_backends=(RuntimeBackend.REMOTE,),
+            add_tags=frozenset({"remote", "commercial_model"}),
+            remove_tags=frozenset({"gpu", "vllm"}),
+            parameter_bindings=(
+                ("is_api_model", True),
+                ("api_or_hf_model", "qwen3.7-plus"),
+            ),
+            output_schema="ImageTagSet",
+        ),
+        DataJuicerProxyVariant(
+            id_suffix="local_cuda",
+            display_name="Data-Juicer Image Tagging VLM (Local CUDA)",
+            summary="Generate image tags with a local version-pinned VLM runtime.",
+            runtime_backends=(RuntimeBackend.CUDA,),
+            add_tags=frozenset({"local_model"}),
+            remove_tags=frozenset({"api"}),
+            parameter_bindings=(
+                ("is_api_model", False),
+                ("api_or_hf_model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+            ),
+            output_schema="ImageTagSet",
+        ),
+    )
 
 
 def _digest(provider_version: str, admission: DataJuicerAdmission) -> str:
@@ -271,128 +334,151 @@ def build_datajuicer_proxy_operators(
     operators: list[ProviderProxyOperator] = []
     for normalized_entry in catalog_by_ref.values():
         descriptor = normalized_entry.descriptor
-        admission = admissions.get(descriptor.provider_operator_ref)
-        is_admitted = bool(
-            admission
-            and provider.provider_version in admission.compatible_versions
-        )
-        if is_admitted:
-            assert admission is not None
-            source_digest = _digest(provider.provider_version, admission)
-            category = admission.category
-            secondary = admission.secondary_category
-            tags = admission.tags
-            parameter_schema = admission.parameter_schema
-            execution_scope = admission.execution_scope
-            display_name = admission.display_name
-            summary = admission.summary
-            dependencies = admission.dependencies
-            frozen_descriptors.append(
-                descriptor.model_copy(
-                    update={
-                        "display_name": display_name,
-                        "description": summary,
-                        "parameter_schema": parameter_schema,
-                        "tags": tags,
-                        "source_digest": source_digest,
-                        "suggested_category": category,
-                        "suggested_secondary_category": secondary,
-                        "suggested_execution_scope": execution_scope,
-                        "supported_runtime_backends": (RuntimeBackend.CPU,),
-                    }
+        for variant in _proxy_variants(descriptor):
+            admission = admissions.get(descriptor.provider_operator_ref)
+            is_admitted = bool(
+                admission
+                and provider.provider_version in admission.compatible_versions
+            )
+            if is_admitted:
+                assert admission is not None
+                source_digest = _digest(provider.provider_version, admission)
+                category = admission.category
+                secondary = admission.secondary_category
+                tags = admission.tags
+                parameter_schema = admission.parameter_schema
+                execution_scope = admission.execution_scope
+                display_name = admission.display_name
+                summary = admission.summary
+                dependencies = admission.dependencies
+                frozen_descriptors.append(
+                    descriptor.model_copy(
+                        update={
+                            "display_name": display_name,
+                            "description": summary,
+                            "parameter_schema": parameter_schema,
+                            "tags": tags,
+                            "source_digest": source_digest,
+                            "suggested_category": category,
+                            "suggested_secondary_category": secondary,
+                            "suggested_execution_scope": execution_scope,
+                            "supported_runtime_backends": (RuntimeBackend.CPU,),
+                        }
+                    )
+                )
+            else:
+                source_digest = descriptor.source_digest
+                category = descriptor.suggested_category or OperatorCategory.UNDERSTANDING
+                secondary = descriptor.suggested_secondary_category or "classification"
+                tags = frozenset(
+                    {
+                        *descriptor.tags,
+                        *variant.add_tags,
+                        "datajuicer",
+                        "candidate",
+                    }.difference(variant.remove_tags)
+                )
+                parameter_schema = _bind_parameters(
+                    descriptor.parameter_schema,
+                    variant.parameter_bindings,
+                )
+                execution_scope = descriptor.suggested_execution_scope
+                display_name = variant.display_name or descriptor.display_name
+                summary = variant.summary or descriptor.description or (
+                    f"Candidate proxy for Data-Juicer {descriptor.provider_operator_ref}."
+                )
+                dependencies = (f"py-data-juicer=={provider.provider_version}",)
+            runtime_backends = variant.runtime_backends or (
+                descriptor.supported_runtime_backends or (RuntimeBackend.CPU,)
+            )
+            profiles = tuple(
+                RuntimeProfile(
+                    backend=backend,
+                    memory_mb=2048 if backend == RuntimeBackend.CUDA else 1024,
+                    gpu_count=1 if backend == RuntimeBackend.CUDA else 0,
+                    gpu_memory_mb=16000 if backend == RuntimeBackend.CUDA else 0,
+                )
+                for backend in runtime_backends
+            )
+            base_id = f"datajuicer.{descriptor.provider_operator_ref}"
+            operator_id = (
+                f"{base_id}.{variant.id_suffix}:1"
+                if variant.id_suffix
+                else f"{base_id}:1"
+            )
+            spec = OperatorSpecVersion(
+                id=operator_id,
+                family_id=base_id,
+                version=1,
+                created_by="system",
+                change_reason=(
+                    "admitted Data-Juicer provider proxy"
+                    if is_admitted
+                    else "auto-generated Data-Juicer candidate proxy"
+                ),
+                display_name=display_name,
+                summary=summary,
+                description=(
+                    f"Versioned DataAgent proxy for Data-Juicer "
+                    f"{descriptor.provider_operator_ref} ({descriptor.provider_operator_type}); "
+                    "candidate proxies require admission evidence before production use."
+                ),
+                primary_category=category,
+                secondary_category=secondary,
+                capability_tags=tags,
+                input_schema=(
+                    "ImageAssetRef" if "image" in tags else "ProviderDatasetRecord"
+                ),
+                output_schema=variant.output_schema,
+                parameter_schema=parameter_schema,
+                provider=ProviderRef(
+                    provider_id=provider.provider_id,
+                    provider_version=provider.provider_version,
+                    provider_operator_ref=descriptor.provider_operator_ref,
+                    source_digest=source_digest,
+                ),
+                implementation=ImplementationSpec(
+                    implementation_type=ImplementationType.EXTERNAL_SERVICE,
+                    entrypoint="dataagent.operators.providers.proxy:ProviderProxyOperator",
+                    dependency_lock_digest=hashlib.sha256(
+                        "\n".join(dependencies).encode("utf-8")
+                    ).hexdigest(),
+                ),
+                supported_runtime_profiles=profiles,
+                execution_scope=execution_scope,
+                implementation_ref="dataagent.operators.providers.proxy:ProviderProxyOperator",
+                resource_requirements={
+                    "catalog_normalization": {
+                        "overlay_ids": list(normalized_entry.overlay_ids),
+                        "digest": normalized_entry.normalization_digest,
+                        "raw_source_digest": normalized_entry.raw.source_digest,
+                    },
+                    "provider_variant": {
+                        "id_suffix": variant.id_suffix,
+                        "parameter_bindings": dict(variant.parameter_bindings),
+                    },
+                },
+                limitations=(
+                    "Requires the isolated Data-Juicer provider environment.",
+                    "Candidate status does not imply production admission."
+                    if not is_admitted
+                    else "Released only for the verified provider version.",
+                ),
+                status=(
+                    OperatorStatus.PERSONAL_RELEASE
+                    if is_admitted
+                    else OperatorStatus.DRAFT
+                ),
+                owner_id="system",
+                visibility="private",
+            )
+            operators.append(
+                ProviderProxyOperator(
+                    spec,
+                    provider,
+                    provider_operator_type=descriptor.provider_operator_type,
                 )
             )
-        else:
-            source_digest = descriptor.source_digest
-            category = descriptor.suggested_category or OperatorCategory.UNDERSTANDING
-            secondary = descriptor.suggested_secondary_category or "classification"
-            tags = frozenset({*descriptor.tags, "datajuicer", "candidate"})
-            parameter_schema = descriptor.parameter_schema
-            execution_scope = descriptor.suggested_execution_scope
-            display_name = descriptor.display_name
-            summary = descriptor.description or (
-                f"Candidate proxy for Data-Juicer {descriptor.provider_operator_ref}."
-            )
-            dependencies = (f"py-data-juicer=={provider.provider_version}",)
-        runtime_backends = descriptor.supported_runtime_backends or (
-            RuntimeBackend.CPU,
-        )
-        profiles = tuple(
-            RuntimeProfile(
-                backend=backend,
-                memory_mb=2048 if backend == RuntimeBackend.CUDA else 1024,
-                gpu_count=1 if backend == RuntimeBackend.CUDA else 0,
-            )
-            for backend in runtime_backends
-        )
-        operator_id = f"datajuicer.{descriptor.provider_operator_ref}:1"
-        spec = OperatorSpecVersion(
-            id=operator_id,
-            family_id=operator_id.rsplit(":", 1)[0],
-            version=1,
-            created_by="system",
-            change_reason=(
-                "admitted Data-Juicer provider proxy"
-                if is_admitted
-                else "auto-generated Data-Juicer candidate proxy"
-            ),
-            display_name=display_name,
-            summary=summary,
-            description=(
-                f"Versioned DataAgent proxy for Data-Juicer "
-                f"{descriptor.provider_operator_ref} ({descriptor.provider_operator_type}); "
-                "candidate proxies require admission evidence before production use."
-            ),
-            primary_category=category,
-            secondary_category=secondary,
-            capability_tags=tags,
-            input_schema=("ImageAssetRef" if "image" in tags else "ProviderDatasetRecord"),
-            output_schema="ProviderDecision",
-            parameter_schema=parameter_schema,
-            provider=ProviderRef(
-                provider_id=provider.provider_id,
-                provider_version=provider.provider_version,
-                provider_operator_ref=descriptor.provider_operator_ref,
-                source_digest=source_digest,
-            ),
-            implementation=ImplementationSpec(
-                implementation_type=ImplementationType.EXTERNAL_SERVICE,
-                entrypoint="dataagent.operators.providers.proxy:ProviderProxyOperator",
-                dependency_lock_digest=hashlib.sha256(
-                    "\n".join(dependencies).encode("utf-8")
-                ).hexdigest(),
-            ),
-            supported_runtime_profiles=profiles,
-            execution_scope=execution_scope,
-            implementation_ref="dataagent.operators.providers.proxy:ProviderProxyOperator",
-            resource_requirements={
-                "catalog_normalization": {
-                    "overlay_ids": list(normalized_entry.overlay_ids),
-                    "digest": normalized_entry.normalization_digest,
-                    "raw_source_digest": normalized_entry.raw.source_digest,
-                }
-            },
-            limitations=(
-                "Requires the isolated Data-Juicer provider environment.",
-                "Candidate status does not imply production admission."
-                if not is_admitted
-                else "Released only for the verified provider version.",
-            ),
-            status=(
-                OperatorStatus.PERSONAL_RELEASE
-                if is_admitted
-                else OperatorStatus.DRAFT
-            ),
-            owner_id="system",
-            visibility="private",
-        )
-        operators.append(
-            ProviderProxyOperator(
-                spec,
-                provider,
-                provider_operator_type=descriptor.provider_operator_type,
-            )
-        )
     admit = getattr(provider, "admit", None)
     if callable(admit):
         admit(frozen_descriptors)
@@ -402,6 +488,7 @@ def build_datajuicer_proxy_operators(
 __all__ = [
     "DATAJUICER_ADMISSIONS",
     "DataJuicerAdmission",
+    "DataJuicerProxyVariant",
     "ProviderProxyOperator",
     "build_datajuicer_proxy_operators",
 ]

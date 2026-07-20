@@ -75,6 +75,50 @@ def test_proxy_records_normalization_provenance() -> None:
     ]
 
 
+def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None:
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+
+    operators = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    variants = {
+        item.spec.id: item.spec
+        for item in operators
+        if item.spec.provider.provider_operator_ref == "image_tagging_vlm_mapper"
+    }
+
+    assert set(variants) == {
+        "datajuicer.image_tagging_vlm_mapper.remote_api:1",
+        "datajuicer.image_tagging_vlm_mapper.local_cuda:1",
+    }
+    remote = variants["datajuicer.image_tagging_vlm_mapper.remote_api:1"]
+    local = variants["datajuicer.image_tagging_vlm_mapper.local_cuda:1"]
+    assert remote.family_id == local.family_id == (
+        "datajuicer.image_tagging_vlm_mapper"
+    )
+    assert remote.output_schema == local.output_schema == "ImageTagSet"
+    assert {profile.backend for profile in remote.supported_runtime_profiles} == {
+        RuntimeBackend.REMOTE
+    }
+    assert remote.parameter_schema["properties"]["is_api_model"] == {
+        "default": True,
+        "enum": [True],
+    }
+    assert remote.parameter_schema["properties"]["api_or_hf_model"] == {
+        "default": "qwen3.7-plus",
+        "enum": ["qwen3.7-plus"],
+    }
+    assert "remote" in remote.capability_tags
+    assert "gpu" not in remote.capability_tags
+    assert {profile.backend for profile in local.supported_runtime_profiles} == {
+        RuntimeBackend.CUDA
+    }
+    assert local.parameter_schema["properties"]["is_api_model"] == {
+        "default": False,
+        "enum": [False],
+    }
+    assert "local_model" in local.capability_tags
+    assert "api" not in local.capability_tags
+
+
 def test_normalization_does_not_rewrite_discovery_cache(tmp_path) -> None:
     cache_path = tmp_path / "catalog.json"
 
