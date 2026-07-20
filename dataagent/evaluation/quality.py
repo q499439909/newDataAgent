@@ -6,6 +6,16 @@ from ..domain.specs import TaskSpecVersion
 from ..infrastructure import DomainVersionStore
 
 
+def _has_semantic_value(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_has_semantic_value(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_semantic_value(item) for item in value)
+    return False
+
+
 class QualityEvaluator:
     VERSION = "builtin.quality_evaluator:1"
 
@@ -33,10 +43,24 @@ class QualityEvaluator:
         ]
         failed_assets = [asset for asset in dataset.assets if asset.decision == "failed"]
         kept = [asset for asset in dataset.assets if asset.decision == "keep"]
+        required_capabilities = {
+            *spec.required_capabilities,
+            *(
+                item.capability
+                for item in spec.capability_requirements
+                if item.required
+            ),
+        }
+        semantic_missing = [
+            asset
+            for asset in kept
+            if self._missing_required_semantics(asset, required_capabilities)
+        ]
         source_count = max(1, dataset.source_count)
         checked_count = max(1, len(kept))
         violation_rate = len(hard_violations) / checked_count
         failure_rate = dataset.failed_count / source_count
+        semantic_missing_rate = len(semantic_missing) / checked_count
         retention_rate = dataset.kept_count / source_count
         threshold = spec.acceptance.hard_rule_violation_rate
         reasons: list[str] = []
@@ -50,7 +74,17 @@ class QualityEvaluator:
         if dataset.failed_count:
             reasons.append("EXECUTION_FAILURES_PRESENT")
             recommendations.append("Retry failed assets after diagnosing operator errors")
-        passed = bool(kept) and violation_rate <= threshold and dataset.failed_count == 0
+        if semantic_missing:
+            reasons.append("REQUIRED_SEMANTIC_OUTPUT_MISSING")
+            recommendations.append(
+                "Inspect the model-operator response contract and retry before publication"
+            )
+        passed = (
+            bool(kept)
+            and violation_rate <= threshold
+            and dataset.failed_count == 0
+            and not semantic_missing
+        )
         report = QCReport(
             id=f"qc_report_{dataset.id.removeprefix('dataset_')}",
             version=1,
@@ -69,9 +103,13 @@ class QualityEvaluator:
                 "hard_rule_violation_rate": round(violation_rate, 6),
                 "retention_rate": round(retention_rate, 6),
                 "execution_failure_rate": round(failure_rate, 6),
+                "semantic_output_missing_rate": round(semantic_missing_rate, 6),
             },
             failed_asset_uris=tuple(
-                asset.source_uri for asset in (*hard_violations, *failed_assets)
+                dict.fromkeys(
+                    asset.source_uri
+                    for asset in (*hard_violations, *failed_assets, *semantic_missing)
+                )
             ),
             reason_codes=tuple(reasons),
             recommendations=tuple(recommendations),
@@ -80,6 +118,30 @@ class QualityEvaluator:
             kind="qc_report", owner_id=owner_id, payload=report.model_dump(mode="json")
         )
         return report
+
+    @staticmethod
+    def _missing_required_semantics(
+        asset: DatasetAsset, required_capabilities: set[str]
+    ) -> bool:
+        labels = asset.labels
+        provider_output = labels.get("datajuicer_output", {})
+        if "image_classification" in required_capabilities:
+            classification_evidence = (
+                provider_output.get("image_tags")
+                if isinstance(provider_output, dict)
+                else None
+            )
+            if not _has_semantic_value(classification_evidence):
+                return True
+        if "authenticity_assessment" in required_capabilities:
+            authenticity_evidence = (
+                provider_output.get("authenticity_tags")
+                if isinstance(provider_output, dict)
+                else None
+            )
+            if not _has_semantic_value(authenticity_evidence):
+                return True
+        return False
 
     @staticmethod
     def _hard_rule_failures(

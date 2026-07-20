@@ -515,6 +515,17 @@ class RunStore:
     def mark_failed(self, run_id: str, error: str) -> None:
         self._update(run_id, status="FAILED", error=error, control_requested=False)
 
+    def mark_quality_failed(
+        self, run_id: str, dataset_version_id: str, error: str
+    ) -> None:
+        self._update(
+            run_id,
+            status="FAILED",
+            dataset_version_id=dataset_version_id,
+            error=error,
+            control_requested=False,
+        )
+
     def _update(self, run_id: str, **values: Any) -> None:
         values["updated_at"] = datetime.now(UTC)
         with self.database.session() as session, session.begin():

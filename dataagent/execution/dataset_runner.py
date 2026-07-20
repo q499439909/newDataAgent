@@ -91,7 +91,8 @@ class DatasetRunExecutor:
             self.run_store.mark_evaluating(run_id)
             self.run_store.add_event(run_id, "evaluation_started")
             try:
-                self.quality_evaluator.evaluate(
+                self._validate_materialized_dataset(dataset)
+                report = self.quality_evaluator.evaluate(
                     dataset=dataset,
                     spec=TaskSpecVersion.model_validate(
                         self.version_store.get(
@@ -103,18 +104,50 @@ class DatasetRunExecutor:
                     owner_id=run["owner_id"],
                 )
             except Exception as exc:
-                self.run_store.mark_failed(run_id, str(exc))
+                self.run_store.mark_quality_failed(run_id, dataset.id, str(exc))
                 self.run_store.add_event(
                     run_id,
                     "run_failed",
                     {"stage": "evaluation", "error_type": type(exc).__name__, "error": str(exc)},
                 )
                 raise
+            if str(report.status) != "PASSED":
+                error = "Dataset QC failed: " + ", ".join(report.reason_codes)
+                self.run_store.mark_quality_failed(run_id, dataset.id, error)
+                self.run_store.add_event(
+                    run_id,
+                    "run_failed",
+                    {
+                        "stage": "evaluation",
+                        "dataset_version_id": dataset.id,
+                        "qc_report_id": report.id,
+                        "reason_codes": list(report.reason_codes),
+                    },
+                )
+                return self.run_store.get(run_id)
             self.run_store.mark_succeeded(run_id, dataset.id)
             self.run_store.add_event(
                 run_id, "run_succeeded", {"dataset_version_id": dataset.id}
             )
         return self.run_store.get(run_id)
+
+    @staticmethod
+    def _validate_materialized_dataset(dataset: DatasetVersion) -> None:
+        manifest = Path(dataset.manifest_uri)
+        if not manifest.is_file():
+            raise RuntimeError(f"Published Dataset manifest is missing: {manifest}")
+        for asset in dataset.assets:
+            if asset.decision != "keep":
+                continue
+            if not asset.output_uri or not asset.output_sha256:
+                raise RuntimeError(
+                    f"Kept asset has no materialized output: {asset.source_uri}"
+                )
+            output = Path(asset.output_uri)
+            if not output.is_file():
+                raise RuntimeError(f"Published Dataset output is missing: {output}")
+            if _sha256(output) != asset.output_sha256:
+                raise RuntimeError(f"Published Dataset output hash changed: {output}")
 
     def _execute(self, run: dict[str, Any]) -> DatasetVersion | None:
         owner_id = run["owner_id"]

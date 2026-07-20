@@ -145,6 +145,38 @@ def test_queued_run_can_pause_resume_cancel_and_is_owner_isolated(tmp_path) -> N
     assert LocalRunWorker(home).process_next() is None
 
 
+def test_worker_marks_run_failed_when_dataset_qc_fails(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(source / "sample.png")
+    home = tmp_path / "runtime"
+    client = TestClient(create_app(AgentRuntime(home)))
+    _ready_work_order(client, source, work_order_id="qc_failed_work_order")
+    submitted = client.post(
+        "/api/work-orders/qc_failed_work_order/runs",
+        headers={"X-Owner-ID": "user_1", "Idempotency-Key": "qc-failed-run"},
+    ).json()
+
+    class FailedReport:
+        id = "qc_report_failed"
+        status = "FAILED"
+        reason_codes = ("REQUIRED_SEMANTIC_OUTPUT_MISSING",)
+
+    class FailedEvaluator:
+        def evaluate(self, **kwargs):
+            return FailedReport()
+
+    worker = LocalRunWorker(home)
+    worker.executor.quality_evaluator = FailedEvaluator()
+    completed = worker.process_next()
+
+    assert completed is not None
+    assert completed["id"] == submitted["id"]
+    assert completed["status"] == "FAILED"
+    assert completed["dataset_version_id"]
+    assert "REQUIRED_SEMANTIC_OUTPUT_MISSING" in completed["error"]
+
+
 def test_worker_resumes_from_asset_checkpoint_without_reprocessing(tmp_path) -> None:
     source = tmp_path / "source"
     source.mkdir()
