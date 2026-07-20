@@ -386,11 +386,15 @@ class AgentRuntime:
             return False
         if spec.provider.provider_id != "datajuicer":
             return False
-        if runtime_backend != RuntimeBackend.CPU:
-            return False
-        if not {"cpu", "image"}.issubset(spec.capability_tags):
-            return False
-        if any(tag in spec.capability_tags for tag in {"gpu", "llm", "model"}):
+        if runtime_backend == RuntimeBackend.CPU:
+            if not {"cpu", "image"}.issubset(spec.capability_tags):
+                return False
+            if any(tag in spec.capability_tags for tag in {"gpu", "llm", "model"}):
+                return False
+        elif runtime_backend == RuntimeBackend.REMOTE:
+            if not {"remote", "api", "image"}.issubset(spec.capability_tags):
+                return False
+        else:
             return False
         try:
             provider = self.operator_library.providers.get("datajuicer")
