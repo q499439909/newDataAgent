@@ -194,6 +194,36 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
     assert retried["run"]["id"] != submitted["run"]["id"]
     assert retried["run"]["pipeline_version_id"] == switched_pipeline["id"]
 
+    runtime.run_store.mark_failed(retried["run"]["id"], "second test failure")
+    revised = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="不筛选清晰度了",
+    )
+    revised_spec = revised["turn"]["state"]["task_spec"]
+    assert revised["turn"]["interrupts"][0]["value"]["kind"] == (
+        "task_spec_confirmation"
+    )
+    assert revised_spec["confirmed"] is False
+    assert revised_spec["hard_constraints"]["disabled_capabilities"] == [
+        "image_quality"
+    ]
+    assert "image_quality" not in {
+        item["capability"] for item in revised_spec["capability_requirements"]
+    }
+    assert revised["turn"]["state"]["selected_pipeline_id"] == ""
+
+    replanned = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="确认"
+    )
+    assert replanned["turn"]["interrupts"][0]["value"]["kind"] == (
+        "pipeline_approval"
+    )
+    for pipeline in replanned["turn"]["state"]["representative_pipelines"]:
+        assert "builtin.quality_filter:1" not in {
+            node["operator_version_id"] for node in pipeline["nodes"]
+        }
+
 
 def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) -> None:
     source = tmp_path / "cats_dogs_mixed" / "images"

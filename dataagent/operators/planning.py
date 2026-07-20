@@ -224,6 +224,31 @@ def decompose_task_capabilities(requirement: str) -> tuple[TaskCapabilitySpec, .
     return tuple(capabilities)
 
 
+def exclude_task_capabilities(
+    capabilities: tuple[TaskCapabilitySpec, ...],
+    disabled_capabilities: set[str],
+) -> tuple[TaskCapabilitySpec, ...]:
+    disabled = disabled_capabilities.difference({"image_decode", "manifest"})
+    by_id = {item.id: item for item in capabilities}
+
+    def retained_dependencies(capability_id: str) -> tuple[str, ...]:
+        item = by_id[capability_id]
+        resolved: list[str] = []
+        for dependency in item.depends_on:
+            dependency_item = by_id[dependency]
+            if dependency in disabled or dependency_item.capability in disabled:
+                resolved.extend(retained_dependencies(dependency))
+            else:
+                resolved.append(dependency)
+        return tuple(dict.fromkeys(resolved))
+
+    return tuple(
+        item.model_copy(update={"depends_on": retained_dependencies(item.id)})
+        for item in capabilities
+        if item.id not in disabled and item.capability not in disabled
+    )
+
+
 def infer_output_actions(
     capabilities: tuple[TaskCapabilitySpec, ...],
 ) -> tuple[str, ...]:

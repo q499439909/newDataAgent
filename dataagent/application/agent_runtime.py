@@ -18,6 +18,7 @@ from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
 from ..graph import build_main_graph
+from ..graph.interrupts import revise_task_spec_version
 from ..infrastructure import (
     AgentThreadStore,
     ConversationStore,
@@ -471,6 +472,67 @@ class AgentRuntime:
             as_node="strategy_agent",
         )
         return self.state(work_order_id=work_order_id, owner_id=owner_id)
+
+    def revise_task_spec(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = self._get_authorized(work_order_id, owner_id)
+        if self.version_store is None or self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for TaskSpec revision")
+        active = [
+            item
+            for item in self.run_store.list_for_work_order(work_order_id, owner_id)
+            if item["status"]
+            in {"QUEUED", "RUNNING", "PAUSING", "CANCELLING", "EVALUATING"}
+        ]
+        if active:
+            raise ValueError("Cannot revise TaskSpec while a Run is active")
+        snapshot = self.graph.get_state(self._config(record))
+        state = dict(snapshot.values)
+        current = TaskSpecVersion.model_validate(state.get("task_spec"))
+        revised = revise_task_spec_version(
+            current,
+            patch=patch,
+            actor=owner_id,
+        )
+        revised_payload = revised.model_dump(mode="json")
+        self.graph.update_state(
+            self._config(record),
+            {
+                "requirement": revised.objective,
+                "task_spec": revised_payload,
+                "task_spec_confirmed": False,
+                "task_spec_approval": {},
+                "retrieval_plan": {},
+                "candidate_sufficient": False,
+                "operator_candidates": [],
+                "capability_coverage": [],
+                "capability_resolution": {},
+                "capability_resolution_attempt": 0,
+                "runtime_backend_overrides": [],
+                "pipeline_variants": [],
+                "representative_pipelines": [],
+                "approved_pipeline": {},
+                "selected_pipeline_id": "",
+                "pipeline_approval": {},
+                "sampling_plan": {},
+                "current_agent": "requirement",
+                "next_action": "confirm_task_spec",
+                "terminated": False,
+                "trace": [
+                    *state.get("trace", []),
+                    "hitl:confirmed_task_spec_reopened",
+                ],
+            },
+            as_node="confirm_task_spec",
+        )
+        result = self.graph.invoke(None, self._config(record))
+        self._capture_versions(record, result)
+        return self._public_result(record, result)
 
     def _validate_production_pipeline(self, pipeline: PipelineVersion) -> None:
         eligibility = self.pipeline_execution_eligibility(pipeline)

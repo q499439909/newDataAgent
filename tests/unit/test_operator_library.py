@@ -32,6 +32,8 @@ from dataagent.operators.planning import (
     CapabilityGapError,
     OperatorRequirement,
     OperatorSelector,
+    decompose_task_capabilities,
+    exclude_task_capabilities,
     infer_required_capabilities,
 )
 from dataagent.operators.protocol import OperatorContext, OperatorInput, OperatorResult
@@ -73,6 +75,21 @@ def test_capability_search_is_bilingual_and_does_not_fallback() -> None:
     assert infer_required_capabilities("segment images and match face identity") == (
         "segmentation",
         "face_identity",
+    )
+
+
+def test_disabled_capability_is_removed_and_dependency_chain_is_reconnected() -> None:
+    capabilities = decompose_task_capabilities(
+        "去掉不真实、不清晰的图片，把猫和狗分开"
+    )
+
+    revised = exclude_task_capabilities(capabilities, {"image_quality"})
+    by_id = {item.id: item for item in revised}
+
+    assert "image_quality" not in by_id
+    assert by_id["authenticity_assessment"].depends_on == ("image_decode",)
+    assert by_id["image_classification"].depends_on == (
+        "authenticity_assessment",
     )
 
     selector = OperatorSelector(

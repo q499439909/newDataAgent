@@ -9,7 +9,11 @@ from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.specs import TaskSpecVersion
 from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
-from ..operators.planning import decompose_task_capabilities, infer_output_actions
+from ..operators.planning import (
+    decompose_task_capabilities,
+    exclude_task_capabilities,
+    infer_output_actions,
+)
 from ..agents.requirement.clarification import infer_task_ambiguities
 
 
@@ -40,7 +44,7 @@ def _remove_conversation_fillers(values: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-def _revise_task_spec(
+def revise_task_spec_version(
     spec: TaskSpecVersion,
     *,
     patch: dict[str, Any],
@@ -63,6 +67,12 @@ def _revise_task_spec(
         [objective, *semantic_requirements, *exclusion_requirements]
     )
     capabilities = decompose_task_capabilities(planning_text)
+    disabled = {
+        str(item)
+        for item in hard_constraints.get("disabled_capabilities", [])
+        if str(item).strip()
+    }
+    capabilities = exclude_task_capabilities(capabilities, disabled)
     ambiguities = infer_task_ambiguities(
         capabilities,
         hard_constraints=hard_constraints,
@@ -103,7 +113,7 @@ def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
     )
     if isinstance(decision, dict) and decision.get("action") == "edit_spec":
         spec = TaskSpecVersion.model_validate(state["task_spec"])
-        revised = _revise_task_spec(
+        revised = revise_task_spec_version(
             spec,
             patch=decision.get("task_spec_patch") or {},
             actor=state["owner_id"],

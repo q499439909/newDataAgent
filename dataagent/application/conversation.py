@@ -149,6 +149,9 @@ class ConversationService:
         task_spec_decision = self._task_spec_details_decision(content, context)
         if task_spec_decision is not None:
             return task_spec_decision
+        revision_decision = self._confirmed_task_revision_decision(content, context)
+        if revision_decision is not None:
+            return revision_decision
         clarification_decision = self._pending_clarification_decision(content, context)
         if clarification_decision is not None:
             return clarification_decision
@@ -299,24 +302,38 @@ class ConversationService:
             turn = self.agent_runtime.state(
                 work_order_id=work_order_id, owner_id=owner_id
             )
-            if not turn["interrupts"] or turn["interrupts"][0]["value"].get(
-                "kind"
-            ) != "task_spec_confirmation":
-                base["reply"] = "当前没有等待修改的 TaskSpec 草案。"
-                base["turn"] = turn
-                return base
             patch = decision.task_spec_patch or {
                 "semantic_requirements": [content]
             }
-            turn = self.agent_runtime.resume(
-                work_order_id=work_order_id,
-                owner_id=owner_id,
-                decision={
-                    "action": "edit_spec",
-                    "task_spec_patch": patch,
-                    "channel": "conversation",
-                },
+            waiting_for_spec = bool(
+                turn["interrupts"]
+                and turn["interrupts"][0]["value"].get("kind")
+                == "task_spec_confirmation"
             )
+            if waiting_for_spec:
+                turn = self.agent_runtime.resume(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    decision={
+                        "action": "edit_spec",
+                        "task_spec_patch": patch,
+                        "channel": "conversation",
+                    },
+                )
+            elif turn["state"].get("task_spec", {}).get("confirmed"):
+                turn = self.agent_runtime.revise_task_spec(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    patch=patch,
+                )
+                context.pop("active_run_id", None)
+                self.store.update(
+                    thread_id=thread["id"], owner_id=owner_id, context=context
+                )
+            else:
+                base["reply"] = "当前没有可以修改的 TaskSpec。"
+                base["turn"] = turn
+                return base
             revised_spec = turn["state"]["task_spec"]
             if decision.confirm_after_edit and not revised_spec.get("ambiguities"):
                 turn = self.agent_runtime.resume(
@@ -633,6 +650,37 @@ class ConversationService:
         return ConversationDecision(
             intent=ConversationIntent.CHAT,
             reply=ConversationService._task_spec_details_reply(task_spec),
+        )
+
+    @staticmethod
+    def _confirmed_task_revision_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        task_spec = context.get("task_spec") or {}
+        if not task_spec.get("confirmed"):
+            return None
+        normalized = content.strip().lower().replace(" ", "")
+        remove_quality = any(
+            token in normalized
+            for token in (
+                "不筛选清晰度",
+                "不要筛选清晰度",
+                "取消清晰度筛选",
+                "去掉清晰度筛选",
+                "不检查清晰度",
+                "不要清晰度",
+            )
+        )
+        if not remove_quality:
+            return None
+        return ConversationDecision(
+            intent=ConversationIntent.EDIT_TASK_SPEC,
+            reply="正在生成不包含清晰度过滤的新 TaskSpec 版本。",
+            task_spec_patch={
+                "hard_constraints": {
+                    "disabled_capabilities": ["image_quality"]
+                }
+            },
         )
 
     @staticmethod
