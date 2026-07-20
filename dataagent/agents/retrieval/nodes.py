@@ -19,6 +19,7 @@ def generate_retrieval_plan(
         DataJuicerCatalogMatcher(operator_registry).match(
             spec.objective,
             required_capabilities=spec.required_capabilities,
+            capability_requirements=spec.capability_requirements,
             allow_draft_candidates=allow_draft_candidates,
         )
         if operator_registry is not None

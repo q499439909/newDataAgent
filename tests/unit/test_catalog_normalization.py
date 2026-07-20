@@ -13,6 +13,9 @@ from dataagent.operators.providers import (
     build_datajuicer_proxy_operators,
     normalize_provider_descriptor,
 )
+from dataagent.operators import OperatorLibrary, OperatorRegistry, OperatorRuntime
+from dataagent.operators.catalog_matching import DataJuicerCatalogMatcher
+from dataagent.operators.library import build_operator_library
 
 
 def _raw_vlm_descriptor() -> ProviderOperatorDescriptor:
@@ -146,3 +149,66 @@ def test_normalization_does_not_rewrite_discovery_cache(tmp_path) -> None:
     assert "image" not in raw.tags
     assert "image" in normalized.descriptor.tags
     assert "image" not in persisted["tags"]
+
+
+def test_hybrid_recall_finds_vlm_variants_without_hardcoded_provider_ref() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    proxies = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = (*base.operators, *proxies)
+    library = OperatorLibrary(
+        operators=operators,
+        registry=OperatorRegistry(item.spec for item in operators),
+        runtime=OperatorRuntime(operators),
+        providers=base.providers,
+    )
+
+    matches = DataJuicerCatalogMatcher(library.registry).match(
+        "把猫和狗的图片分开",
+        capability_requirements=(
+            {
+                "id": "image_classification",
+                "capability": "image_classification",
+                "description": "Classify cats and dogs.",
+                "depends_on": (),
+            },
+        ),
+    )
+    by_id = {item.operator_version_id: item for item in matches}
+
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in by_id
+    assert "datajuicer.image_tagging_vlm_mapper.local_cuda:1" in by_id
+    assert "semantic" in by_id[
+        "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+    ].recall_sources
+
+
+def test_hybrid_recall_records_rule_keyword_and_semantic_evidence() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    proxies = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = (*base.operators, *proxies)
+    registry = OperatorRegistry(item.spec for item in operators)
+
+    matches = DataJuicerCatalogMatcher(registry).match(
+        "使用 image_tagging_vlm_mapper 给图片分类",
+        capability_requirements=(
+            {
+                "id": "image_classification",
+                "capability": "image_classification",
+                "description": "Classify images.",
+                "depends_on": (),
+            },
+        ),
+    )
+    remote = next(
+        item
+        for item in matches
+        if item.operator_version_id
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        and item.capability == "image_classification"
+    )
+
+    assert {"keyword", "semantic"}.issubset(remote.recall_sources)
+    assert remote.keyword_score > 0
+    assert remote.semantic_score > 0
