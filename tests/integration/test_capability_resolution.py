@@ -9,6 +9,7 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.graph import build_main_graph
+from dataagent.agents.requirement.clarification import recommended_clarification_patch
 from dataagent.operators import (
     OperatorLibrary,
     OperatorRegistry,
@@ -116,8 +117,19 @@ def test_resolution_can_return_work_order_to_task_spec_revision() -> None:
         ),
     )
     config = {"configurable": {"thread_id": "thread_revise"}}
-    graph.invoke(
+    draft = graph.invoke(
         _state("去掉里面不真实、不清晰的图片，把猫和狗的图片分开"),
+        config,
+    )
+    graph.invoke(
+        Command(
+            resume={
+                "action": "edit_spec",
+                "task_spec_patch": recommended_clarification_patch(
+                    tuple(draft["task_spec"]["ambiguities"])
+                ),
+            }
+        ),
         config,
     )
     blocked = graph.invoke(Command(resume={"approved": True}), config)
