@@ -1038,6 +1038,18 @@ class ConversationService:
         if cls._looks_like_path(stripped) and Path(stripped).is_dir():
             return stripped, ""
 
+        compact = content.strip()
+        if cls._looks_like_path(compact):
+            for end in range(len(compact) - 1, 2, -1):
+                source = cls._normalize_source(compact[:end])
+                remainder = compact[end:].lstrip("，,。.:：;；| ")
+                if (
+                    remainder
+                    and cls._looks_like_data_requirement(remainder)
+                    and Path(source).is_dir()
+                ):
+                    return source, remainder
+
         unquoted = re.match(
             r"^(?P<path>(?:[a-zA-Z]:[\\/]|\\\\|/)\S+)(?:\s+|[，,;；|])(?P<rest>.+)$",
             content.strip(),

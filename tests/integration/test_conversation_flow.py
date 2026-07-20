@@ -262,6 +262,34 @@ def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) 
     assert len(response["turn"]["state"]["task_spec"]["ambiguities"]) == 3
 
 
+def test_unquoted_path_glued_to_requirement_uses_existing_directory_prefix(
+    tmp_path,
+) -> None:
+    source = tmp_path / "mix"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway([])
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f"{source}去掉不真实的图片，把猫和狗分开",
+    )
+
+    spec = response["turn"]["state"]["task_spec"]
+    assert spec["data_sources"][0]["uri"] == str(source.resolve())
+    assert spec["objective"] == "去掉不真实的图片，把猫和狗分开"
+    assert gateway.calls == 0
+
+
 def test_complex_task_requires_clarification_before_confirmation(tmp_path) -> None:
     source = tmp_path / "cats_dogs"
     source.mkdir()
