@@ -145,7 +145,9 @@ class ModelGateway:
             "hard_constraints.preserve_source and preferences.output_layout. Return JSON only "
             "with keys: intent, reply, requirement, source, strategy, "
             "action, task_spec_patch. Allowed intents are CHAT, START_WORK_ORDER, PROVIDE_SOURCE, "
-            "EDIT_TASK_SPEC, APPROVE, REJECT, SUBMIT_RUN, RUN_STATUS, CONTROL_RUN. strategy may be "
+            "EDIT_TASK_SPEC, APPROVE, REJECT, RESELECT_PIPELINE, SUBMIT_RUN, RUN_STATUS, "
+            "CONTROL_RUN. RESELECT_PIPELINE is used only when the user explicitly chooses a "
+            "different strategy for a completed or failed Run. strategy may be "
             "retention_first, balanced, quality_first, or null. "
             "action may be pause, resume, cancel, or null."
         )

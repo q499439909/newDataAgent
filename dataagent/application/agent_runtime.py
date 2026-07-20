@@ -13,7 +13,7 @@ from langgraph.types import Command
 from ..domain.common import new_id
 from ..domain.evaluations import QCReport
 from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBackend
-from ..domain.pipelines import PipelineVersion
+from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
@@ -386,6 +386,91 @@ class AgentRuntime:
             idempotency_key=idempotency_key,
         )
         return self._run_payload(run)
+
+    def reselect_pipeline(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+        strategy: str,
+    ) -> dict[str, Any]:
+        record = self._get_authorized(work_order_id, owner_id)
+        if self.version_store is None or self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for pipeline reselection")
+        active = [
+            item
+            for item in self.run_store.list_for_work_order(work_order_id, owner_id)
+            if item["status"]
+            in {"QUEUED", "RUNNING", "PAUSING", "CANCELLING", "EVALUATING"}
+        ]
+        if active:
+            raise ValueError("Cannot change Pipeline while a Run is active")
+        snapshot = self.graph.get_state(self._config(record))
+        state = dict(snapshot.values)
+        try:
+            requested = PipelineStrategy(strategy)
+        except ValueError as exc:
+            raise ValueError(f"Unknown pipeline strategy: {strategy}") from exc
+        representatives = [
+            PipelineVersion.model_validate(item)
+            for item in state.get("representative_pipelines", [])
+        ]
+        selected = next(
+            (item for item in representatives if item.strategy == requested),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Pipeline strategy is not available: {strategy}")
+        eligibility = self.pipeline_execution_eligibility(selected)
+        if not eligibility["eligible"]:
+            raise ValueError(
+                "Pipeline cannot be selected for execution: "
+                + "; ".join(eligibility["violations"])
+            )
+        family_versions = [
+            PipelineVersion.model_validate(item)
+            for item in self.version_store.list_for_owner(
+                kind="pipeline", owner_id=owner_id
+            )
+            if item.get("family_id") == selected.family_id
+        ]
+        approved_pipeline = selected.model_copy(
+            update={
+                "id": new_id("pipeline_version"),
+                "version": max((item.version for item in family_versions), default=0) + 1,
+                "parent_version_id": selected.id,
+                "created_by": owner_id,
+                "change_reason": "Pipeline reselected by user",
+                "approved": True,
+                "run_id": None,
+                "metrics": {},
+            }
+        )
+        payload = approved_pipeline.model_dump(mode="json")
+        self.version_store.save_if_absent(
+            kind="pipeline", owner_id=owner_id, payload=payload
+        )
+        self.graph.update_state(
+            self._config(record),
+            {
+                "approved_pipeline": payload,
+                "selected_pipeline_id": approved_pipeline.id,
+                "pipeline_approval": {
+                    "approved": True,
+                    "pipeline_id": approved_pipeline.id,
+                    "strategy": requested.value,
+                    "channel": "conversation_reselection",
+                },
+                "next_action": "submit_dataset_run",
+                "terminated": False,
+                "trace": [
+                    *state.get("trace", []),
+                    "hitl:pipeline_reselected",
+                ],
+            },
+            as_node="strategy_agent",
+        )
+        return self.state(work_order_id=work_order_id, owner_id=owner_id)
 
     def _validate_production_pipeline(self, pipeline: PipelineVersion) -> None:
         eligibility = self.pipeline_execution_eligibility(pipeline)

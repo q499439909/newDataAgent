@@ -131,6 +131,7 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
                 "strategy": "quality_first",
             },
             {"intent": "SUBMIT_RUN", "reply": "开始运行。"},
+            {"intent": "SUBMIT_RUN", "reply": "重新开始运行。"},
         ]
     )
     service = ConversationService(
@@ -171,6 +172,27 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
     )
     assert submitted["run"]["status"] == "QUEUED"
     assert submitted["run"]["work_order_id"] == created["work_order_id"]
+
+    assert runtime.run_store is not None
+    runtime.run_store.mark_failed(submitted["run"]["id"], "test failure")
+    switch_help = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="换个 Pipeline"
+    )
+    assert "不会直接复用旧 Run" in switch_help["reply"]
+
+    switched = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="保留优先"
+    )
+    switched_pipeline = switched["turn"]["state"]["approved_pipeline"]
+    assert switched_pipeline["strategy"] == "retention_first"
+    assert switched_pipeline["id"] != submitted["run"]["pipeline_version_id"]
+    assert switched["turn"]["state"]["next_action"] == "submit_dataset_run"
+
+    retried = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="开始运行"
+    )
+    assert retried["run"]["id"] != submitted["run"]["id"]
+    assert retried["run"]["pipeline_version_id"] == switched_pipeline["id"]
 
 
 def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) -> None:

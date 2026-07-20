@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 from enum import StrEnum
@@ -31,6 +32,7 @@ class ConversationIntent(StrEnum):
     RUN_STATUS = "RUN_STATUS"
     CONTROL_RUN = "CONTROL_RUN"
     RESOLVE_GAP = "RESOLVE_GAP"
+    RESELECT_PIPELINE = "RESELECT_PIPELINE"
 
 
 class ConversationDecision(BaseModel):
@@ -153,6 +155,9 @@ class ConversationService:
         pipeline_decision = self._pipeline_details_decision(content, context)
         if pipeline_decision is not None:
             return pipeline_decision
+        reselection_decision = self._pipeline_reselection_decision(content, context)
+        if reselection_decision is not None:
+            return reselection_decision
         fast = self._fast_decision(content)
         if fast is not None:
             return fast
@@ -417,11 +422,42 @@ class ConversationService:
             base["turn"] = turn
             base["reply"] = self._turn_reply(turn, True)
             return base
+        if decision.intent == ConversationIntent.RESELECT_PIPELINE:
+            strategy = self._normalize_strategy(decision.strategy or "")
+            turn = self.agent_runtime.reselect_pipeline(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                strategy=strategy,
+            )
+            context.pop("active_run_id", None)
+            self.store.update(
+                thread_id=thread["id"], owner_id=owner_id, context=context
+            )
+            base["turn"] = turn
+            base["reply"] = (
+                f"已切换并批准 {strategy} Pipeline。旧 Run 保留为历史记录；"
+                "你可以说“开始运行”提交一个新 Run。"
+            )
+            return base
         if decision.intent == ConversationIntent.SUBMIT_RUN:
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id, owner_id=owner_id
+            )
+            state = turn["state"]
+            identity = ":".join(
+                (
+                    thread["id"],
+                    str(state.get("selected_pipeline_id", "")),
+                    str(state.get("task_spec", {}).get("id", "")),
+                )
+            )
             run = self.agent_runtime.submit_dataset_run(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
-                idempotency_key=f"conversation-{thread['id']}-run",
+                idempotency_key=(
+                    "conversation-run-"
+                    + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+                ),
             )
             context["active_run_id"] = run["id"]
             self.store.update(
@@ -785,6 +821,47 @@ class ConversationService:
                     + " |"
                 )
         return "\n".join(lines)
+
+    @staticmethod
+    def _pipeline_reselection_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        latest_run = context.get("latest_run") or {}
+        if latest_run.get("status") not in {"FAILED", "SUCCEEDED", "CANCELLED"}:
+            return None
+        normalized = content.strip().lower().strip("!！。,.，~～ ")
+        strategies = {
+            "保留优先": "retention_first",
+            "均衡": "balanced",
+            "质量优先": "quality_first",
+            "retention_first": "retention_first",
+            "balanced": "balanced",
+            "quality_first": "quality_first",
+        }
+        if normalized in strategies:
+            return ConversationDecision(
+                intent=ConversationIntent.RESELECT_PIPELINE,
+                strategy=strategies[normalized],
+                reply="正在生成新的已批准 Pipeline 版本。",
+            )
+        asks_to_switch = any(token in normalized for token in ("换", "重选", "重新选")) and any(
+            token in normalized for token in ("pipeline", "方案", "流水线")
+        )
+        if not asks_to_switch:
+            return None
+        available = [
+            str(item.get("strategy"))
+            for item in context.get("pipeline_choices", [])
+            if (item.get("execution_eligibility") or {}).get("eligible") is not False
+        ]
+        return ConversationDecision(
+            intent=ConversationIntent.CHAT,
+            reply=(
+                "可以重新选择 Pipeline。请选择保留优先、均衡或质量优先；"
+                f"当前可选策略：{', '.join(available) or '无'}。"
+                "选择后我会先生成新的批准版本，不会直接复用旧 Run。"
+            ),
+        )
 
     def _fallback_decision(
         self, content: str, context: dict[str, Any]
