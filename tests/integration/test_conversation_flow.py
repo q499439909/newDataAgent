@@ -6,6 +6,7 @@ from time import perf_counter
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
+from dataagent.gateway import ModelGatewayError
 
 
 class FakeConversationGateway:
@@ -19,6 +20,17 @@ class FakeConversationGateway:
         self.calls += 1
         assert history[-1]["role"] == "user"
         return self.decisions.pop(0), None
+
+
+class FailingConversationGateway:
+    configured = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def conversation_turn(self, *, history, context):
+        self.calls += 1
+        raise ModelGatewayError("structured response unavailable")
 
 
 def _settings(tmp_path) -> Settings:
@@ -350,3 +362,35 @@ def test_task_spec_supplement_is_revised_before_explicit_approval(tmp_path) -> N
         "capability_resolution"
     )
     assert gateway.calls == 2
+
+
+def test_model_failure_is_visible_non_mutating_and_auditable(tmp_path) -> None:
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FailingConversationGateway()
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="Explain the current operator selection",
+    )
+
+    assert gateway.calls == 1
+    assert "模型服务本轮未返回有效结果" in response["reply"]
+    assert "没有执行任何操作" in response["reply"]
+    assert response["work_order_id"] is None
+    assert response["diagnostics"]["fallback_used"] is True
+    assert "ModelGatewayError" in response["diagnostics"]["reason"]
+    assert response["messages"][-1]["model"] == "local-fallback"
+    stored = runtime.conversation_store.get(conversation["id"], "user_1")
+    assert stored["context"]["conversation_runtime"]["fallback_count"] == 1
+    assert "ModelGatewayError" in stored["context"]["conversation_runtime"][
+        "last_fallback_reason"
+    ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from enum import StrEnum
 from pathlib import Path
@@ -13,6 +14,9 @@ from ..domain.common import new_id
 from ..gateway import ModelGateway, ModelGatewayError
 from ..infrastructure import ConversationStore
 from .agent_runtime import AgentRuntime
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationIntent(StrEnum):
@@ -39,6 +43,8 @@ class ConversationDecision(BaseModel):
     action: str | None = None
     runtime_backend: str | None = None
     task_spec_patch: dict[str, Any] | None = None
+    resolved_by: str = "deterministic"
+    fallback_reason: str | None = None
 
 
 class ConversationService:
@@ -98,8 +104,26 @@ class ConversationService:
             role="assistant",
             content=response["reply"],
             intent=decision.intent,
-            model=self.settings.fast_text_model if self.gateway.configured else "local-fallback",
+            model=decision.resolved_by,
         )
+        if decision.fallback_reason:
+            latest = self.store.get(thread_id, owner_id)
+            latest_context = dict(latest["context"])
+            diagnostics = dict(latest_context.get("conversation_runtime", {}))
+            diagnostics["fallback_count"] = int(diagnostics.get("fallback_count", 0)) + 1
+            diagnostics["last_fallback_reason"] = decision.fallback_reason
+            diagnostics["last_fallback_model"] = self.settings.fast_text_model
+            latest_context["conversation_runtime"] = diagnostics
+            self.store.update(
+                thread_id=thread_id,
+                owner_id=owner_id,
+                context=latest_context,
+            )
+            response["diagnostics"] = {
+                "fallback_used": True,
+                "model": self.settings.fast_text_model,
+                "reason": decision.fallback_reason,
+            }
         updated_thread = self.store.get(thread_id, owner_id)
         response["conversation_id"] = thread_id
         response["work_order_id"] = updated_thread.get("work_order_id")
@@ -129,7 +153,12 @@ class ConversationService:
             return fast
         fallback = self._fallback_decision(content, context)
         if not self.gateway.configured:
-            return fallback
+            return fallback.model_copy(
+                update={
+                    "resolved_by": "local-fallback",
+                    "fallback_reason": "model_gateway_not_configured",
+                }
+            )
         try:
             raw, _ = self.gateway.conversation_turn(
                 history=[
@@ -138,9 +167,25 @@ class ConversationService:
                 ],
                 context=context,
             )
-            decision = ConversationDecision.model_validate(raw)
-        except (ModelGatewayError, ValueError, TypeError):
-            return fallback
+            decision = ConversationDecision.model_validate(raw).model_copy(
+                update={"resolved_by": self.settings.fast_text_model}
+            )
+        except (ModelGatewayError, ValueError, TypeError) as exc:
+            reason = f"{type(exc).__name__}: {exc}"[:500]
+            logger.warning(
+                "Conversation model failed; returning a non-mutating fallback: %s",
+                reason,
+            )
+            return fallback.model_copy(
+                update={
+                    "reply": (
+                        "模型服务本轮未返回有效结果，控制平面没有执行任何操作。"
+                        "请重试刚才的问题。"
+                    ),
+                    "resolved_by": "local-fallback",
+                    "fallback_reason": reason,
+                }
+            )
         if decision.intent == ConversationIntent.START_WORK_ORDER:
             requirement = decision.requirement or content
             if not self._looks_like_data_requirement(requirement):
