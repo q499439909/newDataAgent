@@ -26,6 +26,13 @@ class OperatorCatalogMatch(BaseModel):
     rule_score: int = Field(default=0, ge=0)
     keyword_score: int = Field(default=0, ge=0)
     semantic_score: int = Field(default=0, ge=0)
+    recall_score: int = Field(default=0, ge=0)
+    runtime_score: int = 0
+    lifecycle_score: int = 0
+    io_score: int = 0
+    cost_score: int = 0
+    cost_tier: str = "unknown"
+    ranking_reasons: tuple[str, ...] = ()
     runtime_backend: RuntimeBackend
     status: OperatorStatus
     executable: bool
@@ -209,10 +216,21 @@ def _suggest_parameters(provider_ref: str, requirement: str) -> dict[str, Any]:
 
 
 def _tokens(value: str) -> frozenset[str]:
+    stopwords = {
+        "and",
+        "datajuicer",
+        "for",
+        "image",
+        "images",
+        "operator",
+        "provider",
+        "the",
+        "with",
+    }
     return frozenset(
         token
         for token in re.findall(r"[a-z0-9]+", value.lower().replace("_", " "))
-        if len(token) >= 3 and token not in {"the", "and", "for", "with", "image"}
+        if len(token) >= 3 and token not in stopwords
     )
 
 
@@ -414,6 +432,7 @@ class HybridOperatorCatalogMatcher:
             rule_score=scores["rule"],
             keyword_score=scores["keyword"],
             semantic_score=scores["semantic"],
+            recall_score=sum(scores.values()),
             runtime_backend=backend,
             status=operator.status,
             executable=blocked_reason is None,

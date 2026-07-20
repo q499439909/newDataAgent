@@ -161,6 +161,10 @@ def _proxy_variants(
             parameter_bindings=(
                 ("is_api_model", True),
                 ("api_or_hf_model", "qwen3.7-plus"),
+                (
+                    "api_endpoint",
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                ),
             ),
             output_schema="ImageTagSet",
         ),
@@ -479,6 +483,9 @@ def build_datajuicer_proxy_operators(
                     provider_operator_type=descriptor.provider_operator_type,
                 )
             )
+    register_normalized = getattr(provider, "register_normalized", None)
+    if callable(register_normalized):
+        register_normalized([item.descriptor for item in catalog_by_ref.values()])
     admit = getattr(provider, "admit", None)
     if callable(admit):
         admit(frozen_descriptors)

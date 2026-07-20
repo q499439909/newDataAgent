@@ -4,6 +4,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from ..operators import OperatorLibrary
+from ..domain.operators import RuntimeBackend
 from ..agents.processing import build_processing_graph
 from ..agents.requirement import build_requirement_graph
 from ..agents.retrieval import build_retrieval_graph
@@ -22,6 +23,9 @@ def build_main_graph(
     *,
     operator_library: OperatorLibrary | None = None,
     allow_draft_datajuicer_candidates: bool = False,
+    available_runtime_backends: frozenset[RuntimeBackend] = frozenset(
+        {RuntimeBackend.CPU}
+    ),
 ):
     """Build the four-agent decision graph.
 
@@ -38,6 +42,7 @@ def build_main_graph(
         build_retrieval_graph(
             operator_library.registry if operator_library is not None else None,
             allow_draft_candidates=allow_draft_datajuicer_candidates,
+            available_runtime_backends=available_runtime_backends,
         ),
     )
     graph.add_node("processing_agent", build_processing_graph(operator_library))

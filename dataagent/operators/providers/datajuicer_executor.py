@@ -136,11 +136,11 @@ class DataJuicerProcessExecutor:
         self, request: ProviderDatasetExecuteRequest
     ) -> ProviderDatasetExecuteResult:
         started = time.monotonic()
-        if request.runtime_backend != RuntimeBackend.CPU:
+        if request.runtime_backend not in {RuntimeBackend.CPU, RuntimeBackend.REMOTE}:
             return ProviderDatasetExecuteResult(
                 ok=False,
                 error_type="unsupported_runtime_backend",
-                message="The local Data-Juicer executor currently supports CPU only",
+                message="The Data-Juicer executor supports CPU and remote API profiles",
             )
         if not _SAFE_OPERATOR_NAME.fullmatch(request.provider_operator_ref):
             return ProviderDatasetExecuteResult(
@@ -220,6 +220,17 @@ class DataJuicerProcessExecutor:
         command = [*self.command_prefix, "--config", str(recipe_path)]
         environment = os.environ.copy()
         environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+        if request.runtime_backend == RuntimeBackend.REMOTE:
+            api_key = environment.get("OPENAI_API_KEY") or environment.get(
+                "BAILIAN_API_KEY"
+            ) or environment.get("DASHSCOPE_API_KEY")
+            if not api_key:
+                return ProviderDatasetExecuteResult(
+                    ok=False,
+                    error_type="missing_remote_api_key",
+                    message="Remote Data-Juicer execution requires a model API key",
+                )
+            environment["OPENAI_API_KEY"] = api_key
         if not self.allow_model_download:
             policy_root = execution_root / "offline-policy"
             policy_root.mkdir(exist_ok=True)

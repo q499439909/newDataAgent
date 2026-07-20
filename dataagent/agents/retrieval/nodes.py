@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from ...domain.common import new_id
+from ...domain.operators import RuntimeBackend
 from ...domain.plans import RetrievalPlanVersion
 from ...domain.specs import TaskSpecVersion
 from ...operators.catalog_matching import DataJuicerCatalogMatcher
+from ...operators.catalog_ranking import OperatorCandidateRanker, OperatorRankingPolicy
 from ...operators.registry import OperatorRegistry
 from ..shared import WorkOrderGraphState, append_trace
 
@@ -13,14 +15,29 @@ def generate_retrieval_plan(
     *,
     operator_registry: OperatorRegistry | None = None,
     allow_draft_candidates: bool = False,
+    available_runtime_backends: frozenset[RuntimeBackend] = frozenset(
+        {RuntimeBackend.CPU}
+    ),
 ) -> dict:
     spec = TaskSpecVersion.model_validate(state["task_spec"])
-    operator_candidates = (
+    recalled_candidates = (
         DataJuicerCatalogMatcher(operator_registry).match(
             spec.objective,
             required_capabilities=spec.required_capabilities,
             capability_requirements=spec.capability_requirements,
             allow_draft_candidates=allow_draft_candidates,
+        )
+        if operator_registry is not None
+        else ()
+    )
+    operator_candidates = (
+        OperatorCandidateRanker(operator_registry).rank(
+            recalled_candidates,
+            policy=OperatorRankingPolicy(
+                available_runtime_backends=available_runtime_backends,
+                allow_draft_candidates=allow_draft_candidates,
+                cost_preference=str(spec.preferences.get("cost_preference", "balanced")),
+            ),
         )
         if operator_registry is not None
         else ()

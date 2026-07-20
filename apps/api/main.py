@@ -86,6 +86,7 @@ def create_app(
         allow_datajuicer_candidate_execution=(
             settings.allow_datajuicer_candidate_execution
         ),
+        remote_operator_available=bool(settings.api_key),
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service

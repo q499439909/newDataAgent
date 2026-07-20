@@ -117,6 +117,7 @@ class DataJuicerOperatorProvider:
             catalog_cache_path.expanduser().resolve() if catalog_cache_path else None
         )
         self._catalog_descriptors: dict[str, ProviderOperatorDescriptor] | None = None
+        self._normalized_descriptors: dict[str, ProviderOperatorDescriptor] = {}
         self._admitted_descriptors: dict[str, ProviderOperatorDescriptor] = {}
 
     @staticmethod
@@ -178,20 +179,32 @@ class DataJuicerOperatorProvider:
         parameters: dict[str, Any],
         runtime_backend: RuntimeBackend,
     ) -> ProviderValidationResult:
-        descriptor = self._admitted_descriptors.get(provider_operator_ref)
+        descriptor = self._admitted_descriptors.get(
+            provider_operator_ref
+        ) or self._normalized_descriptors.get(provider_operator_ref)
         if descriptor is None:
             descriptor = self.describe(provider_operator_ref)
         errors: list[str] = []
-        if runtime_backend != RuntimeBackend.CPU:
-            errors.append("Data-Juicer execution currently supports the CPU backend only")
+        if runtime_backend == RuntimeBackend.REMOTE:
+            if "api" not in descriptor.tags:
+                errors.append("The operator is not declared as a remote API operator")
+            if parameters.get("is_api_model") is not True:
+                errors.append("Remote Data-Juicer execution requires is_api_model=true")
+            if not parameters.get("api_endpoint"):
+                errors.append("Remote Data-Juicer execution requires api_endpoint")
+        elif runtime_backend == RuntimeBackend.CPU:
+            if "cpu" not in descriptor.tags:
+                errors.append("The operator is not declared as CPU-compatible")
+            if not self.allow_model_download and any(
+                tag in descriptor.tags for tag in {"gpu", "llm", "model"}
+            ):
+                errors.append("Model-backed Data-Juicer operators are disabled in offline mode")
+        else:
+            errors.append(
+                f"Data-Juicer executor does not provide {runtime_backend.value} workers"
+            )
         if "image" not in descriptor.tags:
             errors.append("The current DataAgent executor accepts image operators only")
-        if "cpu" not in descriptor.tags:
-            errors.append("The operator is not declared as CPU-compatible")
-        if not self.allow_model_download and any(
-            tag in descriptor.tags for tag in {"gpu", "llm", "model"}
-        ):
-            errors.append("Model-backed Data-Juicer operators are disabled in offline mode")
         if errors:
             return ProviderValidationResult(ok=False, errors=tuple(errors))
         try:
@@ -251,6 +264,14 @@ class DataJuicerOperatorProvider:
     def admit(self, descriptors: list[ProviderOperatorDescriptor]) -> None:
         """Store frozen release descriptors without changing discovery catalog results."""
         self._admitted_descriptors.update(
+            {item.provider_operator_ref: item for item in descriptors}
+        )
+
+    def register_normalized(
+        self, descriptors: list[ProviderOperatorDescriptor]
+    ) -> None:
+        """Register an in-memory execution view without changing discovery or admission."""
+        self._normalized_descriptors.update(
             {item.provider_operator_ref: item for item in descriptors}
         )
 

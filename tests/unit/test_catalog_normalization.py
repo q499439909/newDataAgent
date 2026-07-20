@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
+
+from PIL import Image
 
 from dataagent.domain.operators import (
     ExecutionScope,
@@ -8,14 +11,23 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.operators.providers import (
+    DataJuicerProcessExecutor,
     DataJuicerOperatorProvider,
+    ProviderDatasetExecuteRequest,
+    ProviderDatasetItem,
     ProviderOperatorDescriptor,
     build_datajuicer_proxy_operators,
     normalize_provider_descriptor,
 )
+from dataagent.operators.protocol import OperatorContext, OperatorInput
 from dataagent.operators import OperatorLibrary, OperatorRegistry, OperatorRuntime
 from dataagent.operators.catalog_matching import DataJuicerCatalogMatcher
+from dataagent.operators.catalog_ranking import (
+    OperatorCandidateRanker,
+    OperatorRankingPolicy,
+)
 from dataagent.operators.library import build_operator_library
+from dataagent.operators.validation import validate_parameters
 
 
 def _raw_vlm_descriptor() -> ProviderOperatorDescriptor:
@@ -212,3 +224,137 @@ def test_hybrid_recall_records_rule_keyword_and_semantic_evidence() -> None:
     assert {"keyword", "semantic"}.issubset(remote.recall_sources)
     assert remote.keyword_score > 0
     assert remote.semantic_score > 0
+
+
+def test_ranker_prefers_available_remote_vlm_over_unavailable_cuda() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    proxies = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = (*base.operators, *proxies)
+    registry = OperatorRegistry(item.spec for item in operators)
+    recalled = DataJuicerCatalogMatcher(registry).match(
+        "把猫和狗的图片分开",
+        capability_requirements=(
+            {
+                "id": "image_classification",
+                "capability": "image_classification",
+                "description": "Classify cats and dogs.",
+                "depends_on": (),
+            },
+        ),
+    )
+
+    ranked = OperatorCandidateRanker(registry).rank(
+        recalled,
+        policy=OperatorRankingPolicy(
+            available_runtime_backends=frozenset(
+                {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+            ),
+            allow_draft_candidates=True,
+        ),
+    )
+    remote = next(
+        item
+        for item in ranked
+        if item.operator_version_id
+        == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+        and item.capability == "image_classification"
+    )
+    local = next(
+        item
+        for item in ranked
+        if item.operator_version_id
+        == "datajuicer.image_tagging_vlm_mapper.local_cuda:1"
+        and item.capability == "image_classification"
+    )
+
+    assert remote.executable is True
+    assert remote.runtime_score > 0
+    assert remote.io_score > 0
+    assert remote.cost_tier == "metered"
+    assert local.executable is False
+    assert local.runtime_score < 0
+    assert ranked.index(remote) < ranked.index(local)
+
+
+def test_remote_vlm_variant_validates_against_normalized_runtime_view() -> None:
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    operators = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    remote = next(
+        item.spec
+        for item in operators
+        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+    )
+    parameters = validate_parameters(remote.parameter_schema, {})
+
+    validation = provider.validate(
+        "image_tagging_vlm_mapper",
+        parameters,
+        RuntimeBackend.REMOTE,
+    )
+
+    assert validation.ok is True
+    assert validation.normalized_parameters["is_api_model"] is True
+    assert validation.normalized_parameters["api_or_hf_model"] == "qwen3.7-plus"
+    assert validation.normalized_parameters["api_endpoint"].endswith(
+        "/compatible-mode/v1"
+    )
+
+
+def test_remote_executor_injects_api_key_without_writing_it_to_recipe(
+    tmp_path, monkeypatch
+) -> None:
+    fake_process = tmp_path / "fake_remote_process.py"
+    fake_process.write_text(
+        """
+import json
+import os
+import sys
+from pathlib import Path
+
+recipe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+source = Path(recipe["dataset"]["configs"][0]["path"])
+row = json.loads(source.read_text(encoding="utf-8"))
+row["remote_key_present"] = bool(os.environ.get("OPENAI_API_KEY"))
+Path(recipe["export_path"]).write_text(json.dumps(row) + "\\n", encoding="utf-8")
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.png"
+    Image.new("RGB", (16, 16), (10, 20, 30)).save(source)
+    monkeypatch.setenv("BAILIAN_API_KEY", "test-secret")
+    executor = DataJuicerProcessExecutor(
+        (sys.executable, fake_process),
+        runtime_root=tmp_path / "runtime",
+        timeout_seconds=10,
+    )
+
+    result = executor.execute_dataset(
+        ProviderDatasetExecuteRequest(
+            provider_operator_ref="image_tagging_vlm_mapper",
+            runtime_backend=RuntimeBackend.REMOTE,
+            context=OperatorContext(
+                run_id="run_remote",
+                work_order_id="work_order_1",
+                owner_id="user_1",
+            ),
+            items=(
+                ProviderDatasetItem(
+                    asset_id="asset_1",
+                    input_data=OperatorInput(
+                        source_path=str(source),
+                        current_path=str(source),
+                    ),
+                ),
+            ),
+            parameters={"is_api_model": True},
+        )
+    )
+
+    assert result.ok is True
+    output = result.items[0].result.labels["datajuicer_output"]
+    assert output["remote_key_present"] is True
+    recipe_text = next((tmp_path / "runtime").rglob("recipe.yaml")).read_text(
+        encoding="utf-8"
+    )
+    assert "test-secret" not in recipe_text

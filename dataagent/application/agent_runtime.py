@@ -49,6 +49,7 @@ class AgentRuntime:
         datajuicer_process_bin: Path | None = None,
         datajuicer_timeout_seconds: int = 300,
         allow_datajuicer_candidate_execution: bool = True,
+        remote_operator_available: bool = False,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -94,6 +95,16 @@ class AgentRuntime:
             operator_library=self.operator_library,
             allow_draft_datajuicer_candidates=(
                 self.allow_datajuicer_candidate_execution
+            ),
+            available_runtime_backends=frozenset(
+                {
+                    RuntimeBackend.CPU,
+                    *(
+                        (RuntimeBackend.REMOTE,)
+                        if remote_operator_available
+                        else ()
+                    ),
+                }
             ),
         )
 
