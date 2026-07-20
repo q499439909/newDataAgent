@@ -309,6 +309,8 @@ class ConversationService:
             )
         if normalized in {"谢谢", "感谢", "thanks", "thank you"}:
             return ConversationDecision(reply="不客气。继续说你的需求就好。")
+        if normalized in {"好", "好的", "知道了", "明白了", "收到"}:
+            return ConversationDecision(reply="好的。")
         if normalized in {"再见", "拜拜", "bye", "goodbye"}:
             return ConversationDecision(reply="再见。下次可以用 conversation ID 接着这段任务继续。")
         return None
@@ -672,7 +674,69 @@ class ConversationService:
                         runs[0].get("pipeline_version_id"),
                         runs[0].get("id"),
                     )
+                dataset_version_id = runs[0].get("dataset_version_id")
+                if dataset_version_id:
+                    try:
+                        dataset = self.agent_runtime.get_dataset(
+                            dataset_version_id=dataset_version_id,
+                            owner_id=owner_id,
+                        )
+                        context["latest_dataset"] = self._dataset_control_summary(
+                            dataset
+                        )
+                    except (KeyError, RuntimeError, ValueError) as exc:
+                        context["dataset_lookup_error"] = str(exc)
         return context
+
+    @staticmethod
+    def _dataset_control_summary(dataset: dict[str, Any]) -> dict[str, Any]:
+        manifest = Path(str(dataset.get("manifest_uri", "")))
+        assets = list(dataset.get("assets") or [])
+        kept_assets = [item for item in assets if item.get("decision") == "keep"]
+        class_counts: dict[str, int] = {}
+        authenticity_counts: dict[str, int] = {}
+        output_directories: dict[str, int] = {}
+        missing_outputs: list[str] = []
+        empty_semantic_outputs = 0
+        for asset in kept_assets:
+            labels = asset.get("labels") or {}
+            resolved_class = str(labels.get("resolved_class") or "unclassified")
+            class_counts[resolved_class] = class_counts.get(resolved_class, 0) + 1
+            authenticity = str(labels.get("authenticity") or "unclassified")
+            authenticity_counts[authenticity] = (
+                authenticity_counts.get(authenticity, 0) + 1
+            )
+            provider_output = labels.get("datajuicer_output")
+            if not provider_output:
+                empty_semantic_outputs += 1
+            output_uri = asset.get("output_uri")
+            if output_uri:
+                output = Path(str(output_uri))
+                if output.is_file():
+                    directory = str(output.parent.resolve())
+                    output_directories[directory] = output_directories.get(directory, 0) + 1
+                else:
+                    missing_outputs.append(str(output))
+            else:
+                missing_outputs.append(str(asset.get("source_uri") or "unknown"))
+        return {
+            "id": dataset.get("id"),
+            "manifest_uri": str(manifest),
+            "dataset_root": str(manifest.parent.resolve()) if str(manifest) else None,
+            "manifest_exists": manifest.is_file(),
+            "source_count": dataset.get("source_count", len(assets)),
+            "kept_count": dataset.get("kept_count", len(kept_assets)),
+            "rejected_count": dataset.get("rejected_count", 0),
+            "failed_count": dataset.get("failed_count", 0),
+            "original_files_unchanged": dataset.get("original_files_unchanged"),
+            "class_counts": class_counts,
+            "authenticity_counts": authenticity_counts,
+            "output_directories": output_directories,
+            "missing_output_count": len(missing_outputs),
+            "missing_output_examples": missing_outputs[:5],
+            "empty_semantic_output_count": empty_semantic_outputs,
+            "materialized": manifest.is_file() and not missing_outputs,
+        }
 
     def _current_run(
         self, work_order_id: str, owner_id: str, context: dict[str, Any]
@@ -736,9 +800,20 @@ class ConversationService:
             "情况",
             "详情",
             "怎么样",
+            "为什么",
+            "为何",
+            "到哪",
         )
-        is_question = any(marker in normalized for marker in query_markers) or (
+        contradicts_output = "没有" in normalized and any(
+            token in normalized for token in ("文件夹", "目录", "路径", "文件")
+        )
+        is_question = (
+            any(marker in normalized for marker in query_markers)
+            or normalized in {"完整路径", "输出路径", "结果路径"}
+            or contradicts_output
+            or (
             normalized.endswith(("?", "？", "吗", "呢"))
+            )
         )
         if not is_question:
             return None
@@ -782,8 +857,38 @@ class ConversationService:
                 "处理了多少",
             )
         )
+        asks_dataset = any(
+            token in normalized
+            for token in (
+                "输出",
+                "结果",
+                "数据集",
+                "dataset",
+                "manifest",
+                "清单",
+                "完整路径",
+                "文件夹",
+                "发布到",
+                "存到",
+                "分类后",
+            )
+        ) or contradicts_output
+        asks_outcome_explanation = any(
+            token in normalized for token in ("为什么", "为何", "怎么会")
+        ) and any(
+            token in normalized
+            for token in ("保留", "拒绝", "分类", "unknown", "未知")
+        )
         if not any(
-            (asks_pipeline, asks_operators, asks_task_spec, asks_work_order, asks_run)
+            (
+                asks_pipeline,
+                asks_operators,
+                asks_task_spec,
+                asks_work_order,
+                asks_run,
+                asks_dataset,
+                asks_outcome_explanation,
+            )
         ):
             return None
 
@@ -801,7 +906,9 @@ class ConversationService:
         }
         pipeline = (
             run_pipeline
-            if latest_run.get("status") in active_statuses
+            if asks_dataset
+            or asks_outcome_explanation
+            or latest_run.get("status") in active_statuses
             or any(token in normalized for token in ("run", "运行", "跑"))
             else approved_pipeline or run_pipeline
         )
@@ -845,6 +952,15 @@ class ConversationService:
                 if task_spec
                 else "当前还没有 TaskSpec。"
             )
+        if asks_dataset or asks_outcome_explanation:
+            lines.append(
+                ConversationService._dataset_result_reply(
+                    context.get("latest_dataset"),
+                    pipeline=pipeline,
+                    explain=asks_outcome_explanation,
+                    lookup_error=context.get("dataset_lookup_error"),
+                )
+            )
         facets = [
             name
             for name, requested in (
@@ -853,6 +969,7 @@ class ConversationService:
                 ("pipeline", asks_pipeline),
                 ("operators", asks_operators),
                 ("task_spec", asks_task_spec),
+                ("dataset", asks_dataset or asks_outcome_explanation),
             )
             if requested
         ]
@@ -861,6 +978,74 @@ class ConversationService:
             reply="\n".join(lines),
             action=",".join(facets),
         )
+
+    @staticmethod
+    def _dataset_result_reply(
+        dataset: dict[str, Any] | None,
+        *,
+        pipeline: dict[str, Any],
+        explain: bool,
+        lookup_error: str | None = None,
+    ) -> str:
+        if not dataset:
+            if lookup_error:
+                return f"Run 引用了数据集，但读取 DatasetVersion 失败：{lookup_error}。"
+            return "当前 Run 还没有已发布的 DatasetVersion。"
+        lines = [
+            f"数据集：`{dataset.get('id', '-')}`",
+            f"实际发布根目录：`{dataset.get('dataset_root', '-')}`",
+            f"Manifest：`{dataset.get('manifest_uri', '-')}`",
+            (
+                "物理发布校验：通过。"
+                if dataset.get("materialized")
+                else "物理发布校验：未通过，Manifest 或部分输出文件缺失。"
+            ),
+            (
+                f"计数：源文件 {dataset.get('source_count', 0)}，"
+                f"保留 {dataset.get('kept_count', 0)}，"
+                f"拒绝 {dataset.get('rejected_count', 0)}，"
+                f"失败 {dataset.get('failed_count', 0)}。"
+            ),
+        ]
+        class_counts = dataset.get("class_counts") or {}
+        lines.append(
+            "实际分类统计："
+            + (
+                "，".join(f"{name}={count}" for name, count in sorted(class_counts.items()))
+                if class_counts
+                else "无"
+            )
+            + "。"
+        )
+        directories = dataset.get("output_directories") or {}
+        if directories:
+            lines.append("实际存在的输出目录：")
+            lines.extend(
+                f"- `{directory}`：{count} 个文件"
+                for directory, count in sorted(directories.items())
+            )
+        if dataset.get("missing_output_count"):
+            lines.append(
+                f"缺失输出：{dataset['missing_output_count']} 个；示例："
+                + "，".join(dataset.get("missing_output_examples") or [])
+            )
+        empty_semantic = int(dataset.get("empty_semantic_output_count") or 0)
+        if empty_semantic:
+            lines.append(
+                f"语义结果警告：{empty_semantic} 个保留资产没有 VLM 标签输出；"
+                "该数据集已物理发布，但不能视为完成了真实性判断和猫狗分类。"
+            )
+        if explain:
+            policies = {
+                node.get("id"): node.get("parameters") or {}
+                for node in pipeline.get("nodes", [])
+            }
+            lines.append(
+                "保留原因：VLM 标签为空后，真实性被解析为 uncertain、类别被解析为 unknown；"
+                f"当前策略参数为 uncertain={policies.get('authenticity_decision', {}).get('uncertain_policy', '-')}, "
+                f"unknown={policies.get('class_resolution', {}).get('unknown_policy', '-')}。"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _confirmed_task_revision_decision(

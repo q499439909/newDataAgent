@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 from time import perf_counter
 
@@ -708,6 +709,81 @@ def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
     assert "3/37" in combined.reply
     assert "builtin.decode_check:1" in combined.reply
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in combined.reply
+
+
+def test_dataset_result_queries_use_materialized_paths_and_actual_classes(
+    tmp_path,
+) -> None:
+    dataset_root = tmp_path / "datasets" / "dataset_real"
+    unknown = dataset_root / "files" / "classes" / "unknown"
+    unknown.mkdir(parents=True)
+    output = unknown / "sample.jpg"
+    output.write_bytes(b"image")
+    manifest = dataset_root / "manifest.json"
+    manifest.write_text(json.dumps({"id": "dataset_real"}), encoding="utf-8")
+    summary = ConversationService._dataset_control_summary(
+        {
+            "id": "dataset_real",
+            "manifest_uri": str(manifest),
+            "source_count": 1,
+            "kept_count": 1,
+            "rejected_count": 0,
+            "failed_count": 0,
+            "original_files_unchanged": True,
+            "assets": [
+                {
+                    "source_uri": str(tmp_path / "source.jpg"),
+                    "output_uri": str(output),
+                    "decision": "keep",
+                    "labels": {
+                        "resolved_class": "unknown",
+                        "authenticity": "uncertain",
+                        "datajuicer_output": {},
+                    },
+                }
+            ],
+        }
+    )
+    pipeline = {
+        "id": "pipeline_real",
+        "nodes": [
+            {
+                "id": "authenticity_decision",
+                "parameters": {"uncertain_policy": "keep"},
+            },
+            {
+                "id": "class_resolution",
+                "parameters": {"unknown_policy": "keep"},
+            },
+        ],
+    }
+    context = {
+        "latest_run": {"id": "run_real", "status": "SUCCEEDED"},
+        "latest_run_pipeline": pipeline,
+        "latest_dataset": summary,
+    }
+
+    questions = (
+        "那你分类后输出到哪了",
+        "完整路径",
+        "并没有这些文件夹",
+    )
+    replies = [
+        ConversationService._control_fact_query_decision(question, context).reply
+        for question in questions
+    ]
+    explanation = ConversationService._control_fact_query_decision(
+        "为什么都保留了", context
+    )
+
+    assert all(str(dataset_root.resolve()) in reply for reply in replies)
+    assert all(str(unknown.resolve()) in reply for reply in replies)
+    assert all("classes\\cat" not in reply for reply in replies)
+    assert all("classes\\dog" not in reply for reply in replies)
+    assert explanation is not None
+    assert "VLM 标签为空" in explanation.reply
+    assert "uncertain=keep" in explanation.reply
+    assert "unknown=keep" in explanation.reply
 
 
 def test_ungrounded_control_plane_identifiers_are_detected() -> None:
