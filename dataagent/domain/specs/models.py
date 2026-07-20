@@ -21,12 +21,21 @@ class AcceptanceSpec(DomainModel):
     model_metrics: dict[str, float] = Field(default_factory=dict)
 
 
+class TaskCapabilitySpec(DomainModel):
+    id: str
+    capability: str
+    description: str
+    depends_on: tuple[str, ...] = ()
+    required: bool = True
+
+
 class TaskSpecVersion(VersionedModel):
     work_order_id: str
     objective: str
     data_sources: tuple[DataSourceSpec, ...]
     output_actions: tuple[str, ...] = ("filter", "manifest")
     required_capabilities: tuple[str, ...] = ()
+    capability_requirements: tuple[TaskCapabilitySpec, ...] = ()
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     semantic_requirements: tuple[str, ...] = ()
     exclusion_requirements: tuple[str, ...] = ()
@@ -44,7 +53,39 @@ class TaskSpecVersion(VersionedModel):
             raise ValueError("At least one data source is required")
         if any(value < 0 for value in self.quotas.values()):
             raise ValueError("Quota values must be non-negative")
+        capability_ids = [item.id for item in self.capability_requirements]
+        if len(capability_ids) != len(set(capability_ids)):
+            raise ValueError("Task capability ids must be unique")
+        known = set(capability_ids)
+        for item in self.capability_requirements:
+            unknown = set(item.depends_on).difference(known)
+            if unknown:
+                raise ValueError(
+                    f"Task capability {item.id} has unknown dependencies: {sorted(unknown)}"
+                )
+            if item.id in item.depends_on:
+                raise ValueError("Task capabilities cannot depend on themselves")
+        self._assert_capability_dag()
         return self
+
+    def _assert_capability_dag(self) -> None:
+        adjacency = {item.id: set() for item in self.capability_requirements}
+        indegree = {item.id: 0 for item in self.capability_requirements}
+        for item in self.capability_requirements:
+            for dependency in item.depends_on:
+                adjacency[dependency].add(item.id)
+                indegree[item.id] += 1
+        ready = [item_id for item_id, degree in indegree.items() if degree == 0]
+        visited = 0
+        while ready:
+            current = ready.pop()
+            visited += 1
+            for target in adjacency[current]:
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+        if visited != len(adjacency):
+            raise ValueError("Task capability graph must be acyclic")
 
     def confirm(self, actor: str) -> "TaskSpecVersion":
         if self.ambiguities:

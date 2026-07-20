@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from ...domain.common import new_id
 from ...domain.specs import AcceptanceSpec, DataSourceSpec, TaskSpecVersion
-from ...operators.planning import infer_required_capabilities
+from ...operators.planning import (
+    decompose_task_capabilities,
+    infer_output_actions,
+    infer_required_capabilities,
+)
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -13,6 +17,7 @@ def generate_task_spec(state: WorkOrderGraphState) -> dict:
             "trace": append_trace(state, "requirement:reuse_task_spec"),
         }
     sources = tuple(DataSourceSpec.model_validate(item) for item in state["data_sources"])
+    capability_requirements = decompose_task_capabilities(state["requirement"])
     spec = TaskSpecVersion(
         id=new_id("spec"),
         version=1,
@@ -20,7 +25,9 @@ def generate_task_spec(state: WorkOrderGraphState) -> dict:
         change_reason="initial requirement planning",
         work_order_id=state["work_order_id"],
         objective=state["requirement"],
+        output_actions=infer_output_actions(capability_requirements),
         required_capabilities=infer_required_capabilities(state["requirement"]),
+        capability_requirements=capability_requirements,
         data_sources=sources,
         acceptance=AcceptanceSpec(boundary_review_size=20),
     )

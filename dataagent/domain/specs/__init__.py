@@ -1,3 +1,3 @@
-from .models import AcceptanceSpec, DataSourceSpec, TaskSpecVersion
+from .models import AcceptanceSpec, DataSourceSpec, TaskCapabilitySpec, TaskSpecVersion
 
-__all__ = ["AcceptanceSpec", "DataSourceSpec", "TaskSpecVersion"]
+__all__ = ["AcceptanceSpec", "DataSourceSpec", "TaskCapabilitySpec", "TaskSpecVersion"]

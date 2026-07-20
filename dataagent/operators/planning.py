@@ -9,6 +9,7 @@ from ..domain.operators import (
     RuntimeBackend,
 )
 from .registry import OperatorRegistry
+from ..domain.specs import TaskCapabilitySpec
 
 
 class CapabilityGapError(LookupError):
@@ -91,6 +92,155 @@ _CAPABILITY_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+_TASK_CAPABILITY_RULES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "image_quality",
+        "Reject unclear, blurred, corrupted, or low-quality images.",
+        (
+            "不清晰",
+            "模糊",
+            "清晰",
+            "低质量",
+            "图片质量",
+            "image quality",
+            "blurry",
+            "blurred",
+            "clear images",
+        ),
+    ),
+    (
+        "authenticity_assessment",
+        "Assess whether image content is authentic or artificially generated.",
+        (
+            "不真实",
+            "真实性",
+            "虚假图片",
+            "ai生成",
+            "ai 生成",
+            "aigc",
+            "synthetic image",
+            "authenticity",
+            "fake image",
+        ),
+    ),
+    (
+        "image_classification",
+        "Assign task-specific semantic classes to each image.",
+        (
+            "猫和狗",
+            "猫狗",
+            "图片分类",
+            "图像分类",
+            "按类别",
+            "classify images",
+            "cats and dogs",
+            "cat and dog",
+        ),
+    ),
+    (
+        "perceptual_deduplication",
+        "Remove perceptually duplicate images at dataset scope.",
+        ("去重", "重复图片", "重复图", "deduplicate", "duplicate images"),
+    ),
+)
+
+
+def decompose_task_capabilities(requirement: str) -> tuple[TaskCapabilitySpec, ...]:
+    normalized = " ".join(requirement.lower().split())
+    selected = [
+        (capability, description)
+        for capability, description, keywords in _TASK_CAPABILITY_RULES
+        if any(keyword in normalized for keyword in keywords)
+    ]
+    specialized = [
+        capability
+        for capability, keywords in _CAPABILITY_KEYWORDS.items()
+        if any(keyword in normalized for keyword in keywords)
+    ]
+    descriptions = {
+        "aesthetic_score": "Score image aesthetics using a governed semantic evaluator.",
+        "segmentation": "Produce structured image segmentation annotations.",
+        "watermark_detection": "Detect images that contain watermarks.",
+        "face_identity": "Match person or face identity using governed references.",
+    }
+    selected.extend((item, descriptions[item]) for item in specialized)
+
+    capabilities: list[TaskCapabilitySpec] = [
+        TaskCapabilitySpec(
+            id="image_decode",
+            capability="image_decode",
+            description="Decode images and reject corrupt or unsupported assets.",
+        )
+    ]
+    previous = "image_decode"
+    seen = {previous}
+    for capability, description in selected:
+        if capability in seen:
+            continue
+        capabilities.append(
+            TaskCapabilitySpec(
+                id=capability,
+                capability=capability,
+                description=description,
+                depends_on=(previous,),
+            )
+        )
+        previous = capability
+        seen.add(capability)
+
+    classification_requested = "image_classification" in seen
+    separation_requested = any(
+        keyword in normalized
+        for keyword in ("分开", "归类", "分类目录", "separate", "partition")
+    )
+    if classification_requested and separation_requested:
+        capabilities.append(
+            TaskCapabilitySpec(
+                id="class_resolution",
+                capability="class_resolution",
+                description="Resolve labels into task classes including mixed and unknown.",
+                depends_on=(previous,),
+            )
+        )
+        previous = "class_resolution"
+        capabilities.append(
+            TaskCapabilitySpec(
+                id="dataset_partition",
+                capability="dataset_partition",
+                description="Publish classified assets into deterministic dataset partitions.",
+                depends_on=(previous,),
+            )
+        )
+        previous = "dataset_partition"
+
+    capabilities.append(
+        TaskCapabilitySpec(
+            id="manifest",
+            capability="manifest",
+            description="Publish an immutable manifest with decisions and provenance.",
+            depends_on=(previous,),
+        )
+    )
+    return tuple(capabilities)
+
+
+def infer_output_actions(
+    capabilities: tuple[TaskCapabilitySpec, ...],
+) -> tuple[str, ...]:
+    names = {item.capability for item in capabilities}
+    actions: list[str] = []
+    if names.intersection({"image_quality", "authenticity_assessment"}):
+        actions.append("filter")
+    if "image_classification" in names:
+        actions.append("classify")
+    if "perceptual_deduplication" in names:
+        actions.append("deduplicate")
+    if "dataset_partition" in names:
+        actions.append("partition")
+    actions.append("manifest")
+    return tuple(actions)
+
+
 def infer_required_capabilities(requirement: str) -> tuple[str, ...]:
     normalized = " ".join(requirement.lower().split())
     return tuple(
@@ -137,5 +287,7 @@ __all__ = [
     "MODEL_CAPABILITY_REQUIREMENTS",
     "OperatorRequirement",
     "OperatorSelector",
+    "decompose_task_capabilities",
     "infer_required_capabilities",
+    "infer_output_actions",
 ]
