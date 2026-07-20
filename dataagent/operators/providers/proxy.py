@@ -136,13 +136,38 @@ def _bind_parameters(
 ) -> dict[str, Any]:
     bound = deepcopy(schema)
     properties = bound.setdefault("properties", {})
+    for property_schema in properties.values():
+        if property_schema.get("type") == [] and "default" in property_schema:
+            inferred = _schema_type_for_value(property_schema["default"])
+            if inferred is not None:
+                property_schema["type"] = inferred
     for name, value in bindings:
         property_schema = properties.setdefault(name, {})
+        if not property_schema.get("type"):
+            inferred = _schema_type_for_value(value)
+            if inferred is not None:
+                property_schema["type"] = inferred
         property_schema["default"] = value
         property_schema["enum"] = [value]
     bound.setdefault("type", "object")
     bound.setdefault("additionalProperties", False)
     return bound
+
+
+def _schema_type_for_value(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    return "null" if value is None else None
 
 
 def _proxy_variants(

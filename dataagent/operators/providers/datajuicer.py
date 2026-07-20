@@ -25,7 +25,7 @@ from .protocol import (
 def _json_type(annotation: Any, default: Any) -> str | list[str]:
     candidate = annotation if annotation is not inspect.Signature.empty else type(default)
     if isinstance(candidate, str):
-        return {
+        simple = {
             "bool": "boolean",
             "int": "integer",
             "float": "number",
@@ -34,16 +34,28 @@ def _json_type(annotation: Any, default: Any) -> str | list[str]:
             "dict": "object",
             "None": "null",
             "NoneType": "null",
-        }.get(candidate, "string")
+        }.get(candidate)
+        if simple is not None:
+            return simple
+        normalized = candidate.lower().replace("typing.", "").replace(" ", "")
+        if normalized.startswith(("dict", "mapping", "mutablemapping")):
+            return "object"
+        if normalized.startswith(("list", "tuple", "set", "sequence")):
+            return "array"
+        return "string"
     origin = get_origin(candidate)
     if origin is not None:
+        if origin is dict:
+            return "object"
+        if origin in {list, tuple, set, frozenset}:
+            return "array"
         resolved = [_json_type(item, inspect.Signature.empty) for item in get_args(candidate)]
         flattened = [
             item
             for value in resolved
             for item in (value if isinstance(value, list) else [value])
         ]
-        return list(dict.fromkeys(flattened))
+        return list(dict.fromkeys(flattened)) or _json_type(origin, default)
     if candidate is bool:
         return "boolean"
     if candidate is int:

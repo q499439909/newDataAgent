@@ -125,10 +125,12 @@ def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None
         RuntimeBackend.REMOTE
     }
     assert remote.parameter_schema["properties"]["is_api_model"] == {
+        "type": "boolean",
         "default": True,
         "enum": [True],
     }
     assert remote.parameter_schema["properties"]["api_or_hf_model"] == {
+        "type": "string",
         "default": "configured-vision-model",
         "enum": ["configured-vision-model"],
     }
@@ -138,6 +140,7 @@ def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None
     assert remote.parameter_schema["properties"]["model_params"]["default"] == {
         "base_url": "https://vision.example/v1"
     }
+    assert remote.parameter_schema["properties"]["model_params"]["type"] == "object"
     assert remote.parameter_schema["properties"]["accelerator"]["default"] == "cpu"
     assert "remote" in remote.capability_tags
     assert "gpu" not in remote.capability_tags
@@ -145,11 +148,41 @@ def test_vlm_descriptor_expands_to_remote_and_local_versioned_variants() -> None
         RuntimeBackend.CUDA
     }
     assert local.parameter_schema["properties"]["is_api_model"] == {
+        "type": "boolean",
         "default": False,
         "enum": [False],
     }
     assert "local_model" in local.capability_tags
     assert "api" not in local.capability_tags
+
+
+def test_proxy_repairs_empty_container_types_from_cached_discovery_schema() -> None:
+    raw = _raw_vlm_descriptor().model_copy(
+        update={
+            "parameter_schema": {
+                "type": "object",
+                "properties": {
+                    "model_params": {"type": [], "default": {}},
+                    "sampling_params": {"type": [], "default": {}},
+                },
+                "additionalProperties": False,
+            }
+        }
+    )
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+
+    remote = next(
+        item.spec
+        for item in build_datajuicer_proxy_operators(provider, [raw])
+        if item.spec.id == "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+    )
+
+    properties = remote.parameter_schema["properties"]
+    assert properties["model_params"]["type"] == "object"
+    assert properties["sampling_params"]["type"] == "object"
+    normalized = validate_parameters(remote.parameter_schema, {})
+    assert normalized["model_params"]["base_url"]
+    assert normalized["sampling_params"] == {}
 
 
 def test_normalization_does_not_rewrite_discovery_cache(tmp_path) -> None:

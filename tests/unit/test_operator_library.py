@@ -296,6 +296,32 @@ def test_datajuicer_discovery_is_lazy_cached_and_metadata_only() -> None:
     assert not invalid.ok
 
 
+def test_datajuicer_discovery_maps_unparameterized_container_annotations() -> None:
+    def sample(model_params: dict = {}, sampling_params: list = []):
+        return None
+
+    class ContainerSearcher:
+        def search(self):
+            return [
+                {
+                    "name": "container_mapper",
+                    "desc": "Container schema test",
+                    "type": "mapper",
+                    "tags": ["cpu", "image"],
+                    "sig": inspect.signature(sample),
+                }
+            ]
+
+    descriptor = DataJuicerOperatorProvider(
+        searcher_factory=ContainerSearcher,
+        provider_version="test-version",
+    ).discover()[0]
+
+    properties = descriptor.parameter_schema["properties"]
+    assert properties["model_params"]["type"] == "object"
+    assert properties["sampling_params"]["type"] == "array"
+
+
 def test_datajuicer_discovery_cache_and_admission_registry_are_separate(tmp_path) -> None:
     _FakeSearcher.calls = 0
     cache_path = tmp_path / "catalog.json"
