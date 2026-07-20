@@ -127,7 +127,7 @@ def test_native_enhancement_creates_a_derivative_without_mutating_source(tmp_pat
         )
 
 
-def test_processing_compiles_required_model_capabilities_to_mock_nodes(tmp_path) -> None:
+def test_processing_requires_coverage_instead_of_mock_capability_nodes(tmp_path) -> None:
     spec = TaskSpecVersion(
         id=new_id("spec"),
         version=1,
@@ -140,14 +140,14 @@ def test_processing_compiles_required_model_capabilities_to_mock_nodes(tmp_path)
         confirmed=True,
     )
 
-    variants = generate_pipeline_variants(
-        {"owner_id": "user_1", "task_spec": spec.model_dump(mode="json"), "trace": []}
-    )["pipeline_variants"]
-    pipeline = PipelineVersion.model_validate(variants[0])
-
-    assert pipeline.nodes[1].id == "understand_segmentation"
-    assert pipeline.nodes[1].runtime_backend == RuntimeBackend.MOCK
-    assert pipeline.nodes[1].category == OperatorCategory.UNDERSTANDING
+    with pytest.raises(ValueError, match="Capability coverage is required"):
+        generate_pipeline_variants(
+            {
+                "owner_id": "user_1",
+                "task_spec": spec.model_dump(mode="json"),
+                "trace": [],
+            }
+        )
 
 
 def test_mock_model_operator_runs_in_preview_but_not_production() -> None:
@@ -401,7 +401,7 @@ def test_retrieval_stops_when_only_matched_datajuicer_runtime_is_unavailable() -
     assert retrieval["retrieval_plan"]["sufficient"] is False
 
 
-def test_retrieval_candidates_compile_to_callable_datajuicer_pipeline_nodes() -> None:
+def test_processing_does_not_inject_candidates_without_capability_coverage() -> None:
     library = _planning_library()
     spec = TaskSpecVersion(
         id=new_id("spec"),
@@ -432,9 +432,8 @@ def test_retrieval_candidates_compile_to_callable_datajuicer_pipeline_nodes() ->
 
     assert [node.operator_version_id for node in pipeline.nodes] == [
         "builtin.decode_check:1",
-        "datajuicer.image_deduplicator:1",
-        "datajuicer.image_face_count_filter:1",
         "builtin.quality_filter:1",
+        "builtin.perceptual_dedup:1",
         "builtin.manifest:1",
     ]
     assert retrieval["operator_candidates"][0]["executable"] is True

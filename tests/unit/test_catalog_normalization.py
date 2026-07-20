@@ -11,8 +11,10 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.domain.plans import CapabilityCoverageStatus
+from dataagent.agents.processing.nodes import generate_pipeline_variants
 from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
+from dataagent.domain.pipelines import PipelineVersion
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
     DataJuicerOperatorProvider,
@@ -411,9 +413,64 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         "datajuicer.image_tagging_vlm_mapper.remote_api:1"
     )
     assert coverage["authenticity_assessment"]["status"] == (
-        CapabilityCoverageStatus.MISSING
+        CapabilityCoverageStatus.COVERED
     )
-    assert coverage["class_resolution"]["status"] == CapabilityCoverageStatus.MISSING
-    assert coverage["dataset_partition"]["status"] == CapabilityCoverageStatus.MISSING
+    assert coverage["authenticity_assessment"]["selected_operator_version_id"] == (
+        "builtin.authenticity_decision:1"
+    )
+    assert coverage["class_resolution"]["status"] == CapabilityCoverageStatus.COVERED
+    assert coverage["dataset_partition"]["status"] == CapabilityCoverageStatus.COVERED
     assert coverage["manifest"]["status"] == CapabilityCoverageStatus.COVERED
-    assert retrieval["retrieval_plan"]["sufficient"] is False
+    assert retrieval["retrieval_plan"]["sufficient"] is True
+
+    state = {
+        "owner_id": "user_1",
+        "task_spec": task_result["task_spec"],
+        "trace": [],
+        **retrieval,
+    }
+    library = OperatorLibrary(
+        operators=operators,
+        registry=registry,
+        runtime=OperatorRuntime(operators),
+        providers=base.providers,
+    )
+    pipelines = [
+        PipelineVersion.model_validate(item)
+        for item in generate_pipeline_variants(
+            state, operator_library=library
+        )["pipeline_variants"]
+    ]
+
+    assert len(pipelines) == 3
+    assert all(
+        [node.id for node in pipeline.nodes]
+        == [
+            "ingest",
+            "quality_filter",
+            "authenticity_tagging",
+            "authenticity_decision",
+            "image_classification",
+            "class_resolution",
+            "dataset_partition",
+            "manifest",
+        ]
+        for pipeline in pipelines
+    )
+    assert all(
+        all(node.runtime_backend != RuntimeBackend.MOCK for node in pipeline.nodes)
+        for pipeline in pipelines
+    )
+    policies = {
+        pipeline.strategy.value: next(
+            node.parameters["uncertain_policy"]
+            for node in pipeline.nodes
+            if node.id == "authenticity_decision"
+        )
+        for pipeline in pipelines
+    }
+    assert policies == {
+        "retention_first": "keep",
+        "balanced": "review",
+        "quality_first": "reject",
+    }

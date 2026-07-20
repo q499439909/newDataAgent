@@ -17,7 +17,10 @@ from ..shared import WorkOrderGraphState, append_trace
 
 _NATIVE_CAPABILITY_TAGS: dict[str, frozenset[str]] = {
     "image_decode": frozenset({"decode"}),
-    "image_quality": frozenset({"quality"}),
+    "image_quality": frozenset({"quality", "filter"}),
+    "authenticity_assessment": frozenset({"authenticity_assessment"}),
+    "class_resolution": frozenset({"class_resolution"}),
+    "dataset_partition": frozenset({"dataset_partition"}),
     "perceptual_deduplication": frozenset({"deduplication"}),
     "manifest": frozenset({"manifest"}),
 }
@@ -43,6 +46,27 @@ def _capability_coverage(
         ]
     coverage: list[CapabilityCoverage] = []
     all_operators = operator_registry.search(include_drafts=True)
+
+    def has_executable_tag(tag: str) -> bool:
+        for candidate in operator_candidates:
+            if not candidate.executable:
+                continue
+            operator = operator_registry.get(candidate.operator_version_id)
+            if tag in operator.capability_tags:
+                return True
+        for operator in all_operators:
+            if operator.provider.provider_id != "native":
+                continue
+            supported = {profile.backend for profile in operator.supported_runtime_profiles}
+            if (
+                tag in operator.capability_tags
+                and supported.intersection(available_runtime_backends)
+                and operator.status
+                not in {OperatorStatus.DRAFT, OperatorStatus.DEPRECATED}
+            ):
+                return True
+        return False
+
     for requested_item in requested:
         if isinstance(requested_item, dict):
             capability_id = requested_item["id"]
@@ -71,13 +95,19 @@ def _capability_coverage(
         for operator in all_operators:
             if operator.provider.provider_id != "native" or not native_tags:
                 continue
-            if not native_tags.intersection(operator.capability_tags):
+            if not native_tags.issubset(operator.capability_tags):
                 continue
             supported = {
                 profile.backend for profile in operator.supported_runtime_profiles
             }
             available = supported.intersection(available_runtime_backends)
-            executable = bool(available) and operator.status not in {
+            upstream_tags = tuple(
+                operator.resource_requirements.get("upstream_capability_tags", ())
+            )
+            missing_upstream = [
+                tag for tag in upstream_tags if not has_executable_tag(str(tag))
+            ]
+            executable = bool(available) and not missing_upstream and operator.status not in {
                 OperatorStatus.DRAFT,
                 OperatorStatus.DEPRECATED,
             }
@@ -95,7 +125,12 @@ def _capability_coverage(
                     score=500 if executable else 0,
                     blocked_reason=None
                     if executable
-                    else "Native operator runtime or lifecycle is unavailable",
+                    else (
+                        "Missing executable upstream capabilities: "
+                        + ", ".join(missing_upstream)
+                        if missing_upstream
+                        else "Native operator runtime or lifecycle is unavailable"
+                    ),
                 )
             )
         evidence.sort(key=lambda item: (not item.executable, -item.score, item.operator_version_id))

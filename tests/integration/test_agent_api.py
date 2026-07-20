@@ -102,7 +102,9 @@ def test_operator_catalog_and_persistent_preview_api(tmp_path) -> None:
     assert categories.json()["INGESTION"] == 1
     filters = client.get("/api/operators?category=FILTERING", headers=headers)
     assert filters.status_code == 200
-    assert filters.json()[0]["secondary_category"] == "image_quality"
+    assert any(
+        item["secondary_category"] == "image_quality" for item in filters.json()
+    )
 
     client.post(
         "/api/work-orders/agent/start",

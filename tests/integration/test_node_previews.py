@@ -64,7 +64,7 @@ def test_builtin_operators_are_categorized_and_generate_real_previews(tmp_path) 
     assert preview_set.pipeline_version_id == pipeline.id
     assert [item.node_id for item in preview_set.items] == [
         "ingest",
-        "filter",
+        "quality_filter",
         "deduplicate",
         "manifest",
     ]

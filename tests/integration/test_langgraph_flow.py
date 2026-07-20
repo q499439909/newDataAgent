@@ -35,7 +35,7 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
     assert second["__interrupt__"][0].value["kind"] == "pipeline_approval"
     assert second["task_spec_confirmed"] is True
     assert second["candidate_sufficient"] is True
-    assert len(second["pipeline_variants"]) == 6
+    assert len(second["pipeline_variants"]) == 3
     assert len(second["representative_pipelines"]) == 3
     assert {item["strategy"] for item in second["representative_pipelines"]} == {
         strategy.value for strategy in PipelineStrategy
@@ -51,7 +51,7 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
     assert final["selected_pipeline_id"] != balanced["id"]
     assert final["approved_pipeline"]["parent_version_id"] == balanced["id"]
     assert final["approved_pipeline"]["approved"] is True
-    assert final["approved_pipeline"]["version"] == 3
+    assert final["approved_pipeline"]["version"] == 2
     assert final["sampling_plan"]["random_seed"] == 42
     assert final["next_action"] == "submit_dataset_run"
     assert final["trace"] == [

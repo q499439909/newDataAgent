@@ -112,7 +112,7 @@ def test_resolution_can_return_work_order_to_task_spec_revision() -> None:
         operator_library=_library_with_vlm_variants(),
         allow_draft_datajuicer_candidates=True,
         available_runtime_backends=frozenset(
-            {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+            {RuntimeBackend.CPU}
         ),
     )
     config = {"configurable": {"thread_id": "thread_revise"}}

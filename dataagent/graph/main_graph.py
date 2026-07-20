@@ -3,7 +3,7 @@ from __future__ import annotations
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
-from ..operators import OperatorLibrary
+from ..operators import OperatorLibrary, build_operator_library
 from ..domain.operators import RuntimeBackend
 from ..agents.processing import build_processing_graph
 from ..agents.requirement import build_requirement_graph
@@ -35,13 +35,16 @@ def build_main_graph(
     next application-layer milestone.
     """
 
+    operator_library = operator_library or build_operator_library(
+        include_datajuicer=False
+    )
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node("requirement_agent", build_requirement_graph())
     graph.add_node("confirm_task_spec", confirm_task_spec)
     graph.add_node(
         "retrieval_agent",
         build_retrieval_graph(
-            operator_library.registry if operator_library is not None else None,
+            operator_library.registry,
             allow_draft_candidates=allow_draft_datajuicer_candidates,
             available_runtime_backends=available_runtime_backends,
         ),
