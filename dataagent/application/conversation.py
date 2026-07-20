@@ -31,6 +31,7 @@ class ConversationIntent(StrEnum):
     SUBMIT_RUN = "SUBMIT_RUN"
     RUN_STATUS = "RUN_STATUS"
     CONTROL_RUN = "CONTROL_RUN"
+    QUERY_CONTROL_FACTS = "QUERY_CONTROL_FACTS"
     RESOLVE_GAP = "RESOLVE_GAP"
     RESELECT_PIPELINE = "RESELECT_PIPELINE"
 
@@ -158,6 +159,9 @@ class ConversationService:
         pipeline_decision = self._pipeline_details_decision(content, context)
         if pipeline_decision is not None:
             return pipeline_decision
+        fact_decision = self._control_fact_query_decision(content, context)
+        if fact_decision is not None:
+            return fact_decision
         approval_decision = self._pending_pipeline_approval_decision(content, context)
         if approval_decision is not None:
             return approval_decision
@@ -205,6 +209,19 @@ class ConversationService:
                     "fallback_reason": reason,
                 }
             )
+        ungrounded_ids = self._ungrounded_control_identifiers(decision.reply, context)
+        if decision.intent == ConversationIntent.CHAT and ungrounded_ids:
+            reason = "ungrounded_control_identifiers:" + ",".join(ungrounded_ids)
+            logger.warning("Blocked ungrounded control-plane identifiers: %s", reason)
+            return ConversationDecision(
+                intent=ConversationIntent.CHAT,
+                reply=(
+                    "模型回答包含无法由控制面验证的任务标识，已阻止展示。"
+                    "请明确要查看当前 Run、Pipeline、算子、TaskSpec 或工单信息。"
+                ),
+                resolved_by="control-fact-guard",
+                fallback_reason=reason,
+            )
         if decision.intent == ConversationIntent.START_WORK_ORDER:
             requirement = decision.requirement or content
             if not self._looks_like_data_requirement(requirement):
@@ -228,6 +245,22 @@ class ConversationService:
                 }
             )
         return decision
+
+    @staticmethod
+    def _ungrounded_control_identifiers(
+        reply: str, context: dict[str, Any]
+    ) -> tuple[str, ...]:
+        identifiers = set(
+            re.findall(
+                r"\b(?:run|pipeline_version|work_order|spec)_[A-Za-z0-9]+\b",
+                reply,
+                flags=re.IGNORECASE,
+            )
+        )
+        if not identifiers:
+            return ()
+        grounded_context = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        return tuple(sorted(item for item in identifiers if item not in grounded_context))
 
     def _fast_decision(self, content: str) -> ConversationDecision | None:
         normalized = content.strip().lower().strip("!！。,.，~～ ")
@@ -303,6 +336,10 @@ class ConversationService:
             return self._maybe_start(thread, owner_id, context, base)
         if not work_order_id:
             base["reply"] = "当前还没有工单。请先告诉我需要生产什么图片数据。"
+            return base
+        if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
+            if "run" in (decision.action or "").split(","):
+                base["run"] = self._current_run(work_order_id, owner_id, context)
             return base
         if decision.intent == ConversationIntent.EDIT_TASK_SPEC:
             turn = self.agent_runtime.state(
@@ -580,6 +617,8 @@ class ConversationService:
             }
             if task_spec := turn["state"].get("task_spec"):
                 context["task_spec"] = task_spec
+            if approved_pipeline := turn["state"].get("approved_pipeline"):
+                context["approved_pipeline"] = approved_pipeline
             approval_pipelines = []
             if (
                 turn["interrupts"]
@@ -620,6 +659,19 @@ class ConversationService:
             )
             if runs:
                 context["latest_run"] = runs[0]
+                try:
+                    context["latest_run_pipeline"] = (
+                        self.agent_runtime.pipeline_version(
+                            pipeline_version_id=runs[0]["pipeline_version_id"],
+                            owner_id=owner_id,
+                        )
+                    )
+                except (KeyError, RuntimeError):
+                    logger.warning(
+                        "Pipeline version %s for Run %s could not be loaded",
+                        runs[0].get("pipeline_version_id"),
+                        runs[0].get("id"),
+                    )
         return context
 
     def _current_run(
@@ -656,6 +708,158 @@ class ConversationService:
         return ConversationDecision(
             intent=ConversationIntent.CHAT,
             reply=ConversationService._task_spec_details_reply(task_spec),
+        )
+
+    @staticmethod
+    def _control_fact_query_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        normalized = content.strip().lower().replace(" ", "")
+        query_markers = (
+            "什么",
+            "哪个",
+            "哪些",
+            "哪条",
+            "哪一个",
+            "在哪",
+            "哪里",
+            "多少",
+            "用的",
+            "用了",
+            "当前",
+            "现在",
+            "查看",
+            "展示",
+            "告诉我",
+            "状态",
+            "进度",
+            "情况",
+            "详情",
+            "怎么样",
+        )
+        is_question = any(marker in normalized for marker in query_markers) or (
+            normalized.endswith(("?", "？", "吗", "呢"))
+        )
+        if not is_question:
+            return None
+
+        asks_pipeline = any(
+            token in normalized for token in ("pipeline", "流水线", "方案")
+        )
+        asks_operators = any(
+            token in normalized for token in ("算子", "节点", "算子顺序")
+        )
+        asks_task_spec = any(
+            token in normalized
+            for token in (
+                "taskspec",
+                "任务规格",
+                "需求草案",
+                "数据源",
+                "约束",
+                "需求是什么",
+                "任务是什么",
+                "任务目标",
+            )
+        )
+        asks_work_order = "工单" in normalized and any(
+            token in normalized for token in ("id", "编号", "哪个", "当前")
+        )
+        asks_run = any(token in normalized for token in ("进度", "状态")) or any(
+            token in normalized
+            for token in (
+                "运行情况",
+                "run情况",
+                "运行怎么样",
+                "run怎么样",
+                "跑到哪",
+                "运行到哪",
+                "run到哪",
+                "在运行吗",
+                "在跑吗",
+                "完成了吗",
+                "跑了多少",
+                "处理了多少",
+            )
+        )
+        if not any(
+            (asks_pipeline, asks_operators, asks_task_spec, asks_work_order, asks_run)
+        ):
+            return None
+
+        lines: list[str] = []
+        latest_run = context.get("latest_run") or {}
+        approved_pipeline = context.get("approved_pipeline") or {}
+        run_pipeline = context.get("latest_run_pipeline") or {}
+        active_statuses = {
+            "QUEUED",
+            "RUNNING",
+            "PAUSING",
+            "PAUSED",
+            "CANCELLING",
+            "EVALUATING",
+        }
+        pipeline = (
+            run_pipeline
+            if latest_run.get("status") in active_statuses
+            or any(token in normalized for token in ("run", "运行", "跑"))
+            else approved_pipeline or run_pipeline
+        )
+
+        if asks_work_order:
+            lines.append(f"当前工单：`{context.get('work_order_id', '-')}`。")
+        if asks_run:
+            if latest_run:
+                lines.append(ConversationService._run_reply(latest_run))
+            else:
+                lines.append("当前工单还没有 Run。")
+        if asks_pipeline:
+            if pipeline:
+                run_prefix = (
+                    f"Run `{latest_run.get('id')}` 使用"
+                    if pipeline is run_pipeline and latest_run
+                    else "当前已批准"
+                )
+                lines.append(
+                    f"{run_prefix} `{pipeline.get('strategy', 'unknown')}` Pipeline："
+                    f"`{pipeline.get('id', '-')}`。"
+                )
+            else:
+                lines.append("当前还没有已编译或已批准的 Pipeline。")
+        if asks_operators:
+            if pipeline:
+                lines.append("实际算子顺序：")
+                for index, node in enumerate(pipeline.get("nodes", []), start=1):
+                    lines.append(
+                        f"{index}. `{node.get('id', '-')}` → "
+                        f"`{node.get('operator_version_id', '-')}` "
+                        f"[{node.get('runtime_backend', '-')} / "
+                        f"{node.get('operator_status', 'unknown')}]"
+                    )
+            else:
+                lines.append("当前没有可展示的实际算子流水线。")
+        if asks_task_spec:
+            task_spec = context.get("task_spec")
+            lines.append(
+                ConversationService._task_spec_details_reply(task_spec)
+                if task_spec
+                else "当前还没有 TaskSpec。"
+            )
+        facets = [
+            name
+            for name, requested in (
+                ("work_order", asks_work_order),
+                ("run", asks_run),
+                ("pipeline", asks_pipeline),
+                ("operators", asks_operators),
+                ("task_spec", asks_task_spec),
+            )
+            if requested
+        ]
+        return ConversationDecision(
+            intent=ConversationIntent.QUERY_CONTROL_FACTS,
+            reply="\n".join(lines),
+            action=",".join(facets),
         )
 
     @staticmethod
@@ -889,6 +1093,18 @@ class ConversationService:
             return None
         pipelines = context.get("pipeline_choices") or []
         if not pipelines:
+            return None
+        compares_choices = (
+            context.get("agent_state", {}).get("waiting") == "pipeline_approval"
+            or any(
+                token in normalized
+                for token in ("三个", "各个", "分别", "候选", "可选", "每条")
+            )
+            or not (
+                context.get("approved_pipeline") or context.get("latest_run_pipeline")
+            )
+        )
+        if not compares_choices:
             return None
         return ConversationDecision(
             intent=ConversationIntent.CHAT,

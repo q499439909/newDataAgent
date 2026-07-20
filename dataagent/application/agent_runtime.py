@@ -199,6 +199,17 @@ class AgentRuntime:
             result["__interrupt__"] = snapshot.interrupts
         return self._public_result(record, result)
 
+    def pipeline_version(
+        self, *, pipeline_version_id: str, owner_id: str
+    ) -> dict[str, Any]:
+        if self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for Pipeline lookup")
+        return self.version_store.get(
+            kind="pipeline",
+            entity_id=pipeline_version_id,
+            owner_id=owner_id,
+        )
+
     def build_node_preview(
         self,
         *,

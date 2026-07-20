@@ -174,6 +174,28 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
     assert submitted["run"]["work_order_id"] == created["work_order_id"]
     assert gateway.calls == 1
 
+    pipeline_question = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="你跑的是哪个pipeline",
+    )
+    repeated_question = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="你跑的是哪个pipeline",
+    )
+    assert pipeline_question["reply"] == repeated_question["reply"]
+    assert submitted["run"]["pipeline_version_id"] in pipeline_question["reply"]
+    assert "quality_first" in pipeline_question["reply"]
+    status_question = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="现在运行进度怎么样",
+    )
+    assert status_question["run"]["id"] == submitted["run"]["id"]
+    assert status_question["run"]["status"] == "QUEUED"
+    assert gateway.calls == 1
+
     assert runtime.run_store is not None
     runtime.run_store.mark_failed(submitted["run"]["id"], "test failure")
     switch_help = service.send(
@@ -580,6 +602,24 @@ def test_pipeline_operator_question_uses_grounded_pipeline_context() -> None:
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in decision.reply
     assert "data_loader" not in decision.reply
 
+    current_context = {
+        "approved_pipeline": pipelines[0],
+        "latest_run_pipeline": pipelines[0],
+        "pipeline_choices": pipelines,
+    }
+    assert (
+        ConversationService._pipeline_details_decision(
+            "当前 Pipeline 用了什么算子", current_context
+        )
+        is None
+    )
+    current = ConversationService._control_fact_query_decision(
+        "当前 Pipeline 用了什么算子", current_context
+    )
+    assert current is not None
+    assert "pipeline_balanced" in current.reply
+    assert "builtin.quality_filter:1" in current.reply
+
 
 def test_pipeline_approval_and_run_submission_are_bound_to_workflow_state() -> None:
     approval_context = {
@@ -613,6 +653,146 @@ def test_pipeline_approval_and_run_submission_are_bound_to_workflow_state() -> N
     assert "先选择" in premature_run.reply
     assert submission is not None
     assert submission.intent == "SUBMIT_RUN"
+
+
+def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
+    pipeline = {
+        "id": "pipeline_version_real",
+        "strategy": "retention_first",
+        "nodes": [
+            {
+                "id": "decode",
+                "operator_version_id": "builtin.decode_check:1",
+                "runtime_backend": "cpu",
+                "operator_status": "PERSONAL_RELEASE",
+            },
+            {
+                "id": "classification",
+                "operator_version_id": (
+                    "datajuicer.image_tagging_vlm_mapper.remote_api:1"
+                ),
+                "runtime_backend": "remote",
+                "operator_status": "PERSONAL_RELEASE",
+            },
+        ],
+    }
+    context = {
+        "work_order_id": "work_order_real",
+        "latest_run": {
+            "id": "run_real",
+            "status": "RUNNING",
+            "progress": 3,
+            "total": 37,
+            "kept": 2,
+            "rejected": 1,
+            "failed": 0,
+        },
+        "latest_run_pipeline": pipeline,
+        "approved_pipeline": pipeline,
+    }
+
+    first = ConversationService._control_fact_query_decision(
+        "你跑的是哪个pipeline", context
+    )
+    repeated = ConversationService._control_fact_query_decision(
+        "你跑的是哪个pipeline", context
+    )
+    combined = ConversationService._control_fact_query_decision(
+        "现在运行进度、Pipeline 和算子顺序是什么", context
+    )
+
+    assert first is not None and repeated is not None and combined is not None
+    assert first.reply == repeated.reply
+    assert "pipeline_version_real" in first.reply
+    assert "retention_first" in first.reply
+    assert "3/37" in combined.reply
+    assert "builtin.decode_check:1" in combined.reply
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:1" in combined.reply
+
+
+def test_ungrounded_control_plane_identifiers_are_detected() -> None:
+    context = {
+        "work_order_id": "work_order_real",
+        "latest_run": {
+            "id": "run_real",
+            "pipeline_version_id": "pipeline_version_real",
+        },
+    }
+
+    grounded = ConversationService._ungrounded_control_identifiers(
+        "Run run_real uses pipeline_version_real", context
+    )
+    hallucinated = ConversationService._ungrounded_control_identifiers(
+        "Run run_fake uses pipeline_version_invented", context
+    )
+
+    assert grounded == ()
+    assert hallucinated == ("pipeline_version_invented", "run_fake")
+
+
+def test_model_reply_with_invented_control_identifier_is_blocked(tmp_path) -> None:
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway(
+            [
+                {
+                    "intent": "CHAT",
+                    "reply": "选中了 pipeline_version_invented。",
+                }
+            ]
+        ),
+    )
+    context = {"approved_pipeline": {"id": "pipeline_version_real"}}
+
+    decision = service._decide(
+        "它到底选中了啥",
+        [{"role": "user", "content": "它到底选中了啥"}],
+        context,
+    )
+
+    assert decision.resolved_by == "control-fact-guard"
+    assert decision.fallback_reason == (
+        "ungrounded_control_identifiers:pipeline_version_invented"
+    )
+    assert "pipeline_version_invented" not in decision.reply
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        "你跑的是哪个pipeline",
+        "当前用的哪条流水线",
+        "这个 Run 用的什么方案",
+    ),
+)
+def test_pipeline_identity_synonyms_use_the_same_persisted_version(question) -> None:
+    pipeline = {
+        "id": "pipeline_version_persisted",
+        "strategy": "balanced",
+        "nodes": [],
+    }
+    context = {
+        "latest_run": {
+            "id": "run_persisted",
+            "status": "SUCCEEDED",
+            "progress": 10,
+            "total": 10,
+            "kept": 9,
+            "rejected": 1,
+            "failed": 0,
+        },
+        "latest_run_pipeline": pipeline,
+    }
+
+    decision = ConversationService._control_fact_query_decision(question, context)
+
+    assert decision is not None
+    assert "pipeline_version_persisted" in decision.reply
+    assert "balanced" in decision.reply
 
 
 def test_task_spec_supplement_is_revised_before_explicit_approval(tmp_path) -> None:
