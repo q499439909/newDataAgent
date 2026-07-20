@@ -228,14 +228,11 @@ def test_complex_task_requires_clarification_before_confirmation(tmp_path) -> No
         content=f'"{source}"去掉不真实、不是实拍直出的图片，把猫和狗分开',
     )
 
-    blocked = service.send(
-        thread_id=conversation["id"], owner_id="user_1", content="确认"
-    )
-    assert blocked["turn"]["interrupts"][0]["value"]["kind"] == (
+    assert created["turn"]["interrupts"][0]["value"]["kind"] == (
         "task_spec_confirmation"
     )
-    assert "仍有待澄清项" in blocked["reply"]
-    assert blocked["turn"]["state"]["task_spec"]["confirmed"] is False
+    assert "还需要你补充" in created["reply"]
+    assert created["turn"]["state"]["task_spec"]["confirmed"] is False
 
     revised = service.send(
         thread_id=conversation["id"],
@@ -253,6 +250,62 @@ def test_complex_task_requires_clarification_before_confirmation(tmp_path) -> No
         thread_id=conversation["id"], owner_id="user_1", content="确认"
     )
     assert approved["turn"]["state"]["task_spec"]["confirmed"] is True
+
+
+def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -> None:
+    source = tmp_path / "mix"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway([]),
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"去掉不真实、非实拍直出的、不清晰的图片，把猫和狗分开',
+    )
+    thread = runtime.conversation_store.get(conversation["id"], "user_1")
+    partial = service._apply(
+        thread=thread,
+        owner_id="user_1",
+        content="补充真实性和类别要求",
+        decision=ConversationDecision(
+            intent="EDIT_TASK_SPEC",
+            task_spec_patch={
+                "hard_constraints": {
+                    "authenticity_scope": {"exclude_composite": True},
+                    "preserve_source": None,
+                },
+                "preferences": {
+                    "mixed_policy": "review",
+                    "unknown_policy": "review",
+                },
+                "semantic_requirements": ["好", "继续"],
+            },
+        ),
+    )
+    assert partial["turn"]["state"]["task_spec"]["ambiguities"] == [
+        "是否按默认安全方式复制到新的版本化分类目录，并保持源目录只读？"
+    ]
+
+    continued = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="继续"
+    )
+    spec = continued["turn"]["state"]["task_spec"]
+    assert spec["version"] > created["turn"]["state"]["task_spec"]["version"]
+    assert spec["confirmed"] is True
+    assert spec["ambiguities"] == []
+    assert spec["hard_constraints"]["preserve_source"] is True
+    assert spec["preferences"]["output_layout"] == "versioned_class_directories"
+    assert "好" not in spec["semantic_requirements"]
+    assert "继续" not in spec["semantic_requirements"]
+    assert continued["turn"]["state"]["next_action"] != "confirm_task_spec"
+    assert "已采纳剩余推荐值" in continued["reply"]
 
 
 def test_quoted_standalone_path_continues_pending_requirement_without_model(tmp_path) -> None:

@@ -44,6 +44,7 @@ class ConversationDecision(BaseModel):
     action: str | None = None
     runtime_backend: str | None = None
     task_spec_patch: dict[str, Any] | None = None
+    confirm_after_edit: bool = False
     resolved_by: str = "deterministic"
     fallback_reason: str | None = None
 
@@ -311,8 +312,20 @@ class ConversationService:
                     "channel": "conversation",
                 },
             )
-            base["turn"] = turn
             revised_spec = turn["state"]["task_spec"]
+            if decision.confirm_after_edit and not revised_spec.get("ambiguities"):
+                turn = self.agent_runtime.resume(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    decision={"approved": True, "channel": "conversation"},
+                )
+                base["turn"] = turn
+                base["reply"] = (
+                    "已采纳剩余推荐值并确认 TaskSpec。"
+                    + self._turn_reply(turn, True)
+                )
+                return base
+            base["turn"] = turn
             prefix = (
                 "TaskSpec 已生成修订版本，但还有信息需要确认。\n\n"
                 if revised_spec.get("ambiguities")
@@ -646,19 +659,32 @@ class ConversationService:
         if not ambiguities:
             return None
         normalized = content.strip().lower().strip("!！。,.，~～ ")
-        if normalized not in {
+        review_defaults = {
             "按推荐默认值",
             "按默认值",
             "使用默认值",
             "采用默认值",
             "按建议",
             "用推荐值",
-        }:
+        }
+        continue_with_defaults = {
+            "好",
+            "好的",
+            "可以",
+            "继续",
+            "确认",
+            "同意",
+            "是",
+            "yes",
+            "ok",
+        }
+        if normalized not in review_defaults | continue_with_defaults:
             return None
         return ConversationDecision(
             intent=ConversationIntent.EDIT_TASK_SPEC,
             reply="正在将推荐默认值写入 TaskSpec。",
             task_spec_patch=recommended_clarification_patch(ambiguities),
+            confirm_after_edit=normalized in continue_with_defaults,
         )
 
     @staticmethod
