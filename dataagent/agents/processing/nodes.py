@@ -133,6 +133,7 @@ def _vlm_parameters(
     operator_id: str,
     *,
     purpose: str,
+    task_spec: TaskSpecVersion,
     library: OperatorLibrary,
     candidates: dict[str, OperatorCatalogMatch],
 ) -> dict[str, Any]:
@@ -143,11 +144,17 @@ def _vlm_parameters(
             "authenticity_tags" if purpose == "authenticity" else "image_tags"
         )
     if "system_prompt" in properties:
-        parameters["system_prompt"] = (
-            _AUTHENTICITY_PROMPT
-            if purpose == "authenticity"
-            else _CLASSIFICATION_PROMPT
-        )
+        if purpose == "authenticity":
+            scope = task_spec.hard_constraints.get("authenticity_scope")
+            exclusions = "; ".join(task_spec.exclusion_requirements)
+            task_scope = "; ".join(str(item) for item in (scope, exclusions) if item)
+            parameters["system_prompt"] = _AUTHENTICITY_PROMPT + (
+                f" Apply this task-specific exclusion scope: {task_scope}"
+                if task_scope
+                else ""
+            )
+        else:
+            parameters["system_prompt"] = _CLASSIFICATION_PROMPT
     return parameters
 
 
@@ -223,6 +230,7 @@ def _compile_nodes(
     operator_library: OperatorLibrary | None = None,
 ) -> tuple[PipelineNode, ...]:
     library = operator_library or build_operator_library(include_datajuicer=False)
+    task_spec = TaskSpecVersion.model_validate(state["task_spec"])
     candidates = _candidate_map(state)
     selection = _coverage_selection(state)
     nodes: list[PipelineNode] = []
@@ -242,6 +250,7 @@ def _compile_nodes(
                     parameters=_vlm_parameters(
                         vlm_id,
                         purpose="authenticity",
+                        task_spec=task_spec,
                         library=library,
                         candidates=candidates,
                     ),
@@ -264,6 +273,7 @@ def _compile_nodes(
             parameters = _vlm_parameters(
                 operator_id,
                 purpose="classification",
+                task_spec=task_spec,
                 library=library,
                 candidates=candidates,
             )

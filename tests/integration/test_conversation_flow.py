@@ -177,6 +177,53 @@ def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) 
         source.resolve()
     )
     assert gateway.calls == 0
+    assert "还需要你补充" in response["reply"]
+    assert len(response["turn"]["state"]["task_spec"]["ambiguities"]) == 3
+
+
+def test_complex_task_requires_clarification_before_confirmation(tmp_path) -> None:
+    source = tmp_path / "cats_dogs"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway([]),
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"去掉不真实、不是实拍直出的图片，把猫和狗分开',
+    )
+
+    blocked = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="确认"
+    )
+    assert blocked["turn"]["interrupts"][0]["value"]["kind"] == (
+        "task_spec_confirmation"
+    )
+    assert "仍有待澄清项" in blocked["reply"]
+    assert blocked["turn"]["state"]["task_spec"]["confirmed"] is False
+
+    revised = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="按推荐默认值",
+    )
+    spec = revised["turn"]["state"]["task_spec"]
+    assert spec["version"] == created["turn"]["state"]["task_spec"]["version"] + 1
+    assert spec["ambiguities"] == []
+    assert spec["hard_constraints"]["preserve_source"] is True
+    assert spec["preferences"]["mixed_policy"] == "review"
+    assert "重度滤镜" in spec["exclusion_requirements"][0]
+
+    approved = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="确认"
+    )
+    assert approved["turn"]["state"]["task_spec"]["confirmed"] is True
 
 
 def test_quoted_standalone_path_continues_pending_requirement_without_model(tmp_path) -> None:

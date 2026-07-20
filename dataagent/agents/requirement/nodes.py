@@ -8,6 +8,7 @@ from ...operators.planning import (
     infer_required_capabilities,
 )
 from ..shared import WorkOrderGraphState, append_trace
+from .clarification import infer_task_ambiguities
 
 
 def generate_task_spec(state: WorkOrderGraphState) -> dict:
@@ -30,6 +31,17 @@ def generate_task_spec(state: WorkOrderGraphState) -> dict:
         capability_requirements=capability_requirements,
         data_sources=sources,
         acceptance=AcceptanceSpec(boundary_review_size=20),
+    )
+    spec = spec.model_copy(
+        update={
+            "ambiguities": infer_task_ambiguities(
+                spec.capability_requirements,
+                hard_constraints=spec.hard_constraints,
+                semantic_requirements=spec.semantic_requirements,
+                exclusion_requirements=spec.exclusion_requirements,
+                preferences=spec.preferences,
+            )
+        }
     )
     return {
         "task_spec": spec.model_dump(mode="json"),

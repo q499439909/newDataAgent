@@ -115,3 +115,17 @@ def test_task_spec_can_be_revised_before_confirmation() -> None:
     approved = graph.invoke(Command(resume={"approved": True}), config)
     assert approved["task_spec"]["confirmed"] is True
     assert approved["__interrupt__"][0].value["kind"] == "capability_resolution"
+
+
+def test_graph_does_not_confirm_task_spec_with_unresolved_ambiguities() -> None:
+    graph = build_main_graph(InMemorySaver())
+    config = {"configurable": {"thread_id": "thread_clarification"}}
+    state = initial_state() | {
+        "requirement": "去掉不真实、不是实拍直出的图片，把猫和狗分开"
+    }
+    first = graph.invoke(state, config)
+    assert len(first["task_spec"]["ambiguities"]) == 3
+
+    still_waiting = graph.invoke(Command(resume={"approved": True}), config)
+    assert still_waiting["task_spec_confirmed"] is False
+    assert still_waiting["__interrupt__"][0].value["kind"] == "task_spec_confirmation"

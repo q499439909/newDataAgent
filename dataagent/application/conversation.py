@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from ..config import Settings
+from ..agents.requirement.clarification import recommended_clarification_patch
 from ..domain.common import new_id
 from ..gateway import ModelGateway, ModelGatewayError
 from ..infrastructure import ConversationStore
@@ -145,6 +146,9 @@ class ConversationService:
         task_spec_decision = self._task_spec_details_decision(content, context)
         if task_spec_decision is not None:
             return task_spec_decision
+        clarification_decision = self._pending_clarification_decision(content, context)
+        if clarification_decision is not None:
+            return clarification_decision
         pipeline_decision = self._pipeline_details_decision(content, context)
         if pipeline_decision is not None:
             return pipeline_decision
@@ -308,10 +312,13 @@ class ConversationService:
                 },
             )
             base["turn"] = turn
-            base["reply"] = (
-                "TaskSpec 已生成修订版本，仍在等待确认。\n\n"
-                + self._task_spec_details_reply(turn["state"]["task_spec"])
+            revised_spec = turn["state"]["task_spec"]
+            prefix = (
+                "TaskSpec 已生成修订版本，但还有信息需要确认。\n\n"
+                if revised_spec.get("ambiguities")
+                else "TaskSpec 已生成修订版本，请检查后确认。\n\n"
             )
+            base["reply"] = prefix + self._task_spec_details_reply(revised_spec)
             return base
         if decision.intent in {ConversationIntent.APPROVE, ConversationIntent.REJECT}:
             turn = self.agent_runtime.state(
@@ -328,6 +335,14 @@ class ConversationService:
             ):
                 base["turn"] = turn
                 base["reply"] = self._capability_resolution_reply(value)
+                return base
+            if (
+                value.get("kind") == "task_spec_confirmation"
+                and decision.intent == ConversationIntent.APPROVE
+                and value.get("task_spec", {}).get("ambiguities")
+            ):
+                base["turn"] = turn
+                base["reply"] = self._clarification_reply(value["task_spec"])
                 return base
             approved = decision.intent == ConversationIntent.APPROVE
             command: dict[str, Any] = {
@@ -457,10 +472,18 @@ class ConversationService:
                     work_order_id=turn["work_order_id"],
                 )
                 response["turn"] = turn
-                response["reply"] = (
-                    f"已创建工单 {turn['work_order_id']}。我生成了 TaskSpec 草案，"
-                    "现在等你确认；你可以先问我草案内容，也可以直接说“确认”。"
-                )
+                task_spec = turn["state"].get("task_spec", {})
+                if task_spec.get("ambiguities"):
+                    response["reply"] = (
+                        f"已创建工单 {turn['work_order_id']}。"
+                        "在确认 TaskSpec 前，还需要你补充以下信息：\n\n"
+                        + self._clarification_reply(task_spec, include_intro=False)
+                    )
+                else:
+                    response["reply"] = (
+                        f"已创建工单 {turn['work_order_id']}。我生成了 TaskSpec 草案，"
+                        "现在等你确认；你可以先问我草案内容，也可以直接说“确认”。"
+                    )
                 return response
         self.store.update(
             thread_id=thread["id"], owner_id=owner_id, context=context
@@ -591,9 +614,52 @@ class ConversationService:
             + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
             "- 排除需求："
             + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
+            "- 待澄清："
+            + ("；".join(task_spec.get("ambiguities", [])) or "无"),
             f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _clarification_reply(
+        task_spec: dict[str, Any], *, include_intro: bool = True
+    ) -> str:
+        ambiguities = task_spec.get("ambiguities") or []
+        lines = ["当前 TaskSpec 仍有待澄清项："] if include_intro else []
+        lines.extend(
+            f"{index}. {question}" for index, question in enumerate(ambiguities, 1)
+        )
+        lines.append(
+            "请直接回答这些问题；也可以说“按推荐默认值”，"
+            "我会写入新版本后再请你确认。"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _pending_clarification_decision(
+        content: str, context: dict[str, Any]
+    ) -> ConversationDecision | None:
+        if context.get("agent_state", {}).get("waiting") != "task_spec_confirmation":
+            return None
+        task_spec = context.get("task_spec") or {}
+        ambiguities = tuple(task_spec.get("ambiguities") or ())
+        if not ambiguities:
+            return None
+        normalized = content.strip().lower().strip("!！。,.，~～ ")
+        if normalized not in {
+            "按推荐默认值",
+            "按默认值",
+            "使用默认值",
+            "采用默认值",
+            "按建议",
+            "用推荐值",
+        }:
+            return None
+        return ConversationDecision(
+            intent=ConversationIntent.EDIT_TASK_SPEC,
+            reply="正在将推荐默认值写入 TaskSpec。",
+            task_spec_patch=recommended_clarification_patch(ambiguities),
+        )
 
     @staticmethod
     def _is_explicit_approval(content: str) -> bool:

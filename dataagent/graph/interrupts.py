@@ -10,6 +10,7 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.specs import TaskSpecVersion
 from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ..operators.planning import decompose_task_capabilities, infer_output_actions
+from ..agents.requirement.clarification import infer_task_ambiguities
 
 
 def _merge_unique(current: tuple[str, ...], additions: Any) -> tuple[str, ...]:
@@ -41,6 +42,13 @@ def _revise_task_spec(
         [objective, *semantic_requirements, *exclusion_requirements]
     )
     capabilities = decompose_task_capabilities(planning_text)
+    ambiguities = infer_task_ambiguities(
+        capabilities,
+        hard_constraints=hard_constraints,
+        semantic_requirements=semantic_requirements,
+        exclusion_requirements=exclusion_requirements,
+        preferences=preferences,
+    )
     return spec.model_copy(
         update={
             "id": new_id("spec"),
@@ -55,6 +63,7 @@ def _revise_task_spec(
             "preferences": preferences,
             "capability_requirements": capabilities,
             "output_actions": infer_output_actions(capabilities),
+            "ambiguities": ambiguities,
             "confirmed": False,
         }
     )
@@ -94,6 +103,13 @@ def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
             "trace": append_trace(state, "hitl:task_spec_rejected"),
         }
     spec = TaskSpecVersion.model_validate(state["task_spec"])
+    if spec.ambiguities:
+        return {
+            "task_spec_confirmed": False,
+            "task_spec_approval": decision if isinstance(decision, dict) else {},
+            "next_action": "confirm_task_spec",
+            "trace": append_trace(state, "hitl:task_spec_clarification_required"),
+        }
     confirmed = spec.model_copy(
         update={
             "id": new_id("spec"),
