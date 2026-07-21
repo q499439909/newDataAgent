@@ -117,9 +117,8 @@ class ConversationService:
                         reply=(
                             "我没有形成可安全执行的操作，因此没有修改任务。"
                             "请明确说明是确认当前 TaskSpec，还是要修改哪一项。"
-                        ),
-                        resolved_by="action-contract-guard",
-                    )
+                        )
+                    ).with_resolution(resolved_by="action-contract-guard")
                     response = {"reply": decision.reply, "turn": None, "run": None}
                     break
                 conversation_history.append(
@@ -150,9 +149,8 @@ class ConversationService:
                             reply=(
                                 "我不能猜测本地图片目录，因此没有创建任务。"
                                 "请提供一个可访问的图片目录。"
-                            ),
-                            resolved_by="source-grounding-guard",
-                        )
+                            )
+                        ).with_resolution(resolved_by="source-grounding-guard")
                         response = {"reply": decision.reply, "turn": None, "run": None}
                         break
                     conversation_history.append(
@@ -173,9 +171,8 @@ class ConversationService:
                         reply=(
                             "当前操作与任务状态不一致，因此没有修改任务。"
                             "请根据当前待确认事项重新说明你的选择。"
-                        ),
-                        resolved_by="action-policy-guard",
-                    )
+                        )
+                    ).with_resolution(resolved_by="action-policy-guard")
                     response = {"reply": decision.reply, "turn": None, "run": None}
                     break
                 conversation_history.append(
@@ -288,11 +285,9 @@ class ConversationService:
         """
         fallback = self._fallback_decision(content)
         if not self.gateway.configured:
-            return fallback.model_copy(
-                update={
-                    "resolved_by": "local-fallback",
-                    "fallback_reason": "model_gateway_not_configured",
-                }
+            return fallback.with_resolution(
+                resolved_by="local-fallback",
+                fallback_reason="model_gateway_not_configured",
             )
         try:
             raw, _ = self.gateway.conversation_turn(
@@ -302,8 +297,8 @@ class ConversationService:
                 ],
                 context=context,
             )
-            decision = parse_conversation_action(raw).model_copy(
-                update={"resolved_by": self.settings.fast_text_model}
+            decision = parse_conversation_action(raw).with_resolution(
+                resolved_by=self.settings.fast_text_model
             )
         except ConversationActionError:
             raise
@@ -313,15 +308,14 @@ class ConversationService:
                 "Conversation model failed; returning a non-mutating fallback: %s",
                 reason,
             )
-            return fallback.model_copy(
-                update={
-                    "reply": (
-                        "模型服务本轮未返回有效结果，控制平面没有执行任何操作。"
-                        "请重试刚才的问题。"
-                    ),
-                    "resolved_by": "local-fallback",
-                    "fallback_reason": reason,
-                }
+            return ChatAction(
+                reply=(
+                    "模型服务本轮未返回有效结果，控制平面没有执行任何操作。"
+                    "请重试刚才的问题。"
+                )
+            ).with_resolution(
+                resolved_by="local-fallback",
+                fallback_reason=reason,
             )
         ungrounded_ids = self._ungrounded_control_identifiers(decision.reply, context)
         if decision.intent == ConversationIntent.CHAT and ungrounded_ids:
@@ -331,7 +325,8 @@ class ConversationService:
                 reply=(
                     "模型回答包含无法由控制面验证的任务标识，已阻止展示。"
                     "请明确要查看当前 Run、Pipeline、算子、TaskSpec 或工单信息。"
-                ),
+                )
+            ).with_resolution(
                 resolved_by="control-fact-guard",
                 fallback_reason=reason,
             )

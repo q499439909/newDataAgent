@@ -5,6 +5,7 @@ import pytest
 from dataagent.application.conversation_actions import (
     ConversationActionError,
     ConversationIntent,
+    conversation_action_json_schema,
     parse_conversation_action,
 )
 
@@ -44,3 +45,10 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
     assert edit.intent == ConversationIntent.EDIT_TASK_SPEC
     assert pipeline.strategy == "balanced"
     assert facts.facets == ("run", "pipeline")
+
+
+def test_model_schema_does_not_expose_internal_audit_metadata() -> None:
+    schema_text = str(conversation_action_json_schema())
+
+    assert "resolved_by" not in schema_text
+    assert "fallback_reason" not in schema_text

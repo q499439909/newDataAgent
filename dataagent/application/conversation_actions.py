@@ -3,7 +3,15 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 
 class ConversationIntent(StrEnum):
@@ -34,8 +42,27 @@ class _ActionBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reply: str = ""
-    resolved_by: str = "model"
-    fallback_reason: str | None = None
+    _resolved_by: str = PrivateAttr(default="model")
+    _fallback_reason: str | None = PrivateAttr(default=None)
+
+    @property
+    def resolved_by(self) -> str:
+        return self._resolved_by
+
+    @property
+    def fallback_reason(self) -> str | None:
+        return self._fallback_reason
+
+    def with_resolution(
+        self,
+        *,
+        resolved_by: str,
+        fallback_reason: str | None = None,
+    ) -> "_ActionBase":
+        resolved = self.model_copy(deep=True)
+        resolved._resolved_by = resolved_by
+        resolved._fallback_reason = fallback_reason
+        return resolved
 
 
 class ChatAction(_ActionBase):
