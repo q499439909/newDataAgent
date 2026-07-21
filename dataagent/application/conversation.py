@@ -182,13 +182,30 @@ class ConversationService:
                     {"role": "control", "content": feedback}
                 )
                 continue
-            response = self._apply(
-                thread=thread,
-                owner_id=owner_id,
-                content=current_content,
-                decision=decision,
-                control_context=context,
-            )
+            try:
+                response = self._apply(
+                    thread=thread,
+                    owner_id=owner_id,
+                    content=current_content,
+                    decision=decision,
+                    control_context=context,
+                )
+            except (RuntimeError, ValueError) as exc:
+                logger.warning(
+                    "Conversation action %s was rejected during execution: %s",
+                    decision.intent,
+                    exc,
+                )
+                response = {
+                    "reply": (
+                        "控制面拒绝了这次操作，因此没有自动重试，也没有重复提交。"
+                        f"当前可执行动作：{', '.join(self._allowed_actions(context))}。"
+                        f"拒绝原因：{exc}"
+                    ),
+                    "turn": None,
+                    "run": None,
+                }
+                break
             feedback = response.pop("_react_feedback", None)
             if not feedback or iteration == _MAX_REACT_ITERATIONS - 1:
                 break
