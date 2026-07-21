@@ -4,7 +4,8 @@ import json
 import pytest
 
 from dataagent.application.agent_runtime import AgentRuntime
-from dataagent.application.conversation import ConversationDecision, ConversationService
+from dataagent.application.conversation import ConversationService
+from dataagent.application.conversation_actions import parse_conversation_action
 from dataagent.config import Settings
 from dataagent.gateway import ModelGatewayError
 
@@ -25,7 +26,7 @@ class FakeConversationGateway:
 
     def conversation_turn(self, *, history, context):
         self.calls += 1
-        assert history[-1]["role"] == "user"
+        assert history[-1]["role"] in {"user", "control"}
         if not self.decisions:
             raise AssertionError("FakeConversationGateway ran out of scripted decisions")
         return self.decisions.pop(0), None
@@ -40,6 +41,10 @@ class FailingConversationGateway:
     def conversation_turn(self, *, history, context):
         self.calls += 1
         raise ModelGatewayError("structured response unavailable")
+
+
+def _decision(**payload):
+    return parse_conversation_action(payload)
 
 
 class IneligiblePipelineRuntime:
@@ -169,13 +174,13 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
             {"intent": "START_WORK_ORDER", "requirement": "筛选清晰的人像图片并去重", "reply": "我先记录需求。"},
             {"intent": "PROVIDE_SOURCE", "source": str(source), "reply": "我来检查这个目录。"},
             {"intent": "EDIT_TASK_SPEC", "action": "accept_defaults", "confirm_after_edit": True, "reply": "按推荐默认值确认。"},
-            {"intent": "APPROVE", "strategy": "quality_first", "reply": "选择质量优先。"},
+            {"intent": "SELECT_PIPELINE", "strategy": "quality_first", "reply": "选择质量优先。"},
             {"intent": "SUBMIT_RUN", "reply": "开始运行。"},
-            {"intent": "QUERY_CONTROL_FACTS", "action": "pipeline", "reply": ""},
-            {"intent": "QUERY_CONTROL_FACTS", "action": "pipeline", "reply": ""},
-            {"intent": "QUERY_CONTROL_FACTS", "action": "run", "reply": ""},
+            {"intent": "QUERY_CONTROL_FACTS", "facets": ["pipeline"], "reply": ""},
+            {"intent": "QUERY_CONTROL_FACTS", "facets": ["pipeline"], "reply": ""},
+            {"intent": "QUERY_CONTROL_FACTS", "facets": ["run"], "reply": ""},
             {"intent": "CHAT", "reply": "可以重新选择 Pipeline，不会直接复用旧 Run。"},
-            {"intent": "RESELECT_PIPELINE", "strategy": "retention_first", "reply": "正在切换。"},
+            {"intent": "SELECT_PIPELINE", "strategy": "retention_first", "reply": "正在切换。"},
             {"intent": "SUBMIT_RUN", "reply": "重新开始运行。"},
             {
                 "intent": "EDIT_TASK_SPEC",
@@ -428,8 +433,8 @@ def test_file_path_rejected_with_react_feedback(tmp_path) -> None:
     assert gateway.calls == 2
 
 
-def test_single_turn_react_corrects_bad_source_and_starts(tmp_path) -> None:
-    """The model corrects its own bad path within one turn via feedback."""
+def test_react_cannot_replace_a_bad_source_with_an_ungrounded_path(tmp_path) -> None:
+    """The model must ask instead of inventing a different local directory."""
     source = tmp_path / "images"
     source.mkdir()
     bad_source = tmp_path / "wrong_dir"
@@ -439,6 +444,7 @@ def test_single_turn_react_corrects_bad_source_and_starts(tmp_path) -> None:
         [
             _start_work_order(bad_source, "筛选清晰图片并去重"),
             _start_work_order(source, "筛选清晰图片并去重"),
+            {"intent": "CHAT", "reply": "请提供正确的图片目录。"},
         ]
     )
     service = ConversationService(
@@ -455,11 +461,10 @@ def test_single_turn_react_corrects_bad_source_and_starts(tmp_path) -> None:
         content=f'"{bad_source}"筛选清晰图片并去重',
     )
 
-    assert response["work_order_id"] is not None
-    assert response["turn"]["state"]["task_spec"]["data_sources"][0]["uri"] == str(
-        source.resolve()
-    )
-    assert gateway.calls == 2
+    assert response["work_order_id"] is None
+    assert response["turn"] is None
+    assert "目录" in response["reply"]
+    assert gateway.calls == 3
 
 
 def test_synonym_and_english_requirements_start_work_order(tmp_path) -> None:
@@ -577,7 +582,7 @@ def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -
         thread=thread,
         owner_id="user_1",
         content="补充真实性和类别要求",
-        decision=ConversationDecision(
+        decision=_decision(
             intent="EDIT_TASK_SPEC",
             task_spec_patch={
                 "hard_constraints": {
@@ -609,6 +614,61 @@ def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -
     assert "继续" not in spec["semantic_requirements"]
     assert continued["turn"]["state"]["next_action"] != "confirm_task_spec"
     assert "已采纳剩余推荐值" in continued["reply"]
+
+
+def test_affirmative_confirmation_cannot_be_appended_to_task_spec(tmp_path) -> None:
+    source = tmp_path / "mix"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    requirement = "去掉不真实、非实拍直出的图片，把猫和狗分开"
+    gateway = FakeConversationGateway(
+        [
+            _start_work_order(source, requirement),
+            {
+                "intent": "EDIT_TASK_SPEC",
+                "action": "accept_defaults",
+                "reply": "采用推荐默认值。",
+            },
+            {
+                "intent": "EDIT_TASK_SPEC",
+                "reply": "写入确认。",
+            },
+            {"intent": "APPROVE", "reply": "确认当前 TaskSpec。"},
+        ]
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"{requirement}',
+    )
+    assert created["turn"]["state"]["task_spec"]["ambiguities"]
+
+    defaulted = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="可以了"
+    )
+    defaulted_spec = defaulted["turn"]["state"]["task_spec"]
+    assert defaulted_spec["ambiguities"] == []
+    assert defaulted_spec["confirmed"] is False
+    version_before_confirmation = defaulted_spec["version"]
+
+    confirmed = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="是"
+    )
+    confirmed_spec = confirmed["turn"]["state"]["task_spec"]
+    assert confirmed_spec["confirmed"] is True
+    assert confirmed_spec["version"] == version_before_confirmation + 1
+    assert "是" not in confirmed_spec["semantic_requirements"]
+    assert "可以了" not in confirmed_spec["semantic_requirements"]
+    assert gateway.calls == 4
 
 
 def test_model_driven_clarification_patch_is_applied(tmp_path) -> None:
@@ -694,7 +754,7 @@ def test_structured_requirement_patch_uses_description_instead_of_dict_repr(
         thread=thread,
         owner_id="user_1",
         content="排除插画和截图",
-        decision=ConversationDecision(
+        decision=_decision(
             intent="EDIT_TASK_SPEC",
             task_spec_patch={
                 "exclusion_requirements": [
@@ -833,8 +893,8 @@ def test_pipeline_approval_resumes_eligible_pipeline() -> None:
         },
         owner_id="user_1",
         content="均衡",
-        decision=ConversationDecision(
-            intent="APPROVE", strategy="balanced", reply="选择均衡"
+        decision=_decision(
+            intent="SELECT_PIPELINE", strategy="balanced", reply="选择均衡"
         ),
     )
     assert response["turn"]["state"]["next_action"] == "submit_dataset_run"
@@ -861,7 +921,7 @@ def test_submit_run_without_work_order_is_blocked(tmp_path) -> None:
         },
         owner_id="user_1",
         content="开始运行",
-        decision=ConversationDecision(intent="SUBMIT_RUN", reply="开始运行。"),
+        decision=_decision(intent="SUBMIT_RUN", reply="开始运行。"),
     )
     assert response["turn"] is None
     assert "还没有工单" in response["reply"]
@@ -1075,7 +1135,7 @@ def test_task_spec_supplement_is_revised_before_explicit_approval(tmp_path) -> N
         [
             {"intent": "START_WORK_ORDER", "requirement": "筛选清晰的猫狗图片", "reply": "请提供目录。"},
             {"intent": "PROVIDE_SOURCE", "source": str(source), "reply": "我来检查目录。"},
-            {"intent": "QUERY_CONTROL_FACTS", "action": "task_spec", "reply": ""},
+            {"intent": "QUERY_CONTROL_FACTS", "facets": ["task_spec"], "reply": ""},
             {
                 "intent": "EDIT_TASK_SPEC",
                 "task_spec_patch": {
@@ -1189,8 +1249,8 @@ def test_ineligible_pipeline_selection_does_not_redraw_approval_tables(tmp_path)
         },
         owner_id="user_1",
         content="质量优先",
-        decision=ConversationDecision(
-            intent="APPROVE", strategy="quality_first", reply="选择质量优先"
+        decision=_decision(
+            intent="SELECT_PIPELINE", strategy="quality_first", reply="选择质量优先"
         ),
     )
 

@@ -6,14 +6,23 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
-
 from ..config import Settings
 from ..agents.requirement.clarification import recommended_clarification_patch
 from ..domain.common import new_id
 from ..gateway import ModelGateway, ModelGatewayError
 from ..infrastructure import ConversationStore
 from .agent_runtime import AgentRuntime
+from .conversation_actions import (
+    ChatAction,
+    ConversationAction,
+    ConversationActionError,
+    ConversationIntent,
+    parse_conversation_action,
+)
+from .conversation_policy import (
+    allowed_conversation_actions,
+    validate_conversation_action,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,65 +32,6 @@ logger = logging.getLogger(__name__)
 # this many chances to correct itself after a control-plane action fails (e.g.
 # an invalid data-source path) before the last reply is shown to the user.
 _MAX_REACT_ITERATIONS = 4
-
-
-class ConversationIntent:
-    """Vocabulary the model uses to select a control-plane action.
-
-    Kept as plain string constants (not an Enum) because the model emits them
-    as JSON values; ConversationDecision validates them loosely.
-    """
-
-    CHAT = "CHAT"
-    START_WORK_ORDER = "START_WORK_ORDER"
-    PROVIDE_SOURCE = "PROVIDE_SOURCE"
-    EDIT_TASK_SPEC = "EDIT_TASK_SPEC"
-    APPROVE = "APPROVE"
-    REJECT = "REJECT"
-    SUBMIT_RUN = "SUBMIT_RUN"
-    RUN_STATUS = "RUN_STATUS"
-    CONTROL_RUN = "CONTROL_RUN"
-    QUERY_CONTROL_FACTS = "QUERY_CONTROL_FACTS"
-    RESOLVE_GAP = "RESOLVE_GAP"
-    RESELECT_PIPELINE = "RESELECT_PIPELINE"
-
-
-_VALID_INTENTS = frozenset(
-    {
-        ConversationIntent.CHAT,
-        ConversationIntent.START_WORK_ORDER,
-        ConversationIntent.PROVIDE_SOURCE,
-        ConversationIntent.EDIT_TASK_SPEC,
-        ConversationIntent.APPROVE,
-        ConversationIntent.REJECT,
-        ConversationIntent.SUBMIT_RUN,
-        ConversationIntent.RUN_STATUS,
-        ConversationIntent.CONTROL_RUN,
-        ConversationIntent.QUERY_CONTROL_FACTS,
-        ConversationIntent.RESOLVE_GAP,
-        ConversationIntent.RESELECT_PIPELINE,
-    }
-)
-
-
-class ConversationDecision(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    intent: str = ConversationIntent.CHAT
-    reply: str = ""
-    requirement: str | None = None
-    source: str | None = None
-    strategy: str | None = None
-    action: str | None = None
-    runtime_backend: str | None = None
-    task_spec_patch: dict[str, Any] | None = None
-    confirm_after_edit: bool = False
-    resolved_by: str = "model"
-    fallback_reason: str | None = None
-
-    @property
-    def is_valid_intent(self) -> bool:
-        return self.intent in _VALID_INTENTS
 
 
 class ConversationService:
@@ -146,10 +96,92 @@ class ConversationService:
         context = self._control_context(thread, owner_id)
 
         current_content = content
-        decision = None
+        decision: ConversationAction | None = None
         response: dict[str, Any] = {"reply": "我在。", "turn": None, "run": None}
         for iteration in range(_MAX_REACT_ITERATIONS):
-            decision = self._decide(current_content, conversation_history, context)
+            try:
+                decision = self._decide(current_content, conversation_history, context)
+            except ConversationActionError as exc:
+                feedback = json.dumps(
+                    {
+                        "code": "INVALID_ACTION_CONTRACT",
+                        "message": str(exc),
+                        "details": exc.details,
+                        "allowed_actions": self._allowed_actions(context),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+                if iteration == _MAX_REACT_ITERATIONS - 1:
+                    decision = ChatAction(
+                        reply=(
+                            "我没有形成可安全执行的操作，因此没有修改任务。"
+                            "请明确说明是确认当前 TaskSpec，还是要修改哪一项。"
+                        ),
+                        resolved_by="action-contract-guard",
+                    )
+                    response = {"reply": decision.reply, "turn": None, "run": None}
+                    break
+                conversation_history.append(
+                    {"role": "control", "content": feedback}
+                )
+                continue
+            violation = validate_conversation_action(decision, context)
+            if violation is None and decision.intent in {
+                ConversationIntent.START_WORK_ORDER,
+                ConversationIntent.PROVIDE_SOURCE,
+            }:
+                source = getattr(decision, "source", None)
+                if source and not self._source_is_user_grounded(source, conversation_history):
+                    feedback = json.dumps(
+                        {
+                            "code": "UNGROUNDED_SOURCE_PATH",
+                            "message": (
+                                "The proposed source path was not supplied by the user. "
+                                "Ask the user for the correct directory instead of guessing it."
+                            ),
+                            "source": source,
+                            "allowed_actions": self._allowed_actions(context),
+                        },
+                        ensure_ascii=False,
+                    )
+                    if iteration == _MAX_REACT_ITERATIONS - 1:
+                        decision = ChatAction(
+                            reply=(
+                                "我不能猜测本地图片目录，因此没有创建任务。"
+                                "请提供一个可访问的图片目录。"
+                            ),
+                            resolved_by="source-grounding-guard",
+                        )
+                        response = {"reply": decision.reply, "turn": None, "run": None}
+                        break
+                    conversation_history.append(
+                        {"role": "control", "content": feedback}
+                    )
+                    continue
+            if violation is not None:
+                feedback = json.dumps(
+                    {
+                        "code": violation.code,
+                        "message": violation.message,
+                        "allowed_actions": violation.allowed_actions,
+                    },
+                    ensure_ascii=False,
+                )
+                if iteration == _MAX_REACT_ITERATIONS - 1:
+                    decision = ChatAction(
+                        reply=(
+                            "当前操作与任务状态不一致，因此没有修改任务。"
+                            "请根据当前待确认事项重新说明你的选择。"
+                        ),
+                        resolved_by="action-policy-guard",
+                    )
+                    response = {"reply": decision.reply, "turn": None, "run": None}
+                    break
+                conversation_history.append(
+                    {"role": "control", "content": feedback}
+                )
+                continue
             response = self._apply(
                 thread=thread,
                 owner_id=owner_id,
@@ -165,14 +197,16 @@ class ConversationService:
             conversation_history.append(
                 {"role": "assistant", "content": decision.reply or response.get("reply", "")}
             )
-            feedback_message = f"[系统反馈] {feedback}"
-            conversation_history.append({"role": "user", "content": feedback_message})
-            current_content = feedback_message
+            feedback_message = json.dumps(
+                {"code": "CONTROL_PREFLIGHT_FAILED", "message": feedback},
+                ensure_ascii=False,
+            )
+            conversation_history.append({"role": "control", "content": feedback_message})
             # State may have changed (e.g. context popped); refresh both.
             thread = self.store.get(thread_id, owner_id)
             context = self._control_context(thread, owner_id)
 
-        resolved_by = (decision or ConversationDecision()).resolved_by
+        resolved_by = (decision or ChatAction()).resolved_by
         self.store.add_message(
             thread_id=thread_id,
             owner_id=owner_id,
@@ -205,12 +239,29 @@ class ConversationService:
         response["messages"] = self.store.messages(thread_id, owner_id)
         return response
 
+    @staticmethod
+    def _allowed_actions(context: dict[str, Any]) -> tuple[str, ...]:
+        return allowed_conversation_actions(context)
+
+    @staticmethod
+    def _source_is_user_grounded(
+        source: str, history: list[dict[str, Any]]
+    ) -> bool:
+        candidate = source.strip().strip("\"'“”")
+        if not candidate:
+            return False
+        return any(
+            candidate in str(item.get("content", ""))
+            for item in history
+            if item.get("role") == "user"
+        )
+
     def _decide(
         self,
         content: str,
         history: list[dict[str, Any]],
         context: dict[str, Any],
-    ) -> ConversationDecision:
+    ) -> ConversationAction:
         """Ask the model to decide intent + structured arguments.
 
         The model is consulted first; there is no keyword cascade that
@@ -234,9 +285,11 @@ class ConversationService:
                 ],
                 context=context,
             )
-            decision = ConversationDecision.model_validate(raw).model_copy(
+            decision = parse_conversation_action(raw).model_copy(
                 update={"resolved_by": self.settings.fast_text_model}
             )
+        except ConversationActionError:
+            raise
         except (ModelGatewayError, ValueError, TypeError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:500]
             logger.warning(
@@ -253,15 +306,11 @@ class ConversationService:
                     "fallback_reason": reason,
                 }
             )
-        if not decision.is_valid_intent:
-            logger.warning("Model returned unknown intent %r; treating as CHAT", decision.intent)
-            decision = decision.model_copy(update={"intent": ConversationIntent.CHAT})
         ungrounded_ids = self._ungrounded_control_identifiers(decision.reply, context)
         if decision.intent == ConversationIntent.CHAT and ungrounded_ids:
             reason = "ungrounded_control_identifiers:" + ",".join(ungrounded_ids)
             logger.warning("Blocked ungrounded control-plane identifiers: %s", reason)
-            return ConversationDecision(
-                intent=ConversationIntent.CHAT,
+            return ChatAction(
                 reply=(
                     "模型回答包含无法由控制面验证的任务标识，已阻止展示。"
                     "请明确要查看当前 Run、Pipeline、算子、TaskSpec 或工单信息。"
@@ -277,7 +326,7 @@ class ConversationService:
         thread: dict[str, Any],
         owner_id: str,
         content: str,
-        decision: ConversationDecision,
+        decision: ConversationAction,
         control_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         context = dict(thread["context"])
@@ -298,11 +347,7 @@ class ConversationService:
             return base
         if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
             facts_context = control_context or context
-            facets = {
-                item.strip()
-                for item in (decision.action or "").split(",")
-                if item.strip()
-            }
+            facets = set(decision.facets)
             facts_reply = ConversationService._control_facts_reply(facts_context, facets)
             if facts_reply:
                 base["reply"] = facts_reply
@@ -332,9 +377,7 @@ class ConversationService:
                 if decision.action == "accept_defaults":
                     patch = recommended_clarification_patch(ambiguities)
                 else:
-                    patch = decision.task_spec_patch or {
-                        "semantic_requirements": [content]
-                    }
+                    patch = decision.task_spec_patch
                 turn = self.agent_runtime.resume(
                     work_order_id=work_order_id,
                     owner_id=owner_id,
@@ -345,9 +388,7 @@ class ConversationService:
                     },
                 )
             elif turn["state"].get("task_spec", {}).get("confirmed"):
-                patch = decision.task_spec_patch or {
-                    "semantic_requirements": [content]
-                }
+                patch = decision.task_spec_patch
                 turn = self.agent_runtime.revise_task_spec(
                     work_order_id=work_order_id,
                     owner_id=owner_id,
@@ -412,31 +453,7 @@ class ConversationService:
                 "channel": "conversation",
             }
             if not approved:
-                command["reason"] = content
-            elif value.get("kind") == "pipeline_approval":
-                strategy = self._normalize_strategy(decision.strategy or "balanced")
-                selected = next(
-                    (
-                        item
-                        for item in value.get("pipelines", [])
-                        if item.get("strategy") == strategy
-                    ),
-                    None,
-                )
-                if selected is None:
-                    base["reply"] = "没有找到对应策略，请选择保留优先、均衡或质量优先。"
-                    base["turn"] = turn
-                    return base
-                eligibility = selected.get("execution_eligibility") or {}
-                if eligibility.get("eligible") is False:
-                    violations = eligibility.get("violations") or ["未知执行门禁错误"]
-                    base["reply"] = (
-                        f"{strategy} Pipeline 未获批准，工单仍停留在方案选择阶段。"
-                        "阻塞原因："
-                        + "；".join(str(item) for item in violations)
-                    )
-                    return base
-                command["pipeline_id"] = selected["id"]
+                command["reason"] = decision.reason or content
             turn = self.agent_runtime.resume(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
@@ -466,8 +483,48 @@ class ConversationService:
             base["turn"] = turn
             base["reply"] = self._turn_reply(turn, True)
             return base
-        if decision.intent == ConversationIntent.RESELECT_PIPELINE:
-            strategy = self._normalize_strategy(decision.strategy or "")
+        if decision.intent == ConversationIntent.SELECT_PIPELINE:
+            strategy = decision.strategy
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id, owner_id=owner_id
+            )
+            if turn["interrupts"] and turn["interrupts"][0]["value"].get(
+                "kind"
+            ) == "pipeline_approval":
+                value = turn["interrupts"][0]["value"]
+                selected = next(
+                    (
+                        item
+                        for item in value.get("pipelines", [])
+                        if item.get("strategy") == strategy
+                    ),
+                    None,
+                )
+                if selected is None:
+                    base["reply"] = "没有找到对应策略，请重新选择 Pipeline。"
+                    base["turn"] = turn
+                    return base
+                eligibility = selected.get("execution_eligibility") or {}
+                if eligibility.get("eligible") is False:
+                    violations = eligibility.get("violations") or ["未知执行门禁错误"]
+                    base["reply"] = (
+                        f"{strategy} Pipeline 未获批准，工单仍停留在方案选择阶段。"
+                        "阻塞原因："
+                        + "；".join(str(item) for item in violations)
+                    )
+                    return base
+                turn = self.agent_runtime.resume(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    decision={
+                        "approved": True,
+                        "channel": "conversation",
+                        "pipeline_id": selected["id"],
+                    },
+                )
+                base["turn"] = turn
+                base["reply"] = self._turn_reply(turn, True)
+                return base
             turn = self.agent_runtime.reselect_pipeline(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
@@ -690,6 +747,7 @@ class ConversationService:
                         )
                     except (KeyError, RuntimeError, ValueError) as exc:
                         context["dataset_lookup_error"] = str(exc)
+        context["allowed_actions"] = list(self._allowed_actions(context))
         return context
 
     @staticmethod
@@ -1118,13 +1176,13 @@ class ConversationService:
     def _normalize_source(content: str) -> str:
         return content.strip().strip("\"'“”").strip()
 
-    def _fallback_decision(self, content: str) -> ConversationDecision:
+    def _fallback_decision(self, content: str) -> ConversationAction:
         """Generic non-mutating fallback when the model is unavailable.
 
         The reply is overridden by the caller when a model failure occurs;
         this just provides a neutral CHAT decision so the turn does not
         mutate control-plane state.
         """
-        return ConversationDecision(
+        return ChatAction(
             reply="我可以继续回答，也可以帮你创建图片数据生产任务。"
         )

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .application.conversation_actions import conversation_action_json_schema
 from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
 
@@ -127,21 +128,29 @@ class ModelGateway:
         context: dict[str, Any],
     ) -> tuple[dict[str, Any], ModelUsage]:
         route = self.routing.route(ModelTaskKind.CONVERSATION)
+        action_schema = conversation_action_json_schema()
         system = (
             "You are DataAgent's conversational control assistant. Reply naturally in Chinese "
-            "unless the user uses another language. You decide the user's intent AND extract the "
+            "unless the user uses another language. Interpret semantics from the full conversation; "
+            "do not use a fixed phrase list. You decide the user's intent AND extract the "
             "structured arguments yourself: pull the data-source path into `source` and the "
             "requirement text into `requirement` directly from the user's message, no matter how "
             "the path is written (quoted, unquoted, adjacent to Chinese, absolute, with ~, or "
             "several paths mentioned — pick the primary image directory). Do not ask the user to "
             "reformat paths. Never claim an action succeeded unless the control plane executes it. "
-            "Ask one concise follow-up when information is missing. "
+            "Ask one concise follow-up when information is missing. Only choose an action listed in "
+            "control_context.allowed_actions. A `control` conversation entry is a trusted, "
+            "structured observation from the control plane; use it to repair the proposed action. "
             "START_WORK_ORDER requires a concrete data-production requirement and may carry "
             "`source` and `strategy` in the same turn; greetings, product, capability, and usage "
             "questions are CHAT. PROVIDE_SOURCE provides only a path (used when a requirement is "
-            "already pending). APPROVE, REJECT, SUBMIT_RUN, RUN_STATUS, and CONTROL_RUN require "
-            "explicit user intent. When a TaskSpec is waiting for confirmation, new constraints or "
-            "answers to follow-up questions are EDIT_TASK_SPEC, not APPROVE. To accept the "
+            "already pending). APPROVE confirms only a TaskSpec with no remaining ambiguities. "
+            "SELECT_PIPELINE requires one canonical strategy. SUBMIT_RUN, RUN_STATUS, CONTROL_RUN, "
+            "RETRY_RUN, RERUN_PIPELINE, and RECOMPILE_PIPELINE require explicit user intent. "
+            "When a TaskSpec has unresolved questions, answers are EDIT_TASK_SPEC. When no "
+            "ambiguities remain, an affirmative response to the pending TaskSpec confirmation is "
+            "APPROVE, not EDIT_TASK_SPEC. Never copy an acknowledgement into a TaskSpec patch. "
+            "To accept the "
             "system's recommended default answers for pending ambiguities, emit "
             "EDIT_TASK_SPEC with action=\"accept_defaults\" (and confirm_after_edit=true if the "
             "user also wants to confirm). Put only user-provided changes in task_spec_patch using "
@@ -152,21 +161,15 @@ class ModelGateway:
             "hard_constraints.preserve_source and preferences.output_layout. When the user "
             "removes a processing capability from a confirmed task, use "
             "hard_constraints.disabled_capabilities with canonical capability IDs such as "
-            "image_quality. For QUERY_CONTROL_FACTS, set `action` to a comma-separated subset of "
-            "facets drawn from: work_order, run, pipeline, operators, task_spec, dataset, "
+            "image_quality. For QUERY_CONTROL_FACTS, set `facets` to a non-empty list drawn from: "
+            "work_order, run, pipeline, operators, task_spec, dataset, "
             "outcome. The system renders grounded facts from the control plane for those facets, "
             "so never invent run/pipeline/spec identifiers, counts, or paths in your reply — "
-            "leave factual claims to the system. If you receive a user message beginning with "
-            "\"[系统反馈]\", it reports that a control-plane action you requested failed (e.g. an "
-            "invalid data-source path); respond by correcting the argument or asking the user a "
-            "precise follow-up, and do not repeat the failed action verbatim. "
-            "Return JSON only with keys: intent, reply, requirement, source, strategy, "
-            "action, task_spec_patch. Allowed intents are CHAT, START_WORK_ORDER, PROVIDE_SOURCE, "
-            "EDIT_TASK_SPEC, APPROVE, REJECT, RESELECT_PIPELINE, SUBMIT_RUN, RUN_STATUS, "
-            "CONTROL_RUN, QUERY_CONTROL_FACTS, RESOLVE_GAP. RESELECT_PIPELINE is used only when "
-            "the user explicitly chooses a different strategy for a completed or failed Run. "
-            "strategy may be retention_first, balanced, quality_first, or null. "
-            "action may be pause, resume, cancel, accept_defaults, a facet list, or null."
+            "leave factual claims to the system. RERUN_PIPELINE means a new Run using the same "
+            "immutable TaskSpec and Pipeline. RETRY_RUN is for a transiently failed Run. "
+            "RECOMPILE_PIPELINE keeps the confirmed TaskSpec but uses the current Catalog to build "
+            "new Pipeline candidates. Return JSON only and match this JSON Schema exactly: "
+            + json.dumps(action_schema, ensure_ascii=False)
         )
         payload = {
             "configured_model": route.model_id,
@@ -177,7 +180,7 @@ class ModelGateway:
             route.model_id,
             system,
             json.dumps(payload, ensure_ascii=False),
-            max_tokens=700,
+            max_tokens=1000,
         )
         return _extract_json(result.text), result.usage
 
