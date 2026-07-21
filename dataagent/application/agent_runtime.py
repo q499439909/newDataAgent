@@ -210,6 +210,17 @@ class AgentRuntime:
             owner_id=owner_id,
         )
 
+    def pipeline_version_eligibility(
+        self, *, pipeline_version_id: str, owner_id: str
+    ) -> dict[str, Any]:
+        pipeline = PipelineVersion.model_validate(
+            self.pipeline_version(
+                pipeline_version_id=pipeline_version_id,
+                owner_id=owner_id,
+            )
+        )
+        return self.pipeline_execution_eligibility(pipeline)
+
     def build_node_preview(
         self,
         *,
@@ -483,6 +494,60 @@ class AgentRuntime:
             as_node="strategy_agent",
         )
         return self.state(work_order_id=work_order_id, owner_id=owner_id)
+
+    def recompile_pipeline_candidates(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        record = self._get_authorized(work_order_id, owner_id)
+        if self.run_store is None or self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for Pipeline recompilation")
+        active = [
+            item
+            for item in self.run_store.list_for_work_order(work_order_id, owner_id)
+            if item["status"]
+            in {"QUEUED", "RUNNING", "PAUSING", "CANCELLING", "EVALUATING"}
+        ]
+        if active:
+            raise ValueError("Cannot recompile Pipeline while a Run is active")
+        snapshot = self.graph.get_state(self._config(record))
+        if snapshot.interrupts:
+            raise ValueError("Resolve the current workflow approval before recompiling")
+        state = dict(snapshot.values)
+        spec = TaskSpecVersion.model_validate(state.get("task_spec"))
+        if not spec.confirmed:
+            raise ValueError("TaskSpec must be confirmed before recompiling Pipeline")
+        self.graph.update_state(
+            self._config(record),
+            {
+                "retrieval_plan": {},
+                "candidate_sufficient": False,
+                "operator_candidates": [],
+                "capability_coverage": [],
+                "capability_resolution": {},
+                "capability_resolution_attempt": 0,
+                "runtime_backend_overrides": [],
+                "pipeline_variants": [],
+                "representative_pipelines": [],
+                "approved_pipeline": {},
+                "selected_pipeline_id": "",
+                "pipeline_approval": {},
+                "sampling_plan": {},
+                "current_agent": "retrieval",
+                "next_action": "run_retrieval_agent",
+                "terminated": False,
+                "trace": [
+                    *state.get("trace", []),
+                    "hitl:pipeline_recompile_requested",
+                ],
+            },
+            as_node="confirm_task_spec",
+        )
+        result = self.graph.invoke(None, self._config(record))
+        self._capture_versions(record, result)
+        return self._public_result(record, result)
 
     def revise_task_spec(
         self,

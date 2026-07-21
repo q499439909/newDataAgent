@@ -179,6 +179,7 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
             {"intent": "QUERY_CONTROL_FACTS", "facets": ["pipeline"], "reply": ""},
             {"intent": "QUERY_CONTROL_FACTS", "facets": ["pipeline"], "reply": ""},
             {"intent": "QUERY_CONTROL_FACTS", "facets": ["run"], "reply": ""},
+            {"intent": "RERUN_PIPELINE", "reply": "按原 Pipeline 重新运行。"},
             {"intent": "CHAT", "reply": "可以重新选择 Pipeline，不会直接复用旧 Run。"},
             {"intent": "SELECT_PIPELINE", "strategy": "retention_first", "reply": "正在切换。"},
             {"intent": "SUBMIT_RUN", "reply": "重新开始运行。"},
@@ -254,6 +255,15 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
 
     assert runtime.run_store is not None
     runtime.run_store.mark_failed(submitted["run"]["id"], "test failure")
+    rerun = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="重新跑"
+    )
+    assert rerun["run"]["id"] != submitted["run"]["id"]
+    assert rerun["run"]["pipeline_version_id"] == submitted["run"][
+        "pipeline_version_id"
+    ]
+    runtime.run_store.mark_failed(rerun["run"]["id"], "rerun test failure")
+
     switch_help = service.send(
         thread_id=conversation["id"], owner_id="user_1", content="换个 Pipeline"
     )
@@ -302,7 +312,60 @@ def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) 
         assert "builtin.quality_filter:1" not in {
             node["operator_version_id"] for node in pipeline["nodes"]
         }
-    assert gateway.calls == 13
+    assert gateway.calls == 14
+
+
+def test_confirmed_task_spec_can_recompile_with_current_catalog(tmp_path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            _start_work_order(source, "筛选清晰图片并去重"),
+            {
+                "intent": "EDIT_TASK_SPEC",
+                "action": "accept_defaults",
+                "confirm_after_edit": True,
+            },
+            {"intent": "SELECT_PIPELINE", "strategy": "balanced"},
+        ]
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"筛选清晰图片并去重',
+    )
+    candidates = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="按推荐值确认"
+    )
+    old_ids = {
+        item["id"] for item in candidates["turn"]["state"]["representative_pipelines"]
+    }
+    ready = service.send(
+        thread_id=conversation["id"], owner_id="user_1", content="均衡"
+    )
+
+    recompiled = runtime.recompile_pipeline_candidates(
+        work_order_id=ready["work_order_id"], owner_id="user_1"
+    )
+
+    assert recompiled["interrupts"][0]["value"]["kind"] == "pipeline_approval"
+    new_ids = {
+        item["id"]
+        for item in recompiled["turn"]["state"]["representative_pipelines"]
+    } if "turn" in recompiled else {
+        item["id"] for item in recompiled["state"]["representative_pipelines"]
+    }
+    assert new_ids.isdisjoint(old_ids)
+    assert gateway.calls == 3
 
 
 def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) -> None:

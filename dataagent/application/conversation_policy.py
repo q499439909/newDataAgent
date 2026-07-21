@@ -117,4 +117,36 @@ def validate_conversation_action(
                 allowed_actions=allowed,
             )
 
+    latest_run = context.get("latest_run") or {}
+    if action.intent == ConversationIntent.RETRY_RUN and latest_run.get(
+        "status"
+    ) != "FAILED":
+        return ActionPolicyViolation(
+            code="RUN_IS_NOT_RETRYABLE",
+            message="RETRY_RUN requires the latest Run to be FAILED",
+            allowed_actions=allowed,
+        )
+
+    if action.intent == ConversationIntent.RERUN_PIPELINE:
+        eligibility = context.get("latest_run_pipeline_eligibility") or {}
+        qc_report = context.get("latest_qc_report") or {}
+        if eligibility.get("eligible") is False:
+            return ActionPolicyViolation(
+                code="PIPELINE_RECOMPILE_REQUIRED",
+                message=(
+                    "The previous Pipeline is no longer eligible. Use "
+                    "RECOMPILE_PIPELINE with the current Catalog instead of rerunning it."
+                ),
+                allowed_actions=allowed,
+            )
+        if qc_report.get("semantic_quality_verified") is False:
+            return ActionPolicyViolation(
+                code="SEMANTIC_RECOMPILE_REQUIRED",
+                message=(
+                    "The previous Run did not verify required semantic outputs. Use "
+                    "RECOMPILE_PIPELINE instead of repeating the same Pipeline."
+                ),
+                allowed_actions=allowed,
+            )
+
     return None

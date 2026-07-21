@@ -94,6 +94,9 @@ class ConversationService:
             {"role": item["role"], "content": item["content"]} for item in history
         ]
         context = self._control_context(thread, owner_id)
+        context["execution_request_id"] = (
+            f"{thread_id}:{history[-1]['sequence']}"
+        )
 
         current_content = content
         decision: ConversationAction | None = None
@@ -552,6 +555,59 @@ class ConversationService:
                 "你可以说“开始运行”提交一个新 Run。"
             )
             return base
+        if decision.intent == ConversationIntent.RECOMPILE_PIPELINE:
+            turn = self.agent_runtime.recompile_pipeline_candidates(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+            context.pop("active_run_id", None)
+            self.store.update(
+                thread_id=thread["id"], owner_id=owner_id, context=context
+            )
+            base["turn"] = turn
+            base["reply"] = (
+                "已沿用当前确认的 TaskSpec，并使用最新 Catalog 重新检索和编译。"
+                + self._turn_reply(turn, True)
+            )
+            return base
+        if decision.intent in {
+            ConversationIntent.RETRY_RUN,
+            ConversationIntent.RERUN_PIPELINE,
+        }:
+            previous_run = self._current_run(work_order_id, owner_id, context)
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id, owner_id=owner_id
+            )
+            state = turn["state"]
+            if state.get("selected_pipeline_id") != previous_run.get(
+                "pipeline_version_id"
+            ):
+                raise ValueError(
+                    "The currently selected Pipeline differs from the latest Run; "
+                    "select or recompile a Pipeline before submitting"
+                )
+            request_id = str(
+                (control_context or {}).get("execution_request_id")
+                or new_id("execution_request")
+            )
+            run = self.agent_runtime.submit_dataset_run(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                idempotency_key=(
+                    f"conversation-{decision.intent.value.lower()}-"
+                    + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
+                ),
+            )
+            context["active_run_id"] = run["id"]
+            self.store.update(
+                thread_id=thread["id"], owner_id=owner_id, context=context
+            )
+            base["run"] = run
+            base["reply"] = (
+                f"已基于 Run {previous_run['id']} 创建新的执行 Run {run['id']}，"
+                f"当前状态是 {run['status']}。"
+            )
+            return base
         if decision.intent == ConversationIntent.SUBMIT_RUN:
             turn = self.agent_runtime.state(
                 work_order_id=work_order_id, owner_id=owner_id
@@ -559,7 +615,10 @@ class ConversationService:
             state = turn["state"]
             identity = ":".join(
                 (
-                    thread["id"],
+                    str(
+                        (control_context or {}).get("execution_request_id")
+                        or thread["id"]
+                    ),
                     str(state.get("selected_pipeline_id", "")),
                     str(state.get("task_spec", {}).get("id", "")),
                 )
@@ -741,7 +800,13 @@ class ConversationService:
                             owner_id=owner_id,
                         )
                     )
-                except (KeyError, RuntimeError):
+                    context["latest_run_pipeline_eligibility"] = (
+                        self.agent_runtime.pipeline_version_eligibility(
+                            pipeline_version_id=runs[0]["pipeline_version_id"],
+                            owner_id=owner_id,
+                        )
+                    )
+                except (KeyError, RuntimeError, ValueError):
                     logger.warning(
                         "Pipeline version %s for Run %s could not be loaded",
                         runs[0].get("pipeline_version_id"),
@@ -759,6 +824,15 @@ class ConversationService:
                         )
                     except (KeyError, RuntimeError, ValueError) as exc:
                         context["dataset_lookup_error"] = str(exc)
+                qc_report_id = runs[0].get("qc_report_id")
+                if qc_report_id:
+                    try:
+                        context["latest_qc_report"] = self.agent_runtime.get_qc_report(
+                            qc_report_id=qc_report_id,
+                            owner_id=owner_id,
+                        )
+                    except (KeyError, RuntimeError, ValueError) as exc:
+                        context["qc_report_lookup_error"] = str(exc)
         context["allowed_actions"] = list(self._allowed_actions(context))
         return context
 
