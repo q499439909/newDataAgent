@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import re
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +19,19 @@ from .agent_runtime import AgentRuntime
 logger = logging.getLogger(__name__)
 
 
-class ConversationIntent(StrEnum):
+# Maximum ReAct iterations within a single user turn. The model gets up to
+# this many chances to correct itself after a control-plane action fails (e.g.
+# an invalid data-source path) before the last reply is shown to the user.
+_MAX_REACT_ITERATIONS = 4
+
+
+class ConversationIntent:
+    """Vocabulary the model uses to select a control-plane action.
+
+    Kept as plain string constants (not an Enum) because the model emits them
+    as JSON values; ConversationDecision validates them loosely.
+    """
+
     CHAT = "CHAT"
     START_WORK_ORDER = "START_WORK_ORDER"
     PROVIDE_SOURCE = "PROVIDE_SOURCE"
@@ -36,10 +46,28 @@ class ConversationIntent(StrEnum):
     RESELECT_PIPELINE = "RESELECT_PIPELINE"
 
 
+_VALID_INTENTS = frozenset(
+    {
+        ConversationIntent.CHAT,
+        ConversationIntent.START_WORK_ORDER,
+        ConversationIntent.PROVIDE_SOURCE,
+        ConversationIntent.EDIT_TASK_SPEC,
+        ConversationIntent.APPROVE,
+        ConversationIntent.REJECT,
+        ConversationIntent.SUBMIT_RUN,
+        ConversationIntent.RUN_STATUS,
+        ConversationIntent.CONTROL_RUN,
+        ConversationIntent.QUERY_CONTROL_FACTS,
+        ConversationIntent.RESOLVE_GAP,
+        ConversationIntent.RESELECT_PIPELINE,
+    }
+)
+
+
 class ConversationDecision(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    intent: ConversationIntent = ConversationIntent.CHAT
+    intent: str = ConversationIntent.CHAT
     reply: str = ""
     requirement: str | None = None
     source: str | None = None
@@ -48,11 +76,25 @@ class ConversationDecision(BaseModel):
     runtime_backend: str | None = None
     task_spec_patch: dict[str, Any] | None = None
     confirm_after_edit: bool = False
-    resolved_by: str = "deterministic"
+    resolved_by: str = "model"
     fallback_reason: str | None = None
+
+    @property
+    def is_valid_intent(self) -> bool:
+        return self.intent in _VALID_INTENTS
 
 
 class ConversationService:
+    """Conversational control plane.
+
+    The model is the *primary* decider: every user message is sent to the
+    gateway with the current control-plane context, and the model selects an
+    intent plus structured arguments (including the data-source ``source``
+    path and the ``requirement`` text). A bounded ReAct loop feeds
+    control-plane failures back to the model so it can self-correct or ask
+    the user a precise follow-up within the same turn.
+    """
+
     def __init__(
         self,
         *,
@@ -95,23 +137,51 @@ class ConversationService:
             thread_id=thread_id, owner_id=owner_id, role="user", content=content
         )
         history = self.store.messages(thread_id, owner_id)
-        control_context = self._control_context(thread, owner_id)
-        decision = self._decide(content, history, control_context)
-        response = self._apply(
-            thread=thread,
-            owner_id=owner_id,
-            content=content,
-            decision=decision,
-        )
+        # ReAct working history: seeded from persisted messages, extended in
+        # memory with intermediate assistant + system-feedback turns. Only the
+        # original user message and the final assistant reply are persisted.
+        conversation_history = [
+            {"role": item["role"], "content": item["content"]} for item in history
+        ]
+        context = self._control_context(thread, owner_id)
+
+        current_content = content
+        decision = None
+        response: dict[str, Any] = {"reply": "我在。", "turn": None, "run": None}
+        for iteration in range(_MAX_REACT_ITERATIONS):
+            decision = self._decide(current_content, conversation_history, context)
+            response = self._apply(
+                thread=thread,
+                owner_id=owner_id,
+                content=current_content,
+                decision=decision,
+                control_context=context,
+            )
+            feedback = response.pop("_react_feedback", None)
+            if not feedback or iteration == _MAX_REACT_ITERATIONS - 1:
+                break
+            # Feed the control-plane failure back to the model so it can
+            # self-correct or ask the user a precise follow-up.
+            conversation_history.append(
+                {"role": "assistant", "content": decision.reply or response.get("reply", "")}
+            )
+            feedback_message = f"[系统反馈] {feedback}"
+            conversation_history.append({"role": "user", "content": feedback_message})
+            current_content = feedback_message
+            # State may have changed (e.g. context popped); refresh both.
+            thread = self.store.get(thread_id, owner_id)
+            context = self._control_context(thread, owner_id)
+
+        resolved_by = (decision or ConversationDecision()).resolved_by
         self.store.add_message(
             thread_id=thread_id,
             owner_id=owner_id,
             role="assistant",
             content=response["reply"],
-            intent=decision.intent,
-            model=decision.resolved_by,
+            intent=(decision.intent if decision else ConversationIntent.CHAT),
+            model=resolved_by,
         )
-        if decision.fallback_reason:
+        if decision is not None and decision.fallback_reason:
             latest = self.store.get(thread_id, owner_id)
             latest_context = dict(latest["context"])
             diagnostics = dict(latest_context.get("conversation_runtime", {}))
@@ -141,40 +211,14 @@ class ConversationService:
         history: list[dict[str, Any]],
         context: dict[str, Any],
     ) -> ConversationDecision:
-        source_decision = self._source_or_pending_task_decision(content, context)
-        if source_decision is not None:
-            return source_decision
-        resolution_decision = self._pending_resolution_decision(content, context)
-        if resolution_decision is not None:
-            return resolution_decision
-        task_spec_decision = self._task_spec_details_decision(content, context)
-        if task_spec_decision is not None:
-            return task_spec_decision
-        revision_decision = self._confirmed_task_revision_decision(content, context)
-        if revision_decision is not None:
-            return revision_decision
-        clarification_decision = self._pending_clarification_decision(content, context)
-        if clarification_decision is not None:
-            return clarification_decision
-        pipeline_decision = self._pipeline_details_decision(content, context)
-        if pipeline_decision is not None:
-            return pipeline_decision
-        fact_decision = self._control_fact_query_decision(content, context)
-        if fact_decision is not None:
-            return fact_decision
-        approval_decision = self._pending_pipeline_approval_decision(content, context)
-        if approval_decision is not None:
-            return approval_decision
-        reselection_decision = self._pipeline_reselection_decision(content, context)
-        if reselection_decision is not None:
-            return reselection_decision
-        submission_decision = self._pending_run_submission_decision(content, context)
-        if submission_decision is not None:
-            return submission_decision
-        fast = self._fast_decision(content)
-        if fast is not None:
-            return fast
-        fallback = self._fallback_decision(content, context)
+        """Ask the model to decide intent + structured arguments.
+
+        The model is consulted first; there is no keyword cascade that
+        pre-empts it. Paths and requirements are extracted by the model as
+        structured ``source`` / ``requirement`` fields, so quoted,
+        Chinese-adjacent, or multi-path inputs are handled naturally.
+        """
+        fallback = self._fallback_decision(content)
         if not self.gateway.configured:
             return fallback.model_copy(
                 update={
@@ -209,6 +253,9 @@ class ConversationService:
                     "fallback_reason": reason,
                 }
             )
+        if not decision.is_valid_intent:
+            logger.warning("Model returned unknown intent %r; treating as CHAT", decision.intent)
+            decision = decision.model_copy(update={"intent": ConversationIntent.CHAT})
         ungrounded_ids = self._ungrounded_control_identifiers(decision.reply, context)
         if decision.intent == ConversationIntent.CHAT and ungrounded_ids:
             reason = "ungrounded_control_identifiers:" + ",".join(ungrounded_ids)
@@ -222,98 +269,7 @@ class ConversationService:
                 resolved_by="control-fact-guard",
                 fallback_reason=reason,
             )
-        if decision.intent == ConversationIntent.START_WORK_ORDER:
-            requirement = decision.requirement or content
-            if not self._looks_like_data_requirement(requirement):
-                return decision.model_copy(update={"intent": ConversationIntent.CHAT})
-        if decision.intent == ConversationIntent.PROVIDE_SOURCE and not context.get(
-            "pending_requirement"
-        ):
-            return decision.model_copy(update={"intent": ConversationIntent.CHAT})
-        if (
-            context.get("agent_state", {}).get("waiting")
-            == "task_spec_confirmation"
-            and decision.intent == ConversationIntent.APPROVE
-            and not self._is_explicit_approval(content)
-        ):
-            return decision.model_copy(
-                update={
-                    "intent": ConversationIntent.EDIT_TASK_SPEC,
-                    "reply": "我会先把这段补充写入 TaskSpec，再请你确认。",
-                    "task_spec_patch": decision.task_spec_patch
-                    or {"semantic_requirements": [content]},
-                }
-            )
         return decision
-
-    @staticmethod
-    def _ungrounded_control_identifiers(
-        reply: str, context: dict[str, Any]
-    ) -> tuple[str, ...]:
-        identifiers = set(
-            re.findall(
-                r"\b(?:run|pipeline_version|work_order|spec)_[A-Za-z0-9]+\b",
-                reply,
-                flags=re.IGNORECASE,
-            )
-        )
-        if not identifiers:
-            return ()
-        grounded_context = json.dumps(context, ensure_ascii=False, sort_keys=True)
-        return tuple(sorted(item for item in identifiers if item not in grounded_context))
-
-    def _fast_decision(self, content: str) -> ConversationDecision | None:
-        normalized = content.strip().lower().strip("!！。,.，~～ ")
-        if normalized in {"你好", "您好", "嗨", "hi", "hello", "hey"}:
-            return ConversationDecision(
-                reply="你好，我是 DataAgent。你可以直接问我问题，也可以描述图片数据任务。"
-            )
-        if normalized in {"你是谁", "你叫什么", "who are you"}:
-            return ConversationDecision(
-                reply="我是 DataAgent，负责把图片数据需求规划、执行并评测成可追溯的数据版本。"
-            )
-        if any(
-            token in normalized
-            for token in (
-                "怎么使用",
-                "如何使用",
-                "怎么用",
-                "能做什么",
-                "帮助",
-                "how to use",
-                "how do i use",
-                "what can you do",
-                "help",
-            )
-        ):
-            return ConversationDecision(
-                reply=(
-                    "直接描述你的图片数据目标即可，例如“筛选清晰人像并去重”。"
-                    "我会在信息不足时追问目录和约束，方案确认后再运行，不需要记命令。"
-                )
-            )
-        if any(
-            token in normalized
-            for token in ("什么模型", "哪个模型", "what model", "which model")
-        ):
-            return ConversationDecision(
-                reply=(
-                    f"当前普通对话由 {self.settings.fast_text_model} 处理，"
-                    f"复杂规划由 {self.settings.planning_model} 处理。"
-                )
-            )
-        if self._is_explicit_approval(content):
-            return ConversationDecision(
-                intent=ConversationIntent.APPROVE,
-                reply="正在确认。",
-            )
-        if normalized in {"谢谢", "感谢", "thanks", "thank you"}:
-            return ConversationDecision(reply="不客气。继续说你的需求就好。")
-        if normalized in {"好", "好的", "知道了", "明白了", "收到"}:
-            return ConversationDecision(reply="好的。")
-        if normalized in {"再见", "拜拜", "bye", "goodbye"}:
-            return ConversationDecision(reply="再见。下次可以用 conversation ID 接着这段任务继续。")
-        return None
 
     def _apply(
         self,
@@ -322,6 +278,7 @@ class ConversationService:
         owner_id: str,
         content: str,
         decision: ConversationDecision,
+        control_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         context = dict(thread["context"])
         work_order_id = thread.get("work_order_id")
@@ -340,22 +297,44 @@ class ConversationService:
             base["reply"] = "当前还没有工单。请先告诉我需要生产什么图片数据。"
             return base
         if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
-            if "run" in (decision.action or "").split(","):
-                base["run"] = self._current_run(work_order_id, owner_id, context)
+            facts_context = control_context or context
+            facets = {
+                item.strip()
+                for item in (decision.action or "").split(",")
+                if item.strip()
+            }
+            facts_reply = ConversationService._control_facts_reply(facts_context, facets)
+            if facts_reply:
+                base["reply"] = facts_reply
+            if "run" in facets:
+                try:
+                    base["run"] = self._current_run(work_order_id, owner_id, context)
+                except (KeyError, ValueError):
+                    pass
             return base
         if decision.intent == ConversationIntent.EDIT_TASK_SPEC:
             turn = self.agent_runtime.state(
                 work_order_id=work_order_id, owner_id=owner_id
             )
-            patch = decision.task_spec_patch or {
-                "semantic_requirements": [content]
-            }
             waiting_for_spec = bool(
                 turn["interrupts"]
                 and turn["interrupts"][0]["value"].get("kind")
                 == "task_spec_confirmation"
             )
             if waiting_for_spec:
+                interrupt_value = turn["interrupts"][0]["value"]
+                interrupt_spec = (
+                    interrupt_value.get("task_spec")
+                    or turn["state"].get("task_spec")
+                    or {}
+                )
+                ambiguities = tuple(interrupt_spec.get("ambiguities") or ())
+                if decision.action == "accept_defaults":
+                    patch = recommended_clarification_patch(ambiguities)
+                else:
+                    patch = decision.task_spec_patch or {
+                        "semantic_requirements": [content]
+                    }
                 turn = self.agent_runtime.resume(
                     work_order_id=work_order_id,
                     owner_id=owner_id,
@@ -366,6 +345,9 @@ class ConversationService:
                     },
                 )
             elif turn["state"].get("task_spec", {}).get("confirmed"):
+                patch = decision.task_spec_patch or {
+                    "semantic_requirements": [content]
+                }
                 turn = self.agent_runtime.revise_task_spec(
                     work_order_id=work_order_id,
                     owner_id=owner_id,
@@ -563,39 +545,61 @@ class ConversationService:
             response["reply"] = "需求我记下了。图片目前放在哪个本地目录？"
         else:
             path = Path(source).expanduser().resolve()
-            if not path.is_dir():
-                context.pop("pending_source", None)
-                response["reply"] = f"目录不存在或不是文件夹：{path}。请提供一个可访问的图片目录。"
-            else:
-                turn = self.agent_runtime.start(
-                    owner_id=owner_id,
-                    requirement=requirement,
-                    data_sources=[
-                        {"type": "local_directory", "uri": str(path), "mapping": {}}
-                    ],
-                )
-                context.pop("pending_requirement", None)
+            if not path.exists():
+                # Do not hard-reject: surface the failure back to the model so
+                # it can ask the user for the correct path within this turn.
                 context.pop("pending_source", None)
                 self.store.update(
-                    thread_id=thread["id"],
-                    owner_id=owner_id,
-                    context=context,
-                    work_order_id=turn["work_order_id"],
+                    thread_id=thread["id"], owner_id=owner_id, context=context
                 )
-                response["turn"] = turn
-                task_spec = turn["state"].get("task_spec", {})
-                if task_spec.get("ambiguities"):
-                    response["reply"] = (
-                        f"已创建工单 {turn['work_order_id']}。"
-                        "在确认 TaskSpec 前，还需要你补充以下信息：\n\n"
-                        + self._clarification_reply(task_spec, include_intro=False)
-                    )
-                else:
-                    response["reply"] = (
-                        f"已创建工单 {turn['work_order_id']}。我生成了 TaskSpec 草案，"
-                        "现在等你确认；你可以先问我草案内容，也可以直接说“确认”。"
-                    )
+                response["reply"] = f"找不到这个路径：{path}。请提供一个可访问的图片目录。"
+                response["_react_feedback"] = (
+                    f"用户提供的 source 路径不存在：{path}"
+                    f"（source={source!r}）。请向用户确认正确的图片目录路径，"
+                    "不要重复使用这个无效路径。"
+                )
                 return response
+            if not path.is_dir():
+                context.pop("pending_source", None)
+                self.store.update(
+                    thread_id=thread["id"], owner_id=owner_id, context=context
+                )
+                response["reply"] = f"这个路径不是文件夹：{path}。图片数据需要是一个目录。"
+                response["_react_feedback"] = (
+                    f"用户提供的 source 不是目录而是文件：{path}"
+                    f"（source={source!r}）。请向用户说明需要图片目录，"
+                    "并请用户提供目录路径。"
+                )
+                return response
+            turn = self.agent_runtime.start(
+                owner_id=owner_id,
+                requirement=requirement,
+                data_sources=[
+                    {"type": "local_directory", "uri": str(path), "mapping": {}}
+                ],
+            )
+            context.pop("pending_requirement", None)
+            context.pop("pending_source", None)
+            self.store.update(
+                thread_id=thread["id"],
+                owner_id=owner_id,
+                context=context,
+                work_order_id=turn["work_order_id"],
+            )
+            response["turn"] = turn
+            task_spec = turn["state"].get("task_spec", {})
+            if task_spec.get("ambiguities"):
+                response["reply"] = (
+                    f"已创建工单 {turn['work_order_id']}。"
+                    "在确认 TaskSpec 前，还需要你补充以下信息：\n\n"
+                    + self._clarification_reply(task_spec, include_intro=False)
+                )
+            else:
+                response["reply"] = (
+                    f"已创建工单 {turn['work_order_id']}。我生成了 TaskSpec 草案，"
+                    "现在等你确认；你可以先问我草案内容，也可以直接说“确认”。"
+                )
+            return response
         self.store.update(
             thread_id=thread["id"], owner_id=owner_id, context=context
         )
@@ -758,140 +762,42 @@ class ConversationService:
         }
 
     @staticmethod
-    def _task_spec_details_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        normalized = content.strip().lower()
-        asks_for_spec = normalized in {"草案内容", "查看草案", "任务草案"} or (
-            "taskspec" in normalized
-            and any(token in normalized for token in ("内容", "详情", "查看", "show"))
+    def _ungrounded_control_identifiers(
+        reply: str, context: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Block control-plane IDs the model mentions that are not in context.
+
+        Grounded IDs are taken from the actual control-plane context (work
+        order, runs, pipelines, task spec) rather than a hardcoded regex
+        prefix set, so new ID namespaces are covered automatically.
+        """
+        import re
+
+        identifiers = set(
+            re.findall(
+                r"\b(?:run|pipeline_version|work_order|spec)_[A-Za-z0-9]+\b",
+                reply,
+                flags=re.IGNORECASE,
+            )
         )
-        task_spec = context.get("task_spec")
-        if not asks_for_spec or not task_spec:
-            return None
-        return ConversationDecision(
-            intent=ConversationIntent.CHAT,
-            reply=ConversationService._task_spec_details_reply(task_spec),
-        )
+        if not identifiers:
+            return ()
+        grounded_context = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        return tuple(sorted(item for item in identifiers if item not in grounded_context))
 
     @staticmethod
-    def _control_fact_query_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        normalized = content.strip().lower().replace(" ", "")
-        query_markers = (
-            "什么",
-            "哪个",
-            "哪些",
-            "哪条",
-            "哪一个",
-            "在哪",
-            "哪里",
-            "多少",
-            "用的",
-            "用了",
-            "当前",
-            "现在",
-            "查看",
-            "展示",
-            "告诉我",
-            "状态",
-            "进度",
-            "情况",
-            "详情",
-            "怎么样",
-            "为什么",
-            "为何",
-            "到哪",
-        )
-        contradicts_output = "没有" in normalized and any(
-            token in normalized for token in ("文件夹", "目录", "路径", "文件")
-        )
-        is_question = (
-            any(marker in normalized for marker in query_markers)
-            or normalized in {"完整路径", "输出路径", "结果路径"}
-            or contradicts_output
-            or (
-            normalized.endswith(("?", "？", "吗", "呢"))
-            )
-        )
-        if not is_question:
-            return None
+    def _control_facts_reply(
+        context: dict[str, Any], facets: frozenset[str] | set[str]
+    ) -> str:
+        """Render grounded control-plane facts for the requested facets.
 
-        asks_pipeline = any(
-            token in normalized for token in ("pipeline", "流水线", "方案")
-        )
-        asks_operators = any(
-            token in normalized for token in ("算子", "节点", "算子顺序")
-        )
-        asks_task_spec = any(
-            token in normalized
-            for token in (
-                "taskspec",
-                "任务规格",
-                "需求草案",
-                "数据源",
-                "约束",
-                "需求是什么",
-                "任务是什么",
-                "任务目标",
-            )
-        )
-        asks_work_order = "工单" in normalized and any(
-            token in normalized for token in ("id", "编号", "哪个", "当前")
-        )
-        asks_run = any(token in normalized for token in ("进度", "状态")) or any(
-            token in normalized
-            for token in (
-                "运行情况",
-                "run情况",
-                "运行怎么样",
-                "run怎么样",
-                "跑到哪",
-                "运行到哪",
-                "run到哪",
-                "在运行吗",
-                "在跑吗",
-                "完成了吗",
-                "跑了多少",
-                "处理了多少",
-            )
-        )
-        asks_dataset = any(
-            token in normalized
-            for token in (
-                "输出",
-                "结果",
-                "数据集",
-                "dataset",
-                "manifest",
-                "清单",
-                "完整路径",
-                "文件夹",
-                "发布到",
-                "存到",
-                "分类后",
-            )
-        ) or contradicts_output
-        asks_outcome_explanation = any(
-            token in normalized for token in ("为什么", "为何", "怎么会")
-        ) and any(
-            token in normalized
-            for token in ("保留", "拒绝", "分类", "unknown", "未知")
-        )
-        if not any(
-            (
-                asks_pipeline,
-                asks_operators,
-                asks_task_spec,
-                asks_work_order,
-                asks_run,
-                asks_dataset,
-                asks_outcome_explanation,
-            )
-        ):
-            return None
-
+        The model selects which facets to show (``action`` =
+        comma-separated facets); the reply text is built entirely from real
+        control-plane state, so it cannot hallucinate IDs or counts.
+        """
+        facets = frozenset(facets)
+        if not facets:
+            return ""
         lines: list[str] = []
         latest_run = context.get("latest_run") or {}
         approved_pipeline = context.get("approved_pipeline") or {}
@@ -904,12 +810,19 @@ class ConversationService:
             "CANCELLING",
             "EVALUATING",
         }
+        asks_work_order = "work_order" in facets
+        asks_run = "run" in facets
+        asks_pipeline = "pipeline" in facets
+        asks_operators = "operators" in facets
+        asks_task_spec = "task_spec" in facets
+        asks_dataset = "dataset" in facets
+        asks_outcome = "outcome" in facets
         pipeline = (
             run_pipeline
             if asks_dataset
-            or asks_outcome_explanation
+            or asks_outcome
             or latest_run.get("status") in active_statuses
-            or any(token in normalized for token in ("run", "运行", "跑"))
+            or asks_run
             else approved_pipeline or run_pipeline
         )
 
@@ -952,32 +865,65 @@ class ConversationService:
                 if task_spec
                 else "当前还没有 TaskSpec。"
             )
-        if asks_dataset or asks_outcome_explanation:
+        if asks_dataset or asks_outcome:
             lines.append(
                 ConversationService._dataset_result_reply(
                     context.get("latest_dataset"),
                     pipeline=pipeline,
-                    explain=asks_outcome_explanation,
+                    explain=asks_outcome,
                     lookup_error=context.get("dataset_lookup_error"),
                 )
             )
-        facets = [
-            name
-            for name, requested in (
-                ("work_order", asks_work_order),
-                ("run", asks_run),
-                ("pipeline", asks_pipeline),
-                ("operators", asks_operators),
-                ("task_spec", asks_task_spec),
-                ("dataset", asks_dataset or asks_outcome_explanation),
-            )
-            if requested
+        return "\n".join(lines)
+
+    @staticmethod
+    def _task_spec_details_reply(task_spec: dict[str, Any]) -> str:
+        sources = ", ".join(
+            str(item.get("uri", "-")) for item in task_spec.get("data_sources", [])
+        ) or "-"
+        capabilities = [
+            str(item.get("capability", item.get("id", "-")))
+            for item in task_spec.get("capability_requirements", [])
         ]
-        return ConversationDecision(
-            intent=ConversationIntent.QUERY_CONTROL_FACTS,
-            reply="\n".join(lines),
-            action=",".join(facets),
+        lines = [
+            "### 当前 TaskSpec",
+            f"- 版本：`{task_spec.get('version', '-')}`",
+            f"- 目标：{task_spec.get('objective', '-')}",
+            f"- 数据源：`{sources}`",
+            "- 输出动作："
+            + (", ".join(task_spec.get("output_actions", [])) or "无"),
+            "- 能力需求：" + (", ".join(capabilities) or "无"),
+            "- 硬约束：`"
+            + json.dumps(
+                task_spec.get("hard_constraints", {}),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "`",
+            "- 语义需求："
+            + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
+            "- 排除需求："
+            + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
+            "- 待澄清："
+            + ("；".join(task_spec.get("ambiguities", [])) or "无"),
+            f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _clarification_reply(
+        task_spec: dict[str, Any], *, include_intro: bool = True
+    ) -> str:
+        ambiguities = task_spec.get("ambiguities") or []
+        lines = ["当前 TaskSpec 仍有待澄清项："] if include_intro else []
+        lines.extend(
+            f"{index}. {question}" for index, question in enumerate(ambiguities, 1)
         )
+        lines.append(
+            "请直接回答这些问题；也可以说“按推荐默认值”，"
+            "我会写入新版本后再请你确认。"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _dataset_result_reply(
@@ -1048,255 +994,6 @@ class ConversationService:
         return "\n".join(lines)
 
     @staticmethod
-    def _confirmed_task_revision_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        task_spec = context.get("task_spec") or {}
-        if not task_spec.get("confirmed"):
-            return None
-        normalized = content.strip().lower().replace(" ", "")
-        remove_quality = any(
-            token in normalized
-            for token in (
-                "不筛选清晰度",
-                "不要筛选清晰度",
-                "取消清晰度筛选",
-                "去掉清晰度筛选",
-                "不检查清晰度",
-                "不要清晰度",
-            )
-        )
-        if not remove_quality:
-            return None
-        return ConversationDecision(
-            intent=ConversationIntent.EDIT_TASK_SPEC,
-            reply="正在生成不包含清晰度过滤的新 TaskSpec 版本。",
-            task_spec_patch={
-                "hard_constraints": {
-                    "disabled_capabilities": ["image_quality"]
-                }
-            },
-        )
-
-    @staticmethod
-    def _task_spec_details_reply(task_spec: dict[str, Any]) -> str:
-        sources = ", ".join(
-            str(item.get("uri", "-")) for item in task_spec.get("data_sources", [])
-        ) or "-"
-        capabilities = [
-            str(item.get("capability", item.get("id", "-")))
-            for item in task_spec.get("capability_requirements", [])
-        ]
-        lines = [
-            "### 当前 TaskSpec",
-            f"- 版本：`{task_spec.get('version', '-')}`",
-            f"- 目标：{task_spec.get('objective', '-')}",
-            f"- 数据源：`{sources}`",
-            "- 输出动作："
-            + (", ".join(task_spec.get("output_actions", [])) or "无"),
-            "- 能力需求：" + (", ".join(capabilities) or "无"),
-            "- 硬约束：`"
-            + json.dumps(
-                task_spec.get("hard_constraints", {}),
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            + "`",
-            "- 语义需求："
-            + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
-            "- 排除需求："
-            + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
-            "- 待澄清："
-            + ("；".join(task_spec.get("ambiguities", [])) or "无"),
-            f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
-    def _clarification_reply(
-        task_spec: dict[str, Any], *, include_intro: bool = True
-    ) -> str:
-        ambiguities = task_spec.get("ambiguities") or []
-        lines = ["当前 TaskSpec 仍有待澄清项："] if include_intro else []
-        lines.extend(
-            f"{index}. {question}" for index, question in enumerate(ambiguities, 1)
-        )
-        lines.append(
-            "请直接回答这些问题；也可以说“按推荐默认值”，"
-            "我会写入新版本后再请你确认。"
-        )
-        return "\n".join(lines)
-
-    @staticmethod
-    def _pending_clarification_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        if context.get("agent_state", {}).get("waiting") != "task_spec_confirmation":
-            return None
-        task_spec = context.get("task_spec") or {}
-        ambiguities = tuple(task_spec.get("ambiguities") or ())
-        if not ambiguities:
-            return None
-        normalized = content.strip().lower().strip("!！。,.，~～ ")
-        review_defaults = {
-            "按推荐默认值",
-            "按默认值",
-            "使用默认值",
-            "采用默认值",
-            "按建议",
-            "用推荐值",
-        }
-        continue_with_defaults = {
-            "好",
-            "好的",
-            "可以",
-            "继续",
-            "确认",
-            "同意",
-            "是",
-            "yes",
-            "ok",
-        }
-        if normalized not in review_defaults | continue_with_defaults:
-            return ConversationService._clarification_answer_decision(
-                content, ambiguities
-            )
-        return ConversationDecision(
-            intent=ConversationIntent.EDIT_TASK_SPEC,
-            reply="正在将推荐默认值写入 TaskSpec。",
-            task_spec_patch=recommended_clarification_patch(ambiguities),
-            confirm_after_edit=normalized in continue_with_defaults,
-        )
-
-    @staticmethod
-    def _clarification_answer_decision(
-        content: str, ambiguities: tuple[str, ...]
-    ) -> ConversationDecision | None:
-        normalized = content.strip().lower()
-        if normalized.endswith(("?", "？")) or normalized.startswith(
-            ("为什么", "怎么", "如何", "什么", "能不能", "是否可以")
-        ):
-            return None
-
-        accepts_remaining_defaults = bool(
-            re.search(
-                r"(?:^|[。.!！,，;；\s])(?:好|好的|可以|同意)[。.!！,，;；\s]*$",
-                normalized,
-            )
-        )
-        patch: dict[str, Any] = {
-            "hard_constraints": {},
-            "preferences": {},
-            "semantic_requirements": [],
-            "exclusion_requirements": [],
-        }
-        exclusion_labels = {
-            "ai生成": "排除 AI 生成图片",
-            "插画": "排除插画",
-            "截图": "排除截图",
-            "明显合成": "排除明显合成图片",
-            "美颜": "排除重度美颜图片",
-            "滤镜": "排除重度滤镜图片",
-            "后期调色": "排除明显后期调色图片",
-        }
-        exclusions = [
-            label for token, label in exclusion_labels.items() if token in normalized
-        ]
-        if exclusions:
-            patch["hard_constraints"]["authenticity_scope"] = "；".join(exclusions)
-            patch["exclusion_requirements"].extend(exclusions)
-
-        preferences = patch["preferences"]
-        if "复核" in normalized:
-            preferences.update({"mixed_policy": "review", "unknown_policy": "review"})
-        elif "猫狗都有" in normalized:
-            preferences["mixed_policy"] = "keep"
-        if any(token in normalized for token in ("输出到", "分别输出", "文件夹", "目录")):
-            preferences["output_layout"] = "versioned_class_directories"
-        if any(
-            token in normalized
-            for token in ("源目录只读", "保持源目录", "不修改源", "复制到")
-        ):
-            patch["hard_constraints"]["preserve_source"] = True
-
-        has_explicit_answer = any(
-            bool(patch[key])
-            for key in (
-                "hard_constraints",
-                "preferences",
-                "semantic_requirements",
-                "exclusion_requirements",
-            )
-        )
-        if not has_explicit_answer:
-            return None
-
-        if accepts_remaining_defaults:
-            defaults = recommended_clarification_patch(ambiguities)
-            for key in ("hard_constraints", "preferences"):
-                merged = dict(defaults.get(key) or {})
-                merged.update(patch[key])
-                patch[key] = merged
-            for key in ("semantic_requirements", "exclusion_requirements"):
-                patch[key] = [*(defaults.get(key) or []), *patch[key]]
-
-        return ConversationDecision(
-            intent=ConversationIntent.EDIT_TASK_SPEC,
-            reply="正在把你的澄清写入 TaskSpec。",
-            task_spec_patch=patch,
-        )
-
-    @staticmethod
-    def _is_explicit_approval(content: str) -> bool:
-        normalized = content.strip().lower().strip("!！。.?？")
-        return normalized in {
-            "确认",
-            "通过",
-            "批准",
-            "同意",
-            "没问题",
-            "就这样",
-            "按这个执行",
-            "approve",
-            "approved",
-            "yes",
-        }
-
-    @staticmethod
-    def _pipeline_details_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        normalized = content.strip().lower()
-        asks_for_pipeline = "pipeline" in normalized or "流水线" in normalized
-        asks_for_operator = any(
-            token in normalized
-            for token in ("什么算子", "哪些算子", "用了什么", "算子顺序", "什么顺序")
-        )
-        if not asks_for_operator and not (
-            asks_for_pipeline and any(token in normalized for token in ("具体", "详情", "节点"))
-        ):
-            return None
-        pipelines = context.get("pipeline_choices") or []
-        if not pipelines:
-            return None
-        compares_choices = (
-            context.get("agent_state", {}).get("waiting") == "pipeline_approval"
-            or any(
-                token in normalized
-                for token in ("三个", "各个", "分别", "候选", "可选", "每条")
-            )
-            or not (
-                context.get("approved_pipeline") or context.get("latest_run_pipeline")
-            )
-        )
-        if not compares_choices:
-            return None
-        return ConversationDecision(
-            intent=ConversationIntent.CHAT,
-            reply=ConversationService._pipeline_details_reply(pipelines),
-        )
-
-    @staticmethod
     def _pipeline_details_reply(pipelines: list[dict[str, Any]]) -> str:
         lines = ["以下是控制平面实际编译的算子流水线："]
         for pipeline in pipelines:
@@ -1358,281 +1055,6 @@ class ConversationService:
         return "\n".join(lines)
 
     @staticmethod
-    def _pipeline_reselection_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        latest_run = context.get("latest_run") or {}
-        if latest_run.get("status") not in {"FAILED", "SUCCEEDED", "CANCELLED"}:
-            return None
-        normalized = content.strip().lower().strip("!！。,.，~～ ")
-        strategies = {
-            "保留优先": "retention_first",
-            "均衡": "balanced",
-            "质量优先": "quality_first",
-            "retention_first": "retention_first",
-            "balanced": "balanced",
-            "quality_first": "quality_first",
-        }
-        if normalized in strategies:
-            return ConversationDecision(
-                intent=ConversationIntent.RESELECT_PIPELINE,
-                strategy=strategies[normalized],
-                reply="正在生成新的已批准 Pipeline 版本。",
-            )
-        asks_to_switch = any(token in normalized for token in ("换", "重选", "重新选")) and any(
-            token in normalized for token in ("pipeline", "方案", "流水线")
-        )
-        if not asks_to_switch:
-            return None
-        available = [
-            str(item.get("strategy"))
-            for item in context.get("pipeline_choices", [])
-            if (item.get("execution_eligibility") or {}).get("eligible") is not False
-        ]
-        return ConversationDecision(
-            intent=ConversationIntent.CHAT,
-            reply=(
-                "可以重新选择 Pipeline。请选择保留优先、均衡或质量优先；"
-                f"当前可选策略：{', '.join(available) or '无'}。"
-                "选择后我会先生成新的批准版本，不会直接复用旧 Run。"
-            ),
-        )
-
-    @staticmethod
-    def _pending_pipeline_approval_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        if context.get("agent_state", {}).get("waiting") != "pipeline_approval":
-            return None
-        normalized = content.strip().lower().replace(" ", "")
-        strategies = {
-            "保留优先": "retention_first",
-            "均衡": "balanced",
-            "质量优先": "quality_first",
-            "retention_first": "retention_first",
-            "balanced": "balanced",
-            "quality_first": "quality_first",
-        }
-        matches = [
-            strategy for label, strategy in strategies.items() if label in normalized
-        ]
-        if matches:
-            return ConversationDecision(
-                intent=ConversationIntent.APPROVE,
-                strategy=matches[0],
-                reply=f"正在批准 {matches[0]} Pipeline。",
-            )
-        if any(token in normalized for token in ("运行", "执行", "开始", "提交")):
-            return ConversationDecision(
-                intent=ConversationIntent.CHAT,
-                reply=(
-                    "当前还在 Pipeline 选择阶段。请先选择保留优先、均衡或质量优先；"
-                    "批准后再说“开始运行”。"
-                ),
-            )
-        return None
-
-    @staticmethod
-    def _pending_run_submission_decision(
-        content: str, context: dict[str, Any]
-    ) -> ConversationDecision | None:
-        agent_state = context.get("agent_state", {})
-        if agent_state.get("waiting") is not None or agent_state.get(
-            "next_action"
-        ) != "submit_dataset_run":
-            return None
-        normalized = content.strip().lower().replace(" ", "")
-        if not any(
-            token in normalized
-            for token in ("开始运行", "提交运行", "运行", "执行任务", "开始执行")
-        ):
-            return None
-        return ConversationDecision(
-            intent=ConversationIntent.SUBMIT_RUN,
-            reply="正在提交新的 Run。",
-        )
-
-    def _fallback_decision(
-        self, content: str, context: dict[str, Any]
-    ) -> ConversationDecision:
-        normalized = content.strip().lower().strip("!！。,.，~～ ")
-        if normalized in {"你好", "您好", "嗨", "hi", "hello", "hey"}:
-            return ConversationDecision(reply="你好，我是 DataAgent。你可以直接问我问题或描述数据任务。")
-        if any(token in normalized for token in ("怎么使用", "如何使用", "能做什么", "帮助")):
-            return ConversationDecision(
-                reply="你可以自然描述图片数据目标；信息不足时我会继续追问，确认后再创建和执行工单。"
-            )
-        if "什么模型" in normalized or "哪个模型" in normalized:
-            return ConversationDecision(
-                reply=(
-                    f"当前普通对话由 {self.settings.fast_text_model} 处理，"
-                    f"复杂规划由 {self.settings.planning_model} 处理。"
-                )
-            )
-        if context.get("pending_requirement") and self._looks_like_path(content):
-            return ConversationDecision(
-                intent=ConversationIntent.PROVIDE_SOURCE,
-                source=content,
-                reply="我来检查这个目录并创建工单。",
-            )
-        if normalized in {"确认", "同意", "批准", "approve", "yes"}:
-            return ConversationDecision(intent=ConversationIntent.APPROVE, reply="正在确认。")
-        if normalized in {"拒绝", "不同意", "reject", "no"}:
-            return ConversationDecision(intent=ConversationIntent.REJECT, reply="已记录拒绝。")
-        if any(token in normalized for token in ("开始运行", "提交运行", "执行任务")):
-            return ConversationDecision(intent=ConversationIntent.SUBMIT_RUN, reply="正在提交。")
-        if any(token in normalized for token in ("进度", "运行状态", "怎么样了")):
-            return ConversationDecision(intent=ConversationIntent.RUN_STATUS, reply="正在查询。")
-        for token, action in (("暂停", "pause"), ("恢复", "resume"), ("取消", "cancel")):
-            if token in normalized:
-                return ConversationDecision(
-                    intent=ConversationIntent.CONTROL_RUN, action=action, reply="正在处理。"
-                )
-        if self._looks_like_data_requirement(content):
-            return ConversationDecision(
-                intent=ConversationIntent.START_WORK_ORDER,
-                requirement=content,
-                reply="我先记录需求，再确认数据位置。",
-            )
-        return ConversationDecision(reply="我可以继续回答，也可以帮你创建图片数据生产任务。")
-
-    @classmethod
-    def _source_or_pending_task_decision(
-        cls,
-        content: str,
-        context: dict[str, Any],
-    ) -> ConversationDecision | None:
-        source, remainder = cls._extract_source(content)
-        if source:
-            if remainder and cls._looks_like_data_requirement(remainder):
-                return ConversationDecision(
-                    intent=ConversationIntent.START_WORK_ORDER,
-                    requirement=remainder,
-                    source=source,
-                    reply="我来检查目录并创建图片数据任务。",
-                )
-            return ConversationDecision(
-                intent=ConversationIntent.PROVIDE_SOURCE,
-                source=source,
-                reply="我来检查这个目录。",
-            )
-        normalized = content.strip().lower()
-        if context.get("pending_requirement") and any(
-            token in normalized
-            for token in ("创建数据处理任务", "创建任务", "开始创建", "create task")
-        ):
-            return ConversationDecision(
-                intent=ConversationIntent.START_WORK_ORDER,
-                requirement=str(context["pending_requirement"]),
-                source=context.get("pending_source"),
-                reply="我继续创建刚才的数据任务。",
-            )
-        return None
-
-    @staticmethod
-    def _pending_resolution_decision(
-        content: str,
-        context: dict[str, Any],
-    ) -> ConversationDecision | None:
-        if context.get("agent_state", {}).get("waiting") != "capability_resolution":
-            return None
-        normalized = content.strip().lower()
-        if normalized in {"1", "重试", "重新检索", "retry"}:
-            return ConversationDecision(
-                intent=ConversationIntent.RESOLVE_GAP,
-                action="retry",
-                reply="重新检索能力候选。",
-            )
-        if normalized in {"2", "启用远程", "使用远程", "remote"}:
-            return ConversationDecision(
-                intent=ConversationIntent.RESOLVE_GAP,
-                action="retry",
-                runtime_backend="remote",
-                reply="启用远程 Runtime 后重新检索。",
-            )
-        if normalized in {"3", "修改需求", "修改 taskspec", "revise"}:
-            return ConversationDecision(
-                intent=ConversationIntent.RESOLVE_GAP,
-                action="revise_task",
-                reply="返回 TaskSpec 修改阶段。",
-            )
-        if normalized in {"4", "终止工单", "终止任务", "terminate"}:
-            return ConversationDecision(
-                intent=ConversationIntent.RESOLVE_GAP,
-                action="terminate",
-                reply="终止当前工单。",
-            )
-        return None
-
-    @classmethod
-    def _extract_source(cls, content: str) -> tuple[str | None, str]:
-        quoted = re.search(
-            r"[\"'“”](?P<path>(?:[a-zA-Z]:[\\/]|\\\\|/)[^\"'“”\r\n]+)[\"'“”]",
-            content,
-        )
-        if quoted:
-            source = cls._normalize_source(quoted.group("path"))
-            remainder = (content[: quoted.start()] + content[quoted.end() :]).strip()
-            return source, remainder.lstrip("，,。.:：;；| ")
-
-        stripped = cls._normalize_source(content)
-        if cls._looks_like_path(stripped) and Path(stripped).is_dir():
-            return stripped, ""
-
-        compact = content.strip()
-        if cls._looks_like_path(compact):
-            for end in range(len(compact) - 1, 2, -1):
-                source = cls._normalize_source(compact[:end])
-                remainder = compact[end:].lstrip("，,。.:：;；| ")
-                if (
-                    remainder
-                    and cls._looks_like_data_requirement(remainder)
-                    and Path(source).is_dir()
-                ):
-                    return source, remainder
-
-        unquoted = re.match(
-            r"^(?P<path>(?:[a-zA-Z]:[\\/]|\\\\|/)\S+)(?:\s+|[，,;；|])(?P<rest>.+)$",
-            content.strip(),
-        )
-        if unquoted:
-            return (
-                cls._normalize_source(unquoted.group("path")),
-                unquoted.group("rest").strip(),
-            )
-        return None, content.strip()
-
-    @staticmethod
-    def _looks_like_data_requirement(content: str) -> bool:
-        return any(
-            token in content.lower()
-            for token in (
-                "图片",
-                "照片",
-                "图像",
-                "数据集",
-                "训练数据",
-                "筛选",
-                "过滤",
-                "去重",
-                "清洗",
-                "采样",
-                "标注",
-                "模糊",
-                "保留",
-            )
-        )
-
-    @staticmethod
-    def _looks_like_path(content: str) -> bool:
-        normalized = ConversationService._normalize_source(content)
-        return bool(re.match(r"^(?:[a-zA-Z]:[\\/]|/|\\\\)", normalized))
-
-    @staticmethod
-    def _normalize_source(content: str) -> str:
-        return content.strip().strip("\"'“”").strip()
-
-    @staticmethod
     def _normalize_strategy(strategy: str) -> str:
         return {
             "retain": "retention_first",
@@ -1690,4 +1112,19 @@ class ConversationService:
         return (
             f"Run {run['id']} 当前为 {run['status']}，进度 {run['progress']}/{run['total']}，"
             f"保留 {run['kept']}，拒绝 {run['rejected']}，失败 {run['failed']}。"
+        )
+
+    @staticmethod
+    def _normalize_source(content: str) -> str:
+        return content.strip().strip("\"'“”").strip()
+
+    def _fallback_decision(self, content: str) -> ConversationDecision:
+        """Generic non-mutating fallback when the model is unavailable.
+
+        The reply is overridden by the caller when a model failure occurs;
+        this just provides a neutral CHAT decision so the turn does not
+        mutate control-plane state.
+        """
+        return ConversationDecision(
+            reply="我可以继续回答，也可以帮你创建图片数据生产任务。"
         )
