@@ -38,6 +38,15 @@ class RunControlRequest(BaseModel):
     action: Literal["pause", "resume", "cancel"]
 
 
+class RunFeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    reusable: bool = False
+    rating: int | None = Field(default=None, ge=1, le=5)
+    comment: str = ""
+
+
 class ProviderExecuteRequestBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -415,6 +424,29 @@ def create_app(
         try:
             return agent_runtime.control_run(
                 run_id=run_id, owner_id=owner_id, action=request.action
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/feedback", status_code=status.HTTP_201_CREATED)
+    def record_dataset_run_feedback(
+        run_id: str,
+        request: RunFeedbackRequest,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.record_run_feedback(
+                run_id=run_id,
+                owner_id=owner_id,
+                accepted=request.accepted,
+                reusable=request.reusable,
+                rating=request.rating,
+                comment=request.comment,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

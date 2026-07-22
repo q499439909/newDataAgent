@@ -14,6 +14,22 @@ from dataagent.operators.providers import (
 )
 
 
+class _FeedbackRuntime:
+    conversation_store = None
+
+    def record_run_feedback(self, **kwargs):
+        return {
+            "feedback": {
+                "run_id": kwargs["run_id"],
+                "accepted": kwargs["accepted"],
+                "reusable": kwargs["reusable"],
+                "rating": kwargs["rating"],
+                "comment": kwargs["comment"],
+            },
+            "experience": {"status": "recommended"},
+        }
+
+
 def test_web_and_tui_can_share_and_resume_one_agent_thread() -> None:
     client = TestClient(create_app(AgentRuntime()))
     headers = {"X-Owner-ID": "user_1"}
@@ -76,6 +92,37 @@ def test_web_and_tui_can_share_and_resume_one_agent_thread() -> None:
     assert final["state"]["approved_pipeline"]["parent_version_id"] == balanced["id"]
     assert final["state"]["approved_pipeline"]["approved"] is True
     assert final["state"]["sampling_plan"]["random_seed"] == 42
+
+
+def test_run_feedback_api_records_satisfaction_and_reuse_intent() -> None:
+    client = TestClient(create_app(_FeedbackRuntime()))
+
+    response = client.post(
+        "/api/runs/run_1/feedback",
+        headers={"X-Owner-ID": "user_1"},
+        json={
+            "accepted": True,
+            "reusable": True,
+            "rating": 5,
+            "comment": "Useful result",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["feedback"]["rating"] == 5
+    assert response.json()["experience"]["status"] == "recommended"
+
+
+def test_run_feedback_api_validates_rating() -> None:
+    client = TestClient(create_app(_FeedbackRuntime()))
+
+    response = client.post(
+        "/api/runs/run_1/feedback",
+        headers={"X-Owner-ID": "user_1"},
+        json={"accepted": True, "rating": 6},
+    )
+
+    assert response.status_code == 422
 
 
 def test_agent_thread_is_owner_isolated() -> None:
