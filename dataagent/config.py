@@ -82,6 +82,24 @@ class Settings:
         model_cache = Path(model_cache_raw).expanduser() if model_cache_raw else home / "models"
         if not model_cache.is_absolute():
             model_cache = root / model_cache
+        registry_datajuicer_python: Path | None = None
+        registry_datajuicer_process_bin: Path | None = None
+        try:
+            from .distribution import load_provider_registration
+
+            registration = load_provider_registration(home, "datajuicer")
+            if registration:
+                registered_python = registration.get("python")
+                registered_process_bin = registration.get("process_bin")
+                if registered_python:
+                    registry_datajuicer_python = Path(str(registered_python)).expanduser().resolve()
+                if registered_process_bin:
+                    registry_datajuicer_process_bin = (
+                        Path(str(registered_process_bin)).expanduser().resolve()
+                    )
+        except (OSError, TypeError, ValueError):
+            # A broken optional Provider registration must not prevent Core startup.
+            pass
         return cls(
             api_key=os.getenv("BAILIAN_API_KEY") or os.getenv("DASHSCOPE_API_KEY"),
             base_url=os.getenv(
@@ -103,8 +121,14 @@ class Settings:
             allow_model_download=_env_bool("DATAAGENT_ALLOW_MODEL_DOWNLOAD", False),
             model_cache=model_cache.resolve(),
             datajuicer_enabled=_env_bool("DATAAGENT_DATAJUICER_ENABLED", True),
-            datajuicer_python=_env_path("DATAAGENT_DATAJUICER_PYTHON"),
-            datajuicer_process_bin=_env_path("DATAAGENT_DATAJUICER_PROCESS_BIN"),
+            datajuicer_python=(
+                _env_path("DATAAGENT_DATAJUICER_PYTHON")
+                or registry_datajuicer_python
+            ),
+            datajuicer_process_bin=(
+                _env_path("DATAAGENT_DATAJUICER_PROCESS_BIN")
+                or registry_datajuicer_process_bin
+            ),
             datajuicer_timeout_seconds=int(
                 os.getenv("DATAAGENT_DATAJUICER_TIMEOUT_SECONDS", "300")
             ),

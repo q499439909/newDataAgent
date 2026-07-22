@@ -32,6 +32,7 @@ run_app = typer.Typer(help="执行和查看全量任务", no_args_is_help=True)
 pipeline_app = typer.Typer(help="查看可复用 Pipeline", no_args_is_help=True)
 dataset_app = typer.Typer(help="查看数据版本", no_args_is_help=True)
 milvus_app = typer.Typer(help="探测和验证 Milvus 数据源", no_args_is_help=True)
+provider_app = typer.Typer(help="安装、验证和检查外部算子 Provider", no_args_is_help=True)
 app.add_typer(task_app, name="task")
 app.add_typer(trial_app, name="trial")
 app.add_typer(review_app, name="review")
@@ -39,6 +40,7 @@ app.add_typer(run_app, name="run")
 app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(dataset_app, name="dataset")
 app.add_typer(milvus_app, name="milvus")
+app.add_typer(provider_app, name="provider")
 console = Console()
 
 
@@ -47,7 +49,9 @@ def service() -> DataAgentService:
 
 
 def fail(exc: Exception) -> None:
-    console.print(f"[bold red]错误：[/bold red]{exc}")
+    encoding = console.encoding or "utf-8"
+    message = str(exc).encode(encoding, errors="replace").decode(encoding, errors="replace")
+    console.print(f"[bold red]错误：[/bold red]{message}")
     raise typer.Exit(1)
 
 
@@ -62,6 +66,138 @@ def _progress_callback(progress: Progress, task_id: int):
 def version() -> None:
     """显示 DataAgent CLI 版本。"""
     console.print(f"DataAgent {__version__}")
+
+
+@app.command()
+def setup(
+    with_provider: Annotated[
+        str,
+        typer.Option(
+            "--with-provider",
+            help="要安装的冻结 Provider，例如 datajuicer@1.5.3",
+        ),
+    ] = "datajuicer@1.5.3",
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help="auto、catalog、cpu、remote 或 linux-gpu",
+        ),
+    ] = "auto",
+    existing_python: Annotated[
+        Path | None,
+        typer.Option(
+            "--existing-python",
+            help="注册并验证已有隔离环境；省略时自动创建新环境",
+        ),
+    ] = None,
+    wheelhouse: Annotated[
+        Path | None,
+        typer.Option("--wheelhouse", help="离线 Wheelhouse 目录"),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="重建 DataAgent 管理的 Provider 目录"),
+    ] = False,
+) -> None:
+    """安装并注册受治理的 Data-Juicer Provider。"""
+    try:
+        from .distribution import DATAJUICER_VERSION, DataJuicerInstaller
+
+        provider_name, separator, requested_version = with_provider.partition("@")
+        if provider_name.strip().lower() not in {"datajuicer", "data-juicer"}:
+            raise ValueError(f"当前不支持 Provider：{provider_name}")
+        if separator and requested_version != DATAJUICER_VERSION:
+            raise ValueError(
+                f"当前冻结的 Data-Juicer Provider 版本是 {DATAJUICER_VERSION}，"
+                f"不能安装 {requested_version}"
+            )
+        settings = Settings.load()
+        with console.status("正在安装并验证 Data-Juicer Provider..."):
+            result = DataJuicerInstaller(settings.home).install(
+                profile=profile,
+                existing_python=existing_python,
+                wheelhouse=wheelhouse,
+                force=force,
+            )
+        _print_provider_result(result, title="Data-Juicer Provider 已注册")
+    except Exception as exc:
+        fail(exc)
+
+
+def _print_provider_result(result: dict, *, title: str) -> None:
+    registration = result["registration"]
+    report = result["report"]
+    counts = report["counts"]
+    table = Table(title=title, show_header=False)
+    table.add_column("项目", style="cyan")
+    table.add_column("值", overflow="fold")
+    table.add_row("Provider", f"datajuicer@{registration['provider_version']}")
+    table.add_row("Profile", str(registration["profile"]))
+    table.add_row("Python", str(registration["python"]))
+    table.add_row("dj-process", str(registration["process_bin"]))
+    table.add_row("Catalog", f"{counts['discovered']} operators")
+    table.add_row("Catalog digest", str(registration["catalog_digest"]))
+    table.add_row("CPU candidates", str(counts["local_cpu_candidates"]))
+    table.add_row("Remote candidates", str(counts["remote_api_candidates"]))
+    table.add_row("Linux GPU candidates", str(counts["linux_gpu_candidates"]))
+    table.add_row("Governed executable now", str(counts["governed_executable_now"]))
+    table.add_row("Capability report", str(registration["capability_report"]))
+    console.print(table)
+
+
+@provider_app.command("verify")
+def provider_verify() -> None:
+    """重新发现 Catalog，并验证已注册 Data-Juicer Provider。"""
+    try:
+        from .distribution import DataJuicerInstaller
+
+        settings = Settings.load()
+        with console.status("正在验证 Data-Juicer Provider..."):
+            result = DataJuicerInstaller(settings.home).verify()
+        _print_provider_result(result, title="Data-Juicer Provider 验证通过")
+    except Exception as exc:
+        fail(exc)
+
+
+@provider_app.command("report")
+def provider_report(
+    blocked_only: Annotated[
+        bool,
+        typer.Option("--blocked-only", help="只显示当前受治理执行仍被阻塞的算子"),
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 217,
+) -> None:
+    """查看每个算子的 Runtime、治理状态和阻塞原因。"""
+    try:
+        from .distribution import DataJuicerInstaller
+
+        settings = Settings.load()
+        report = DataJuicerInstaller(settings.home).report()
+        operators = report["operators"]
+        if blocked_only:
+            operators = [item for item in operators if item["blocked_reasons"]]
+        table = Table(title="Data-Juicer Provider Capability Report")
+        table.add_column("Operator", overflow="fold")
+        table.add_column("Status")
+        table.add_column("Runtime")
+        table.add_column("Executable now")
+        table.add_column("Blocked reason", overflow="fold")
+        for item in operators[:limit]:
+            table.add_row(
+                str(item["operator_ref"]),
+                str(item["governance_status"]),
+                ", ".join(item["runtime_candidates"]) or "unclassified",
+                ", ".join(item["governed_executable_profiles"]) or "-",
+                ", ".join(item["blocked_reasons"]) or "-",
+            )
+        console.print(table)
+        console.print(
+            f"Catalog digest: {report['catalog_digest']} · "
+            f"showing {min(limit, len(operators))}/{len(operators)}"
+        )
+    except Exception as exc:
+        fail(exc)
 
 
 @app.command()

@@ -174,19 +174,63 @@ Token 默认从 `MILVUS_TOKEN` 环境变量读取且不会输出。只有同时�
 
 可以通过 `DATAAGENT_HOME` 改到其他磁盘。原始图片目录始终只读使用，不原地覆盖或删除。
 
+## Data-Juicer Provider 安装
+
+Data-Juicer 使用独立运行时，不安装到 DataAgent 主虚拟环境。在 Windows 或 Linux
+上安装 DataAgent 后，运行同一条命令即可创建隔离环境、安装冻结依赖、发现 Catalog、
+生成能力报告并写入 Provider Registry：
+
+```text
+dataagent setup --with-provider datajuicer@1.5.3 --profile auto
+```
+
+`auto` 安装当前正式 CPU 图片算子和 Remote API 所需依赖，但不会下载模型权重。
+`catalog` 只提供发现和能力报告，不开放算子执行。
+其他可选 Profile：
+
+```text
+dataagent setup --with-provider datajuicer@1.5.3 --profile catalog
+dataagent setup --with-provider datajuicer@1.5.3 --profile cpu
+dataagent setup --with-provider datajuicer@1.5.3 --profile remote
+dataagent setup --with-provider datajuicer@1.5.3 --profile linux-gpu
+```
+
+`linux-gpu` 只接受具有可用 NVIDIA Runtime 的 Linux Worker。离线安装可以增加
+`--wheelhouse <directory>`。开发机也可以用
+`--existing-python <python>` 注册并验证已有隔离环境。
+
+安装器严格校验 `py-data-juicer==1.5.3` 和 217 项 Catalog，并生成：
+
+```text
+.dataagent/providers/registry.json
+.dataagent/providers/datajuicer/1.5.3/catalog.json
+.dataagent/providers/datajuicer/1.5.3/capability-report.json
+.dataagent/providers/datajuicer/1.5.3/requirements.lock.txt
+.dataagent/providers/datajuicer/1.5.3/install-report.json
+```
+
+为避免 Torch 等依赖在 Windows 触发路径长度限制，Windows 的隔离 Python Runtime
+默认放在 `%LOCALAPPDATA%\DataAgent\runtimes` 下，并通过 Registry 与上述治理产物关联；
+可以使用 `DATAAGENT_PROVIDER_RUNTIME_ROOT` 显式覆盖。
+
+API 和 Worker 自动读取 Registry。环境变量仍可作为显式覆盖，但正常安装不再要求手写
+Python 或 `dj-process` 绝对路径。
+
+```text
+dataagent provider verify
+dataagent provider report
+dataagent provider report --blocked-only
+```
+
+能力报告区分可发现、机器可承载和受治理可执行。发现 217 个算子不表示任意 Windows
+CPU 机器可以执行全部算子；CUDA/VLLM 算子会标记为需要 Linux GPU Worker，API 算子
+会标记凭据要求，未完成准入的算子保持 `DRAFT`。
+
 ## 算子库开发模式
 
 算子通过统一的 Operator、Provider 和 Runtime 协议注册。当前内置八个已发布的 CPU 参考算子，使九个主类别都有可运行实现；另有美学评分、图像分割、水印识别、人像 ID 四个开发态模型算子。模型算子默认使用确定性的 Mock 后端，不需要 GPU，也不会下载权重；Mock 结果可以用于 Pipeline 编译和节点预览，但生产提交会拒绝 Draft 或 Mock 算子。
 
-```powershell
-$env:DATAAGENT_ALLOW_MODEL_DOWNLOAD = "false"
-$env:DATAAGENT_DATAJUICER_ENABLED = "true"
-$env:DATAAGENT_DATAJUICER_PYTHON = "D:\path\to\data-juicer-env\python.exe"
-$env:DATAAGENT_DATAJUICER_PROCESS_BIN = "D:\path\to\data-juicer-env\Scripts\dj-process.exe"
-$env:DATAAGENT_ALLOW_DATAJUICER_CANDIDATES = "true"
-```
-
-也可以复制 `dataagent.local.env.example` 为被 Git 忽略的 `dataagent.local.env`。Data-Juicer 是可选 Provider；建议指向独立环境，控制面不会导入它的重依赖。Provider 会发现完整目录并为每个算子生成版本化 Candidate Proxy。启用 Candidate 执行后，Retrieval Agent 会按需求检索 Catalog，并把匹配的 CPU 图片算子自动编译进 Pipeline；提交时再次校验 Provider 版本、标签、Runtime 和参数。当前正式发布 3 个 CPU 图片算子，其余匹配项仍保留 Draft 身份和运行证据。GPU、模型和非图片算子不会在当前机器自动执行。未允许下载时，执行器会同时启用 Hugging Face、uv、pip 离线策略，并阻止 Data-Juicer LazyLoader 自动安装依赖。
+Data-Juicer 是可选 Provider；控制面不会导入它的重依赖。Provider 会发现完整目录并为每个算子生成版本化 Candidate Proxy。启用 Candidate 执行后，Retrieval Agent 会按需求检索 Catalog，并把匹配的 CPU 图片算子自动编译进 Pipeline；提交时再次校验 Provider 版本、标签、Runtime 和参数。当前正式发布 3 个 CPU 图片算子，其余匹配项仍保留 Draft 身份和运行证据。GPU、模型和非图片算子不会在当前机器自动执行。未允许下载时，执行器会同时启用 Hugging Face、uv、pip 离线策略，并阻止 Data-Juicer LazyLoader 自动安装依赖。
 
 控制面接口：
 

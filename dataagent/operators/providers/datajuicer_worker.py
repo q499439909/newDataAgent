@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import hashlib
 import json
 import shutil
 import sys
@@ -86,6 +87,40 @@ def _package_version() -> str:
     return "unavailable"
 
 
+def _package_identity() -> dict[str, Any]:
+    from importlib.metadata import distribution
+
+    for package in ("py-data-juicer", "data-juicer"):
+        try:
+            installed = distribution(package)
+        except PackageNotFoundError:
+            continue
+        metadata = installed.metadata
+        license_files = []
+        for entry in installed.files or ():
+            lowered = str(entry).lower()
+            if not any(name in lowered for name in ("license", "notice", "copying")):
+                continue
+            resolved = Path(installed.locate_file(entry)).resolve()
+            if resolved.is_file():
+                license_files.append(
+                    {
+                        "path": str(entry),
+                        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+                    }
+                )
+        return {
+            "distribution": package,
+            "name": metadata.get("Name") or package,
+            "version": installed.version,
+            "license": metadata.get("License-Expression") or metadata.get("License") or "",
+            "home_page": metadata.get("Home-page") or "",
+            "provides_extras": sorted(metadata.get_all("Provides-Extra") or []),
+            "license_files": license_files,
+        }
+    return {}
+
+
 def _resolve_process_bin() -> str | None:
     found = shutil.which("dj-process")
     if found:
@@ -107,6 +142,7 @@ def health() -> dict[str, Any]:
     return {
         "ok": package_version != "unavailable",
         "provider_version": package_version,
+        "package_identity": _package_identity(),
         "python": sys.executable,
         "process_bin": _resolve_process_bin(),
     }
