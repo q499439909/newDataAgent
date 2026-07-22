@@ -17,6 +17,7 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
+from ..experiences import PipelineExperienceService
 from ..graph import build_main_graph
 from ..graph.interrupts import revise_task_spec_version
 from ..infrastructure import (
@@ -751,6 +752,33 @@ class AgentRuntime:
         if self.run_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
         return self._run_payload(self.run_store.get(run_id, owner_id))
+
+    def record_run_feedback(
+        self,
+        *,
+        run_id: str,
+        owner_id: str,
+        accepted: bool,
+        reusable: bool = False,
+        rating: int | None = None,
+        comment: str = "",
+    ) -> dict[str, Any]:
+        if self.version_store is None or self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for run feedback")
+        feedback, experience = PipelineExperienceService(
+            self.version_store, self.run_store
+        ).record_feedback(
+            owner_id=owner_id,
+            run_id=run_id,
+            accepted=accepted,
+            reusable=reusable,
+            rating=rating,
+            comment=comment,
+        )
+        return {
+            "feedback": feedback.model_dump(mode="json"),
+            "experience": experience.model_dump(mode="json"),
+        }
 
     def get_run_events(self, *, run_id: str, owner_id: str) -> list[dict[str, Any]]:
         if self.run_store is None:
