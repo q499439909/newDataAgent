@@ -1,3 +1,17 @@
-from .models import AcceptanceSpec, DataSourceSpec, TaskCapabilitySpec, TaskSpecVersion
+from .models import (
+    AcceptanceSpec,
+    ClassificationLabelSpec,
+    ClassificationSpec,
+    DataSourceSpec,
+    TaskCapabilitySpec,
+    TaskSpecVersion,
+)
 
-__all__ = ["AcceptanceSpec", "DataSourceSpec", "TaskCapabilitySpec", "TaskSpecVersion"]
+__all__ = [
+    "AcceptanceSpec",
+    "ClassificationLabelSpec",
+    "ClassificationSpec",
+    "DataSourceSpec",
+    "TaskCapabilitySpec",
+    "TaskSpecVersion",
+]

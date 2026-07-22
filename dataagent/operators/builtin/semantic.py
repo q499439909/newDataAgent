@@ -75,15 +75,35 @@ def _strings(value: Any) -> Iterable[str]:
             yield from _strings(nested)
 
 
-def _semantic_text(input_data: OperatorInput) -> str:
+def _preferred_provider_values(input_data: OperatorInput) -> list[Any]:
     provider_output = input_data.labels.get("datajuicer_output", {})
     preferred: list[Any] = []
     if isinstance(provider_output, dict):
         for key in ("authenticity_tags", "image_tags", "tags", "caption"):
             if key in provider_output:
                 preferred.append(provider_output[key])
-    values = preferred or [provider_output]
-    return " ".join(token for value in values for token in _strings(value))
+    return preferred or [provider_output]
+
+
+def _semantic_text(input_data: OperatorInput) -> str:
+    return " ".join(
+        token
+        for value in _preferred_provider_values(input_data)
+        for token in _strings(value)
+    )
+
+
+def _normalize_label(value: str) -> str:
+    return "-".join(value.lower().replace("_", " ").replace("-", " ").split())
+
+
+def _semantic_values(input_data: OperatorInput) -> set[str]:
+    return {
+        _normalize_label(token)
+        for value in _preferred_provider_values(input_data)
+        for token in _strings(value)
+        if token.strip()
+    }
 
 
 class AuthenticityDecisionOperator:
@@ -119,16 +139,8 @@ class AuthenticityDecisionOperator:
             "generated image",
             "fake photo",
             "computer-generated",
-            "人工智能生成",
-            "合成图",
         )
-        authentic_tokens = (
-            "authentic",
-            "real photo",
-            "natural photograph",
-            "真实照片",
-            "实拍",
-        )
+        authentic_tokens = ("authentic", "real photo", "natural photograph")
         if any(token in evidence for token in synthetic_tokens):
             resolved = "synthetic"
             action = "reject"
@@ -160,7 +172,7 @@ class ClassResolutionOperator:
     spec = _spec(
         operator_id="builtin.class_resolution:1",
         name="ClassResolutionOperator",
-        summary="Normalize VLM tags into cat, dog, mixed, or unknown task classes.",
+        summary="Normalize VLM tags into configured task classes.",
         category=OperatorCategory.UNDERSTANDING,
         secondary="classification",
         tags=frozenset({"image", "class_resolution", "classification", "cpu"}),
@@ -178,6 +190,27 @@ class ClassResolutionOperator:
                     "enum": ["keep", "review", "reject"],
                     "default": "review",
                 },
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1},
+                            "aliases": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1},
+                            },
+                        },
+                        "required": ["id", "aliases"],
+                        "additionalProperties": False,
+                    },
+                    "default": [
+                        {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
+                        {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
+                    ],
+                },
+                "mixed_label": {"type": "string", "default": "mixed"},
+                "unknown_label": {"type": "string", "default": "unknown"},
             },
             "additionalProperties": False,
         },
@@ -186,24 +219,33 @@ class ClassResolutionOperator:
     def execute(
         self, context: OperatorContext, input_data: OperatorInput, parameters: dict[str, Any]
     ) -> OperatorResult:
-        evidence = _semantic_text(input_data)
-        has_cat = any(token in evidence for token in ("cat", "kitten", "feline", "猫"))
-        has_dog = any(token in evidence for token in ("dog", "puppy", "canine", "狗"))
-        if has_cat and has_dog:
-            resolved = "mixed"
-        elif has_cat:
-            resolved = "cat"
-        elif has_dog:
-            resolved = "dog"
+        evidence = _semantic_values(input_data)
+        labels = parameters.get("labels") or [
+            {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
+            {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
+        ]
+        mixed_label = str(parameters.get("mixed_label", "mixed"))
+        unknown_label = str(parameters.get("unknown_label", "unknown"))
+        matches: list[str] = []
+        for label in labels:
+            aliases = {_normalize_label(label["id"])}
+            aliases.update(_normalize_label(alias) for alias in label["aliases"])
+            if evidence.intersection(aliases):
+                matches.append(label["id"])
+        if len(matches) > 1:
+            resolved = mixed_label
+        elif matches:
+            resolved = matches[0]
         else:
-            resolved = "unknown"
+            resolved = unknown_label
         policy = (
             parameters["mixed_policy"]
-            if resolved == "mixed"
+            if resolved == mixed_label
             else parameters["unknown_policy"]
-            if resolved == "unknown"
+            if resolved == unknown_label
             else "keep"
         )
+        known_ids = {item["id"] for item in labels}
         return OperatorResult(
             output_path=input_data.current_path,
             metrics=input_data.metrics,
@@ -217,7 +259,7 @@ class ClassResolutionOperator:
             embeddings=input_data.embeddings,
             decision="reject" if policy == "reject" else "continue",
             reason_codes=["UNRESOLVED_TASK_CLASS"] if policy == "reject" else [],
-            confidence=1.0 if resolved in {"cat", "dog"} else 0.5,
+            confidence=1.0 if resolved in known_ids else 0.5,
         )
 
 
@@ -233,7 +275,14 @@ class DatasetPartitionOperator:
         parameter_schema={
             "type": "object",
             "properties": {
-                "directory_prefix": {"type": "string", "default": "classes"}
+                "directory_prefix": {"type": "string", "default": "classes"},
+                "allowed_labels": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "default": ["cat", "dog"],
+                },
+                "mixed_label": {"type": "string", "default": "mixed"},
+                "unknown_label": {"type": "string", "default": "unknown"},
             },
             "additionalProperties": False,
         },
@@ -242,9 +291,17 @@ class DatasetPartitionOperator:
     def execute(
         self, context: OperatorContext, input_data: OperatorInput, parameters: dict[str, Any]
     ) -> OperatorResult:
-        resolved = str(input_data.labels.get("resolved_class", "unknown"))
-        if resolved not in {"cat", "dog", "mixed", "unknown"}:
-            resolved = "unknown"
+        unknown_label = str(parameters.get("unknown_label", "unknown"))
+        mixed_label = str(parameters.get("mixed_label", "mixed"))
+        allowed_labels = parameters.get("allowed_labels") or ["cat", "dog"]
+        resolved = str(input_data.labels.get("resolved_class", unknown_label))
+        allowed = {
+            *allowed_labels,
+            mixed_label,
+            unknown_label,
+        }
+        if resolved not in allowed:
+            resolved = unknown_label
         prefix = Path(parameters["directory_prefix"])
         if prefix.is_absolute() or ".." in prefix.parts:
             raise ValueError("directory_prefix must be a safe relative path")

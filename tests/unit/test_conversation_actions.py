@@ -41,10 +41,26 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
     facts = parse_conversation_action(
         {"intent": "QUERY_CONTROL_FACTS", "facets": ["run", "pipeline"]}
     )
+    start = parse_conversation_action(
+        {
+            "intent": "START_WORK_ORDER",
+            "requirement": "Classify pigs and dogs",
+            "source": "D:/images",
+            "task_spec_patch": {
+                "classification": {
+                    "labels": [
+                        {"id": "pig", "display_name": "Pig"},
+                        {"id": "dog", "display_name": "Dog"},
+                    ]
+                }
+            },
+        }
+    )
 
     assert edit.intent == ConversationIntent.EDIT_TASK_SPEC
     assert pipeline.strategy == "balanced"
     assert facts.facets == ("run", "pipeline")
+    assert start.task_spec_patch["classification"]["labels"][0]["id"] == "pig"
 
 
 def test_model_schema_does_not_expose_internal_audit_metadata() -> None:

@@ -73,6 +73,7 @@ class StartWorkOrderAction(_ActionBase):
     intent: Literal[ConversationIntent.START_WORK_ORDER]
     requirement: str = Field(min_length=1)
     source: str | None = None
+    task_spec_patch: dict[str, Any] | None = None
 
 
 class ProvideSourceAction(_ActionBase):

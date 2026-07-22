@@ -353,6 +353,8 @@ class ConversationService:
             context["pending_requirement"] = decision.requirement or content
             if decision.source:
                 context["pending_source"] = decision.source
+            if decision.task_spec_patch:
+                context["pending_task_spec_patch"] = decision.task_spec_patch
             return self._maybe_start(thread, owner_id, context, base)
         if decision.intent == ConversationIntent.PROVIDE_SOURCE:
             context["pending_source"] = decision.source or content
@@ -714,6 +716,17 @@ class ConversationService:
                     {"type": "local_directory", "uri": str(path), "mapping": {}}
                 ],
             )
+            pending_patch = context.pop("pending_task_spec_patch", None)
+            if pending_patch:
+                turn = self.agent_runtime.resume(
+                    work_order_id=turn["work_order_id"],
+                    owner_id=owner_id,
+                    decision={
+                        "action": "edit_spec",
+                        "task_spec_patch": pending_patch,
+                        "channel": "conversation",
+                    },
+                )
             context.pop("pending_requirement", None)
             context.pop("pending_source", None)
             self.store.update(

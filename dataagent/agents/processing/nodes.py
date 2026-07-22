@@ -68,10 +68,33 @@ _AUTHENTICITY_PROMPT = (
     "exactly one of: authentic, synthetic, uncertain."
 )
 _CLASSIFICATION_PROMPT = (
-    "Classify the visible animals for dataset partitioning. Return strict JSON only, "
-    'without markdown or explanation, using exactly this schema: {"tags":["cat"]}. '
-    "The tags array must contain exactly one of: cat, dog, mixed, unknown."
+    "Classify the visible content for dataset partitioning. Return strict JSON only, "
+    'without markdown or explanation, using exactly this schema: {"tags":["<label>"]}. '
 )
+
+
+def _classification_contract(task_spec: TaskSpecVersion) -> dict[str, Any]:
+    classification = task_spec.classification
+    if classification is None:
+        return {
+            "labels": [
+                {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
+                {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
+            ],
+            "mixed_label": "mixed",
+            "unknown_label": "unknown",
+        }
+    return {
+        "labels": [
+            {
+                "id": label.id,
+                "aliases": list(dict.fromkeys((label.id, label.display_name, *label.aliases))),
+            }
+            for label in classification.labels
+        ],
+        "mixed_label": classification.mixed_label,
+        "unknown_label": classification.unknown_label,
+    }
 
 
 def _candidate_map(state: WorkOrderGraphState) -> dict[str, OperatorCatalogMatch]:
@@ -156,7 +179,18 @@ def _vlm_parameters(
                 else ""
             )
         else:
-            parameters["system_prompt"] = _CLASSIFICATION_PROMPT
+            contract = _classification_contract(task_spec)
+            allowed = [
+                *(item["id"] for item in contract["labels"]),
+                contract["mixed_label"],
+                contract["unknown_label"],
+            ]
+            parameters["system_prompt"] = (
+                _CLASSIFICATION_PROMPT
+                + "The tags array must contain exactly one of: "
+                + ", ".join(allowed)
+                + "."
+            )
     return parameters
 
 
@@ -208,6 +242,7 @@ def _remote_visual_operator(
 def _parameters_for_capability(
     capability: str,
     policy: dict[str, Any],
+    task_spec: TaskSpecVersion,
 ) -> dict[str, Any]:
     if capability == "image_quality":
         return {"confidence_threshold": policy["quality_threshold"]}
@@ -217,11 +252,18 @@ def _parameters_for_capability(
         return {
             "mixed_policy": policy["mixed_policy"],
             "unknown_policy": policy["unknown_policy"],
+            **_classification_contract(task_spec),
         }
     if capability == "perceptual_deduplication":
         return {"distance_threshold": policy["dedup_distance"]}
     if capability == "dataset_partition":
-        return {"directory_prefix": "classes"}
+        contract = _classification_contract(task_spec)
+        return {
+            "directory_prefix": "classes",
+            "allowed_labels": [item["id"] for item in contract["labels"]],
+            "mixed_label": contract["mixed_label"],
+            "unknown_label": contract["unknown_label"],
+        }
     return {}
 
 
@@ -268,7 +310,7 @@ def _compile_nodes(
             if used_node_ids[base_node_id] == 1
             else f"{base_node_id}_{used_node_ids[base_node_id]}"
         )
-        parameters = _parameters_for_capability(capability, policy)
+        parameters = _parameters_for_capability(capability, policy, task_spec)
         if operator_id in candidates:
             parameters = dict(candidates[operator_id].parameters)
         if capability == "image_classification" and "visual_understanding" in operator.capability_tags:

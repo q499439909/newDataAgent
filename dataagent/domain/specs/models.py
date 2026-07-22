@@ -29,6 +29,30 @@ class TaskCapabilitySpec(DomainModel):
     required: bool = True
 
 
+class ClassificationLabelSpec(DomainModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    display_name: str = Field(min_length=1)
+    aliases: tuple[str, ...] = ()
+
+
+class ClassificationSpec(DomainModel):
+    mode: Literal["closed_set"] = "closed_set"
+    labels: tuple[ClassificationLabelSpec, ...] = Field(min_length=2)
+    mixed_label: str = Field(default="mixed", pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    unknown_label: str = Field(default="unknown", pattern=r"^[a-z0-9][a-z0-9_-]*$")
+
+    @model_validator(mode="after")
+    def validate_labels(self) -> "ClassificationSpec":
+        label_ids = [item.id for item in self.labels]
+        if len(label_ids) != len(set(label_ids)):
+            raise ValueError("Classification label ids must be unique")
+        if self.mixed_label == self.unknown_label:
+            raise ValueError("Mixed and unknown labels must be different")
+        if {self.mixed_label, self.unknown_label}.intersection(label_ids):
+            raise ValueError("Task labels cannot reuse mixed or unknown labels")
+        return self
+
+
 class TaskSpecVersion(VersionedModel):
     work_order_id: str
     objective: str
@@ -36,6 +60,7 @@ class TaskSpecVersion(VersionedModel):
     output_actions: tuple[str, ...] = ("filter", "manifest")
     required_capabilities: tuple[str, ...] = ()
     capability_requirements: tuple[TaskCapabilitySpec, ...] = ()
+    classification: ClassificationSpec | None = None
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     semantic_requirements: tuple[str, ...] = ()
     exclusion_requirements: tuple[str, ...] = ()

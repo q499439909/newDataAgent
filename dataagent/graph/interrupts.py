@@ -7,7 +7,7 @@ from langgraph.types import interrupt
 from ..agents.shared import WorkOrderGraphState, append_trace
 from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
-from ..domain.specs import TaskSpecVersion
+from ..domain.specs import ClassificationSpec, TaskSpecVersion
 from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ..operators.planning import (
     decompose_task_capabilities,
@@ -67,6 +67,14 @@ def revise_task_spec_version(
     if isinstance(patch.get("preferences"), dict):
         preferences.update(patch["preferences"])
     objective = str(patch.get("objective") or spec.objective).strip()
+    classification = spec.classification
+    if "classification" in patch:
+        raw_classification = patch.get("classification")
+        classification = (
+            ClassificationSpec.model_validate(raw_classification)
+            if raw_classification is not None
+            else None
+        )
     semantic_requirements = _remove_conversation_fillers(
         _merge_unique(spec.semantic_requirements, patch.get("semantic_requirements"))
     )
@@ -102,6 +110,7 @@ def revise_task_spec_version(
             "semantic_requirements": semantic_requirements,
             "exclusion_requirements": exclusion_requirements,
             "preferences": preferences,
+            "classification": classification,
             "capability_requirements": capabilities,
             "output_actions": infer_output_actions(capabilities),
             "ambiguities": ambiguities,

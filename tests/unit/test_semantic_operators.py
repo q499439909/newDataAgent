@@ -68,3 +68,37 @@ def test_dataset_partition_emits_collision_resistant_relative_path() -> None:
     assert result.labels["output_relative_path"] == (
         "classes/cat/pet-aaaaaaaaaaaa.jpg"
     )
+
+
+def test_class_resolution_and_partition_support_task_specific_labels() -> None:
+    resolver = ClassResolutionOperator()
+    parameters = {
+        "mixed_policy": "review",
+        "unknown_policy": "reject",
+        "labels": [
+            {"id": "pig", "aliases": ["pig", "piglet"]},
+            {"id": "dog", "aliases": ["dog", "puppy"]},
+        ],
+        "mixed_label": "both",
+        "unknown_label": "unclassified",
+    }
+
+    pig = resolver.execute(_context(), _input(["piglet"]), parameters)
+    mixed = resolver.execute(_context(), _input(["pig", "puppy"]), parameters)
+
+    assert pig.labels["resolved_class"] == "pig"
+    assert mixed.labels["resolved_class"] == "both"
+
+    partitioned = DatasetPartitionOperator().execute(
+        _context(),
+        _input(["pig"]).model_copy(update={"labels": pig.labels}),
+        {
+            "directory_prefix": "classes",
+            "allowed_labels": ["pig", "dog"],
+            "mixed_label": "both",
+            "unknown_label": "unclassified",
+        },
+    )
+    assert partitioned.labels["output_relative_path"] == (
+        "classes/pig/pet-aaaaaaaaaaaa.jpg"
+    )

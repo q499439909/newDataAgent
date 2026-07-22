@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from dataagent.domain.operators import OperatorCategory, OperatorSpecVersion, OperatorStatus
 from dataagent.domain.pipelines import PipelineEdge, PipelineNode, PipelineStrategy, PipelineVersion
+from dataagent.domain.specs import ClassificationSpec
 from dataagent.operators import OperatorRegistry
 
 
@@ -108,4 +109,26 @@ def test_pipeline_rejects_cycles() -> None:
             nodes=nodes,
             edges=(PipelineEdge(source="a", target="b"), PipelineEdge(source="b", target="a")),
             created_from="processing_agent",
+        )
+
+
+def test_classification_spec_requires_distinct_portable_labels() -> None:
+    classification = ClassificationSpec.model_validate(
+        {
+            "labels": [
+                {"id": "pig", "display_name": "Pig", "aliases": ["piglet"]},
+                {"id": "dog", "display_name": "Dog", "aliases": ["puppy"]},
+            ]
+        }
+    )
+
+    assert [item.id for item in classification.labels] == ["pig", "dog"]
+    with pytest.raises(ValidationError, match="label ids must be unique"):
+        ClassificationSpec.model_validate(
+            {
+                "labels": [
+                    {"id": "dog", "display_name": "Dog"},
+                    {"id": "dog", "display_name": "Another dog"},
+                ]
+            }
         )
