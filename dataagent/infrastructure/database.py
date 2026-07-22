@@ -94,6 +94,32 @@ class RunItemRow(Base):
     labels_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class RunNodeResultRow(Base):
+    __tablename__ = "run_node_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "asset_sequence", "node_id", name="uq_run_asset_node_result"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    asset_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    operator_version_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False)
+    labels_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class RunSourceRow(Base):
     __tablename__ = "run_sources"
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_run_source_sequence"),)
@@ -431,6 +457,41 @@ class RunStore:
             ).all()
             return [self._item_dict(row) for row in rows]
 
+    def add_node_result(self, run_id: str, result: dict[str, Any]) -> None:
+        with self.database.session() as session, session.begin():
+            session.add(
+                RunNodeResultRow(
+                    run_id=run_id,
+                    asset_sequence=int(result["asset_sequence"]),
+                    source_uri=str(result["source_uri"]),
+                    node_id=str(result["node_id"]),
+                    operator_version_id=str(result["operator_version_id"]),
+                    status=str(result["status"]),
+                    decision=str(result["decision"]),
+                    reason_codes_json=json.dumps(result.get("reason_codes", [])),
+                    metrics_json=json.dumps(
+                        result.get("metrics", {}), ensure_ascii=False, default=str
+                    ),
+                    labels_json=json.dumps(
+                        result.get("labels", {}), ensure_ascii=False, default=str
+                    ),
+                    error=result.get("error"),
+                    duration_ms=int(result.get("duration_ms", 0)),
+                )
+            )
+
+    def node_results(
+        self, run_id: str, owner_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        self.get(run_id, owner_id)
+        with self.database.session() as session:
+            rows = session.scalars(
+                select(RunNodeResultRow)
+                .where(RunNodeResultRow.run_id == run_id)
+                .order_by(RunNodeResultRow.asset_sequence, RunNodeResultRow.id)
+            ).all()
+            return [self._node_result_dict(row) for row in rows]
+
     def add_event(
         self,
         run_id: str,
@@ -575,6 +636,25 @@ class RunStore:
             "reason_codes": json.loads(row.reason_codes_json),
             "metrics": json.loads(row.metrics_json),
             "labels": json.loads(row.labels_json),
+        }
+
+    @staticmethod
+    def _node_result_dict(row: RunNodeResultRow) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "run_id": row.run_id,
+            "asset_sequence": row.asset_sequence,
+            "source_uri": row.source_uri,
+            "node_id": row.node_id,
+            "operator_version_id": row.operator_version_id,
+            "status": row.status,
+            "decision": row.decision,
+            "reason_codes": json.loads(row.reason_codes_json),
+            "metrics": json.loads(row.metrics_json),
+            "labels": json.loads(row.labels_json),
+            "error": row.error,
+            "duration_ms": row.duration_ms,
+            "created_at": row.created_at,
         }
 
     @staticmethod

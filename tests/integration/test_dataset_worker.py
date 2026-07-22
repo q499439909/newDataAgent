@@ -105,6 +105,24 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     ).json()
     event_types = {item["event_type"] for item in events}
     assert {"run_started", "run_planned", "asset_completed", "run_succeeded"} <= event_types
+    node_results = client.get(
+        f"/api/runs/{completed['id']}/node-results",
+        headers={"X-Owner-ID": "user_1"},
+    ).json()
+    node_count = len(approved["nodes"])
+    assert len(node_results) == 2 * node_count
+    first_results = [item for item in node_results if item["asset_sequence"] == 0]
+    duplicate_results = [item for item in node_results if item["asset_sequence"] == 1]
+    assert [item["node_id"] for item in first_results] == [
+        item["id"] for item in approved["nodes"]
+    ]
+    assert all(item["status"] == "completed" for item in first_results)
+    rejected = next(item for item in duplicate_results if item["decision"] == "reject")
+    assert rejected["reason_codes"]
+    assert all(
+        item["status"] == "skipped"
+        for item in duplicate_results[duplicate_results.index(rejected) + 1 :]
+    )
     assert {path.name: _sha256(path) for path in (first, duplicate)} == source_hashes
 
 

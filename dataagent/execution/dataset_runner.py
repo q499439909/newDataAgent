@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -319,8 +320,14 @@ class DatasetRunExecutor:
             current = OperatorInput(source_path=str(source), current_path=str(source))
             decision = "keep"
             reason_codes: list[str] = []
-            try:
-                for node in ordered_nodes:
+            stopped_at: int | None = None
+            for node_index, node in enumerate(ordered_nodes):
+                started_at = time.perf_counter()
+                node_error: str | None = None
+                node_status = "completed"
+                node_decision = "continue"
+                node_reason_codes: list[str] = []
+                try:
                     context.shared["active_node_id"] = node.id
                     result = self.operator_runtime.execute(
                         operator_version_id=node.operator_version_id,
@@ -329,6 +336,8 @@ class DatasetRunExecutor:
                         parameters=node.parameters,
                         runtime_backend=node.runtime_backend,
                     )
+                    node_decision = result.decision
+                    node_reason_codes = list(result.reason_codes)
                     current = OperatorInput(
                         source_path=current.source_path,
                         current_path=result.output_path or current.current_path,
@@ -341,13 +350,54 @@ class DatasetRunExecutor:
                     reason_codes.extend(result.reason_codes)
                     if result.decision == "reject":
                         decision = "reject"
-                        break
-            except Exception as exc:
-                decision = "failed"
-                reason_codes.append(f"OPERATOR_ERROR:{type(exc).__name__}")
-                current = current.model_copy(
-                    update={"labels": {**current.labels, "execution_error": str(exc)}}
+                        stopped_at = node_index
+                except Exception as exc:
+                    node_status = "failed"
+                    node_decision = "failed"
+                    node_error = str(exc)
+                    node_reason_codes = [f"OPERATOR_ERROR:{type(exc).__name__}"]
+                    decision = "failed"
+                    reason_codes.extend(node_reason_codes)
+                    current = current.model_copy(
+                        update={"labels": {**current.labels, "execution_error": str(exc)}}
+                    )
+                    stopped_at = node_index
+                self.run_store.add_node_result(
+                    run["id"],
+                    {
+                        "asset_sequence": sequence,
+                        "source_uri": str(source),
+                        "node_id": node.id,
+                        "operator_version_id": node.operator_version_id,
+                        "status": node_status,
+                        "decision": node_decision,
+                        "reason_codes": node_reason_codes,
+                        "metrics": current.metrics,
+                        "labels": current.labels,
+                        "error": node_error,
+                        "duration_ms": round((time.perf_counter() - started_at) * 1000),
+                    },
                 )
+                if stopped_at is not None:
+                    break
+
+            if stopped_at is not None:
+                for node in ordered_nodes[stopped_at + 1 :]:
+                    self.run_store.add_node_result(
+                        run["id"],
+                        {
+                            "asset_sequence": sequence,
+                            "source_uri": str(source),
+                            "node_id": node.id,
+                            "operator_version_id": node.operator_version_id,
+                            "status": "skipped",
+                            "decision": "not_run",
+                            "reason_codes": ["UPSTREAM_REJECTED_OR_FAILED"],
+                            "metrics": {},
+                            "labels": {},
+                            "duration_ms": 0,
+                        },
+                    )
 
             output_relative_path: str | None = None
             output_hash: str | None = None

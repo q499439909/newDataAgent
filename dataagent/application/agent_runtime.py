@@ -709,6 +709,13 @@ class AgentRuntime:
             raise RuntimeError("Persistent runtime is required for dataset runs")
         return self.run_store.events(run_id, owner_id)
 
+    def get_run_node_results(
+        self, *, run_id: str, owner_id: str
+    ) -> list[dict[str, Any]]:
+        if self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        return self.run_store.node_results(run_id, owner_id)
+
     def list_runs(self, *, work_order_id: str, owner_id: str) -> list[dict[str, Any]]:
         self._get_authorized(work_order_id, owner_id)
         if self.run_store is None:
