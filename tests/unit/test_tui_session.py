@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from io import StringIO
+import time
 
 import httpx
 import pytest
@@ -305,6 +306,33 @@ def test_tui_pipeline_table_shows_execution_block_reason() -> None:
     output = stream.getvalue()
     assert "no" in output
     assert "provider parameter schema is invalid" in output
+
+
+def test_tui_automatically_reports_run_terminal_status() -> None:
+    class ProgressingClient(FakeControlPlaneClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.polls = 0
+
+        def get_run(self, run_id):
+            self.polls += 1
+            return self._run("SUCCEEDED" if self.polls >= 1 else "RUNNING")
+
+    client = ProgressingClient()
+    console = StubConsole()
+    app = TuiApp(TuiSession(client), console=console)
+    app._render_conversation(
+        {"reply": "submitted", "turn": None, "run": client._run("QUEUED")}
+    )
+
+    deadline = time.monotonic() + 2.5
+    while not any("finished with status SUCCEEDED" in item for item in console.messages):
+        if time.monotonic() >= deadline:
+            raise AssertionError("run monitor did not report terminal status")
+        time.sleep(0.02)
+
+    assert client.polls == 1
+    assert app._run_monitors == {}
 
 
 def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None:

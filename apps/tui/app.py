@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
@@ -28,6 +29,8 @@ class TuiApp:
     def __init__(self, session: TuiSession, console: Console | None = None) -> None:
         self.session = session
         self.console = console or Console()
+        self._run_monitors: dict[str, threading.Thread] = {}
+        self._monitor_lock = threading.Lock()
 
     def run(self) -> None:
         self.console.print("[bold]DataAgent[/bold]  [dim]TUI control plane[/dim]")
@@ -107,7 +110,55 @@ class TuiApp:
         if response.get("turn"):
             self._render_turn(response["turn"])
         if response.get("run"):
-            self._render_run(response["run"])
+            run = response["run"]
+            self._render_run(run)
+            self._start_run_monitor(run)
+
+    def _start_run_monitor(self, run: dict[str, Any]) -> None:
+        terminal = {"SUCCEEDED", "FAILED", "CANCELLED", "PAUSED"}
+        run_id = str(run["id"])
+        if run.get("status") in terminal:
+            return
+        with self._monitor_lock:
+            current = self._run_monitors.get(run_id)
+            if current is not None and current.is_alive():
+                return
+            monitor = threading.Thread(
+                target=self._monitor_run,
+                args=(run_id, run),
+                name=f"dataagent-monitor-{run_id}",
+                daemon=True,
+            )
+            self._run_monitors[run_id] = monitor
+            monitor.start()
+
+    def _monitor_run(self, run_id: str, initial: dict[str, Any]) -> None:
+        terminal = {"SUCCEEDED", "FAILED", "CANCELLED", "PAUSED"}
+        previous = (
+            initial.get("status"),
+            initial.get("progress"),
+            initial.get("total"),
+        )
+        try:
+            while previous[0] not in terminal:
+                time.sleep(1)
+                run = self.session.run(run_id)
+                current = (run.get("status"), run.get("progress"), run.get("total"))
+                if current != previous:
+                    self.console.print(f"\n[dim]Run update: {run_id}[/dim]")
+                    self._render_run(run)
+                    previous = current
+                if current[0] in terminal:
+                    style = "green" if current[0] == "SUCCEEDED" else "yellow"
+                    self.console.print(
+                        f"[{style}]Run {run_id} finished with status {current[0]}.[/{style}]"
+                    )
+                    return
+        except Exception as exc:
+            self.console.print(f"\n[yellow]Run monitor stopped: {exc}[/yellow]")
+        finally:
+            with self._monitor_lock:
+                self._run_monitors.pop(run_id, None)
 
     def _render_turn(self, payload: dict[str, Any]) -> None:
         state = payload.get("state", {})
