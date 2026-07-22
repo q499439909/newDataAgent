@@ -21,6 +21,20 @@ from ..operators.protocol import OperatorContext, OperatorInput
 _OPERATOR_OUTPUTS_KEY = "_dataagent_operator_outputs"
 
 
+def _redact_parameters(value: Any, key: str = "") -> Any:
+    normalized_key = key.lower()
+    if any(token in normalized_key for token in ("api_key", "token", "password", "secret")):
+        return "***"
+    if isinstance(value, dict):
+        return {
+            str(item_key): _redact_parameters(item_value, str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_parameters(item) for item in value]
+    return value
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -327,6 +341,22 @@ class DatasetRunExecutor:
                 node_status = "completed"
                 node_decision = "continue"
                 node_reason_codes: list[str] = []
+                operator_provider_id = self.operator_runtime.get(
+                    node.operator_version_id
+                ).spec.provider.provider_id
+                self.run_store.add_event(
+                    run["id"],
+                    "asset_node_started",
+                    {
+                        "asset_sequence": sequence,
+                        "source_uri": str(source),
+                        "operator_version_id": node.operator_version_id,
+                        "runtime_backend": str(node.runtime_backend),
+                        "parameters": _redact_parameters(node.parameters),
+                    },
+                    node_id=node.id,
+                    provider_id=operator_provider_id,
+                )
                 try:
                     context.shared["active_node_id"] = node.id
                     result = self.operator_runtime.execute(
@@ -377,6 +407,22 @@ class DatasetRunExecutor:
                         "error": node_error,
                         "duration_ms": round((time.perf_counter() - started_at) * 1000),
                     },
+                )
+                self.run_store.add_event(
+                    run["id"],
+                    "asset_node_completed",
+                    {
+                        "asset_sequence": sequence,
+                        "source_uri": str(source),
+                        "operator_version_id": node.operator_version_id,
+                        "status": node_status,
+                        "decision": node_decision,
+                        "reason_codes": node_reason_codes,
+                        "error": node_error,
+                        "duration_ms": round((time.perf_counter() - started_at) * 1000),
+                    },
+                    node_id=node.id,
+                    provider_id=operator_provider_id,
                 )
                 if stopped_at is not None:
                     break

@@ -10,10 +10,23 @@ from apps.api.main import create_app
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.imaging import analyze_image
+from dataagent.execution.dataset_runner import _redact_parameters
 
 
 def _sha256(path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_run_audit_parameter_redaction_keeps_prompts_but_hides_credentials() -> None:
+    assert _redact_parameters(
+        {
+            "system_prompt": "return JSON",
+            "model_params": {"api_key": "secret-value", "base_url": "https://example.test"},
+        }
+    ) == {
+        "system_prompt": "return JSON",
+        "model_params": {"api_key": "***", "base_url": "https://example.test"},
+    }
 
 
 def _ready_work_order(client: TestClient, source, work_order_id: str = "run_work_order"):
@@ -104,7 +117,16 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
         headers={"X-Owner-ID": "user_1"},
     ).json()
     event_types = {item["event_type"] for item in events}
-    assert {"run_started", "run_planned", "asset_completed", "run_succeeded"} <= event_types
+    assert {
+        "run_started",
+        "run_planned",
+        "asset_node_started",
+        "asset_node_completed",
+        "asset_completed",
+        "run_succeeded",
+    } <= event_types
+    node_started = next(item for item in events if item["event_type"] == "asset_node_started")
+    assert "parameters" in node_started["details"]
     node_results = client.get(
         f"/api/runs/{completed['id']}/node-results",
         headers={"X-Owner-ID": "user_1"},

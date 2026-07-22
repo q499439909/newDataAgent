@@ -1059,6 +1059,15 @@ class ConversationService:
                         f"[{node.get('runtime_backend', '-')} / "
                         f"{node.get('operator_status', 'unknown')}]"
                     )
+                    lines.append(
+                        "   parameters=`"
+                        + json.dumps(
+                            node.get("parameters") or {},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                        + "`"
+                    )
             else:
                 lines.append("当前没有可展示的实际算子流水线。")
         if asks_task_spec:

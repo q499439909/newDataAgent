@@ -1038,6 +1038,7 @@ def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
     assert "3/37" in combined
     assert "builtin.decode_check:1" in combined
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in combined
+    assert "parameters=" in combined
 
 
 def test_audit_fact_query_shows_grounded_rejection_and_failure_reasons() -> None:
