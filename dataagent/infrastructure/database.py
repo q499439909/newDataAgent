@@ -570,6 +570,17 @@ class RunStore:
             control_requested=False,
         )
 
+    def mark_partial(
+        self, run_id: str, dataset_version_id: str, error: str
+    ) -> None:
+        self._update(
+            run_id,
+            status="PARTIAL",
+            dataset_version_id=dataset_version_id,
+            error=error,
+            control_requested=False,
+        )
+
     def mark_evaluating(self, run_id: str) -> None:
         self._update(run_id, status="EVALUATING", control_requested=False)
 

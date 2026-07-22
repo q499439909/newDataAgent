@@ -150,8 +150,10 @@ class TuiSession:
         self.active_run_id = selected
         return self.client.get_run_node_results(selected)
 
-    def result(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        run = self.run()
+    def result(
+        self, run_id: str | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        run = self.run(run_id)
         dataset = (
             self.client.get_dataset(run["dataset_version_id"])
             if run.get("dataset_version_id")

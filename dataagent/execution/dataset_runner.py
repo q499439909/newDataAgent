@@ -128,6 +128,20 @@ class DatasetRunExecutor:
                 raise
             if str(report.status) != "PASSED":
                 error = "Dataset QC failed: " + ", ".join(report.reason_codes)
+                if self._is_partial_completion(dataset, report):
+                    self.run_store.mark_partial(run_id, dataset.id, error)
+                    self.run_store.add_event(
+                        run_id,
+                        "run_completed_with_errors",
+                        {
+                            "dataset_version_id": dataset.id,
+                            "qc_report_id": report.id,
+                            "reason_codes": list(report.reason_codes),
+                            "failed_asset_count": dataset.failed_count,
+                            "retryable": True,
+                        },
+                    )
+                    return self.run_store.get(run_id)
                 self.run_store.mark_quality_failed(run_id, dataset.id, error)
                 self.run_store.add_event(
                     run_id,
@@ -145,6 +159,13 @@ class DatasetRunExecutor:
                 run_id, "run_succeeded", {"dataset_version_id": dataset.id}
             )
         return self.run_store.get(run_id)
+
+    @staticmethod
+    def _is_partial_completion(dataset: DatasetVersion, report: Any) -> bool:
+        return (
+            dataset.failed_count > 0
+            and set(report.reason_codes) == {"EXECUTION_FAILURES_PRESENT"}
+        )
 
     @staticmethod
     def _validate_materialized_dataset(dataset: DatasetVersion) -> None:

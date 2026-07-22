@@ -131,7 +131,14 @@ class FakeControlPlaneClient:
         return self._run({"pause": "PAUSED", "resume": "QUEUED", "cancel": "CANCELLED"}[action])
 
     def get_dataset(self, dataset_version_id):
-        return {"id": dataset_version_id, "kept_count": 1}
+        return {
+            "id": dataset_version_id,
+            "source_count": 1,
+            "kept_count": 1,
+            "rejected_count": 0,
+            "failed_count": 0,
+            "manifest_uri": "D:/datasets/dataset_1/manifest.json",
+        }
 
     def get_qc_report(self, qc_report_id):
         return {"id": qc_report_id, "status": "PASSED"}
@@ -344,7 +351,7 @@ def test_tui_automatically_reports_run_terminal_status() -> None:
             raise AssertionError("run monitor did not report terminal status")
         time.sleep(0.02)
 
-    assert client.polls == 1
+    assert client.polls == 2
     assert app._run_monitors == {}
 
 

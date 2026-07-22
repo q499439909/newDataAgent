@@ -19,6 +19,7 @@ class RunStatus(StrEnum):
     CANCELLED = "CANCELLED"
     EVALUATING = "EVALUATING"
     SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
     FAILED = "FAILED"
 
 

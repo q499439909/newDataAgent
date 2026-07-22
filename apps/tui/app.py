@@ -117,7 +117,7 @@ class TuiApp:
             self._start_run_monitor(run)
 
     def _start_run_monitor(self, run: dict[str, Any]) -> None:
-        terminal = {"SUCCEEDED", "FAILED", "CANCELLED", "PAUSED"}
+        terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "PAUSED"}
         run_id = str(run["id"])
         if run.get("status") in terminal:
             return
@@ -135,7 +135,7 @@ class TuiApp:
             monitor.start()
 
     def _monitor_run(self, run_id: str, initial: dict[str, Any]) -> None:
-        terminal = {"SUCCEEDED", "FAILED", "CANCELLED", "PAUSED"}
+        terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "PAUSED"}
         previous = (
             initial.get("status"),
             initial.get("progress"),
@@ -155,6 +155,8 @@ class TuiApp:
                     self.console.print(
                         f"[{style}]Run {run_id} finished with status {current[0]}.[/{style}]"
                     )
+                    if run.get("dataset_version_id"):
+                        self._render_result(*self.session.result(run_id))
                     return
         except Exception as exc:
             self.console.print(f"\n[yellow]Run monitor stopped: {exc}[/yellow]")
@@ -263,7 +265,7 @@ class TuiApp:
             self.console.print(f"[red]{run['error']}[/red]")
 
     def _watch(self, run_id: str | None) -> None:
-        terminal = {"SUCCEEDED", "FAILED", "CANCELLED", "PAUSED"}
+        terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "PAUSED"}
         while True:
             run = self.session.run(run_id)
             self._render_run(run)
@@ -281,19 +283,27 @@ class TuiApp:
         table.add_column(style="dim")
         table.add_column()
         table.add_row("Dataset", dataset["id"])
-        table.add_row("Sources", str(dataset["source_count"]))
-        table.add_row("Kept", str(dataset["kept_count"]))
-        table.add_row("Rejected", str(dataset["rejected_count"]))
-        table.add_row("Manifest", dataset["manifest_uri"])
+        table.add_row("Sources", str(dataset.get("source_count", "-")))
+        table.add_row("Kept", str(dataset.get("kept_count", "-")))
+        table.add_row("Rejected", str(dataset.get("rejected_count", "-")))
+        table.add_row("Failed", str(dataset.get("failed_count", "-")))
+        table.add_row("Manifest", str(dataset.get("manifest_uri", "-")))
         if report:
             table.add_row("QC", report["status"])
+            metrics = report.get("metrics") or {}
             table.add_row(
                 "Hard violations",
-                str(report["metrics"]["hard_rule_violation_rate"]),
+                str(metrics.get("hard_rule_violation_rate", "-")),
             )
             table.add_row(
                 "Semantic verified",
-                "yes" if report["semantic_quality_verified"] else "no",
+                (
+                    "yes"
+                    if report.get("semantic_quality_verified") is True
+                    else "no"
+                    if report.get("semantic_quality_verified") is False
+                    else "-"
+                ),
             )
         self.console.print(table)
 

@@ -11,6 +11,7 @@ from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.imaging import analyze_image
 from dataagent.execution.dataset_runner import _redact_parameters
+from dataagent.execution.dataset_runner import DatasetRunExecutor
 
 
 def _sha256(path) -> str:
@@ -27,6 +28,23 @@ def test_run_audit_parameter_redaction_keeps_prompts_but_hides_credentials() -> 
         "system_prompt": "return JSON",
         "model_params": {"api_key": "***", "base_url": "https://example.test"},
     }
+
+
+def test_only_retryable_execution_failures_are_partial_completions() -> None:
+    class Dataset:
+        failed_count = 1
+
+    class ExecutionFailureReport:
+        reason_codes = ("EXECUTION_FAILURES_PRESENT",)
+
+    class MixedFailureReport:
+        reason_codes = (
+            "EXECUTION_FAILURES_PRESENT",
+            "REQUIRED_SEMANTIC_OUTPUT_MISSING",
+        )
+
+    assert DatasetRunExecutor._is_partial_completion(Dataset(), ExecutionFailureReport())
+    assert not DatasetRunExecutor._is_partial_completion(Dataset(), MixedFailureReport())
 
 
 def _ready_work_order(client: TestClient, source, work_order_id: str = "run_work_order"):
