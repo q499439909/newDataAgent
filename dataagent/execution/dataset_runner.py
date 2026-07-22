@@ -433,7 +433,13 @@ class DatasetRunExecutor:
             self.run_store.add_event(
                 run["id"],
                 "asset_completed",
-                {"sequence": sequence, "decision": decision, "source_uri": str(source)},
+                {
+                    "sequence": sequence,
+                    "decision": decision,
+                    "source_uri": str(source),
+                    "reason_codes": reason_codes,
+                    "retryable": decision == "failed",
+                },
                 progress=sequence + 1,
             )
 

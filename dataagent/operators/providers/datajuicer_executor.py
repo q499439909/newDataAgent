@@ -113,6 +113,7 @@ class DataJuicerProcessExecutor:
         *,
         runtime_root: Path,
         timeout_seconds: int = 300,
+        remote_asset_timeout_seconds: int = 90,
         allow_model_download: bool = False,
     ) -> None:
         if not command_prefix:
@@ -120,6 +121,7 @@ class DataJuicerProcessExecutor:
         self.command_prefix = tuple(str(item) for item in command_prefix)
         self.runtime_root = runtime_root.expanduser().resolve()
         self.timeout_seconds = timeout_seconds
+        self.remote_asset_timeout_seconds = remote_asset_timeout_seconds
         self.allow_model_download = allow_model_download
 
     def __call__(self, request: ProviderExecuteRequest) -> ProviderExecuteResult:
@@ -289,6 +291,12 @@ except ImportError:
             execution_root,
             environment,
             request.context.shared.get("cancel_check"),
+            timeout_seconds=(
+                self.remote_asset_timeout_seconds
+                if request.runtime_backend == RuntimeBackend.REMOTE
+                and len(request.items) == 1
+                else self.timeout_seconds
+            ),
         )
         duration = time.monotonic() - started
         stdout_tail = _tail(stdout)
@@ -480,6 +488,8 @@ except ImportError:
         cwd: Path,
         environment: dict[str, str],
         cancel_check: Any,
+        *,
+        timeout_seconds: int,
     ) -> tuple[int, str, str, str | None]:
         stdout_handle = tempfile.TemporaryFile(
             mode="w+", encoding="utf-8", errors="replace"
@@ -499,7 +509,7 @@ except ImportError:
                 text=True,
                 start_new_session=True,
             )
-            deadline = time.monotonic() + self.timeout_seconds
+            deadline = time.monotonic() + timeout_seconds
             error_type: str | None = None
             while process.poll() is None:
                 if isinstance(cancel_check, Callable) and cancel_check():

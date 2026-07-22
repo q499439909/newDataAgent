@@ -38,6 +38,7 @@ def build_operator_library(
     datajuicer_process_bin: Path | None = None,
     datajuicer_runtime_root: Path | None = None,
     datajuicer_timeout_seconds: int = 300,
+    remote_asset_timeout_seconds: int = 90,
     vision_model: str = "qwen3.7-plus",
     vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
 ) -> OperatorLibrary:
@@ -73,6 +74,7 @@ def build_operator_library(
                     (datajuicer_process_bin,),
                     runtime_root=datajuicer_runtime_root,
                     timeout_seconds=datajuicer_timeout_seconds,
+                    remote_asset_timeout_seconds=remote_asset_timeout_seconds,
                     allow_model_download=allow_model_download,
                 )
             else:

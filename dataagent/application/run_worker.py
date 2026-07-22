@@ -23,6 +23,7 @@ class LocalRunWorker:
         datajuicer_python: Path | None = None,
         datajuicer_process_bin: Path | None = None,
         datajuicer_timeout_seconds: int = 300,
+        remote_asset_timeout_seconds: int = 90,
     ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
@@ -41,6 +42,7 @@ class LocalRunWorker:
                 datajuicer_process_bin=datajuicer_process_bin,
                 datajuicer_runtime_root=self.home / "providers" / "datajuicer",
                 datajuicer_timeout_seconds=datajuicer_timeout_seconds,
+                remote_asset_timeout_seconds=remote_asset_timeout_seconds,
             ).runtime,
             quality_evaluator=QualityEvaluator(self.version_store),
         )

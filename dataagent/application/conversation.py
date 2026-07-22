@@ -590,14 +590,22 @@ class ConversationService:
                 (control_context or {}).get("execution_request_id")
                 or new_id("execution_request")
             )
-            run = self.agent_runtime.submit_dataset_run(
-                work_order_id=work_order_id,
-                owner_id=owner_id,
-                idempotency_key=(
-                    f"conversation-{decision.intent.value.lower()}-"
-                    + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
-                ),
+            idempotency_key = (
+                f"conversation-{decision.intent.value.lower()}-"
+                + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
             )
+            if decision.intent == ConversationIntent.RETRY_RUN:
+                run = self.agent_runtime.retry_failed_assets(
+                    previous_run_id=previous_run["id"],
+                    owner_id=owner_id,
+                    idempotency_key=idempotency_key,
+                )
+            else:
+                run = self.agent_runtime.submit_dataset_run(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                    idempotency_key=idempotency_key,
+                )
             context["active_run_id"] = run["id"]
             self.store.update(
                 thread_id=thread["id"], owner_id=owner_id, context=context

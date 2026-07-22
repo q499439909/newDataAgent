@@ -51,6 +51,7 @@ class AgentRuntime:
         datajuicer_python: Path | None = None,
         datajuicer_process_bin: Path | None = None,
         datajuicer_timeout_seconds: int = 300,
+        remote_asset_timeout_seconds: int = 90,
         allow_datajuicer_candidate_execution: bool = True,
         remote_operator_available: bool = False,
         vision_model: str = "qwen3.7-plus",
@@ -92,6 +93,7 @@ class AgentRuntime:
             if self.home is not None
             else None,
             datajuicer_timeout_seconds=datajuicer_timeout_seconds,
+            remote_asset_timeout_seconds=remote_asset_timeout_seconds,
             vision_model=vision_model,
             vision_api_base_url=vision_api_base_url,
         )
@@ -409,6 +411,52 @@ class AgentRuntime:
             idempotency_key=idempotency_key,
         )
         return self._run_payload(run)
+
+    def retry_failed_assets(
+        self,
+        *,
+        previous_run_id: str,
+        owner_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset runs")
+        previous = self.run_store.get(previous_run_id, owner_id)
+        failed_sequences = {
+            int(item["sequence"])
+            for item in self.run_store.items(previous_run_id)
+            if item["decision"] == "failed"
+        }
+        if not failed_sequences:
+            raise ValueError("The selected Run has no failed assets to retry")
+        new_run = self.run_store.create(
+            run_id=new_id("run"),
+            work_order_id=previous["work_order_id"],
+            owner_id=owner_id,
+            pipeline_version_id=previous["pipeline_version_id"],
+            task_spec_version_id=previous["task_spec_version_id"],
+            idempotency_key=idempotency_key,
+        )
+        previous_plan = self.run_store.plan(previous_run_id)
+        retry_plan = [
+            {**item, "sequence": retry_sequence}
+            for retry_sequence, item in enumerate(
+                item
+                for item in previous_plan
+                if int(item["sequence"]) in failed_sequences
+            )
+        ]
+        self.run_store.initialize_plan(new_run["id"], retry_plan)
+        self.run_store.add_event(
+            new_run["id"],
+            "failed_assets_retry_scheduled",
+            {
+                "previous_run_id": previous_run_id,
+                "asset_count": len(retry_plan),
+                "source_uris": [item["source_uri"] for item in retry_plan],
+            },
+        )
+        return self._run_payload(self.run_store.get(new_run["id"], owner_id))
 
     def reselect_pipeline(
         self,

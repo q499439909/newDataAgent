@@ -654,6 +654,48 @@ Path(recipe["export_path"]).write_text(
     assert marker.read_text().splitlines() == ["1"]
 
 
+def test_remote_single_asset_uses_bounded_timeout_and_returns_retryable_failure(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (32, 24), (80, 100, 120)).save(source)
+    executor = DataJuicerProcessExecutor(
+        ("dj-process",),
+        runtime_root=tmp_path / "provider-runtime",
+        timeout_seconds=300,
+        remote_asset_timeout_seconds=17,
+    )
+    observed = {}
+
+    def fake_run(command, cwd, environment, cancel_check, *, timeout_seconds):
+        observed["timeout_seconds"] = timeout_seconds
+        return 124, "", "asset request timed out", "timeout"
+
+    monkeypatch.setattr(executor, "_run", fake_run)
+    monkeypatch.setenv("BAILIAN_API_KEY", "test-key")
+
+    result = executor(
+        ProviderExecuteRequest(
+            provider_operator_ref="image_tagging_vlm_mapper",
+            runtime_backend=RuntimeBackend.REMOTE,
+            context=OperatorContext(
+                run_id="run_timeout",
+                work_order_id="work_order_1",
+                owner_id="user_1",
+            ),
+            input_data=OperatorInput(
+                source_path=str(source), current_path=str(source)
+            ),
+            parameters={},
+        )
+    )
+
+    assert observed["timeout_seconds"] == 17
+    assert result.ok is False
+    assert result.error_type == "timeout"
+    assert "timed out" in result.message
+
+
 def test_invalid_external_datajuicer_environment_does_not_break_library(tmp_path) -> None:
     library = build_operator_library(
         datajuicer_python=tmp_path / "missing-python.exe",

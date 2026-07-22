@@ -52,6 +52,7 @@ class Settings:
     datajuicer_python: Path | None = None
     datajuicer_process_bin: Path | None = None
     datajuicer_timeout_seconds: int = 300
+    remote_asset_timeout_seconds: int = 90
     allow_datajuicer_candidate_execution: bool = True
     fast_text_model: str = "glm-5.2"
     vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -131,6 +132,9 @@ class Settings:
             ),
             datajuicer_timeout_seconds=int(
                 os.getenv("DATAAGENT_DATAJUICER_TIMEOUT_SECONDS", "300")
+            ),
+            remote_asset_timeout_seconds=int(
+                os.getenv("DATAAGENT_REMOTE_ASSET_TIMEOUT_SECONDS", "90")
             ),
             allow_datajuicer_candidate_execution=_env_bool(
                 "DATAAGENT_ALLOW_DATAJUICER_CANDIDATES", True

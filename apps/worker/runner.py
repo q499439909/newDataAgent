@@ -19,6 +19,7 @@ def main() -> None:
         datajuicer_python=settings.datajuicer_python,
         datajuicer_process_bin=settings.datajuicer_process_bin,
         datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
+        remote_asset_timeout_seconds=settings.remote_asset_timeout_seconds,
     )
     if args.once:
         worker.process_next()

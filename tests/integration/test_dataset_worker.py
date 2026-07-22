@@ -261,3 +261,58 @@ def test_worker_resumes_from_asset_checkpoint_without_reprocessing(tmp_path) -> 
     assert completed["total"] == 2
     assert completed["kept"] == 1
     assert completed["rejected"] == 1
+
+
+def test_retry_failed_assets_creates_a_new_run_with_only_failed_sources(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    first = source / "ok.png"
+    second = source / "timeout.png"
+    Image.new("RGB", (64, 64), "white").save(first)
+    Image.new("RGB", (64, 64), "black").save(second)
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(client, source, work_order_id="retry_work_order")
+    previous = client.post(
+        "/api/work-orders/retry_work_order/runs",
+        headers={"X-Owner-ID": "user_1", "Idempotency-Key": "first-attempt"},
+    ).json()
+    assert runtime.run_store is not None
+    plan = [
+        {
+            "sequence": index,
+            "source_uri": str(path.resolve()),
+            "source_sha256": _sha256(path),
+            "output_relative_path": path.name,
+        }
+        for index, path in enumerate((first, second))
+    ]
+    runtime.run_store.initialize_plan(previous["id"], plan)
+    for item, decision in zip(plan, ("keep", "failed"), strict=True):
+        runtime.run_store.add_item(
+            previous["id"],
+            {
+                **item,
+                "output_relative_path": None,
+                "output_sha256": None,
+                "decision": decision,
+                "reason_codes": ["OPERATOR_ERROR:TimeoutError"] if decision == "failed" else [],
+                "metrics": {},
+                "labels": {},
+            },
+        )
+
+    retry = runtime.retry_failed_assets(
+        previous_run_id=previous["id"],
+        owner_id="user_1",
+        idempotency_key="retry-failed-only",
+    )
+
+    retry_plan = runtime.run_store.plan(retry["id"])
+    assert retry["id"] != previous["id"]
+    assert [item["source_uri"] for item in retry_plan] == [str(second.resolve())]
+    assert retry_plan[0]["sequence"] == 0
+    event = runtime.run_store.events(retry["id"], "user_1")[0]
+    assert event["event_type"] == "failed_assets_retry_scheduled"
+    assert event["details"]["previous_run_id"] == previous["id"]

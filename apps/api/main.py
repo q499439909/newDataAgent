@@ -83,6 +83,7 @@ def create_app(
         datajuicer_python=settings.datajuicer_python,
         datajuicer_process_bin=settings.datajuicer_process_bin,
         datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
+        remote_asset_timeout_seconds=settings.remote_asset_timeout_seconds,
         allow_datajuicer_candidate_execution=(
             settings.allow_datajuicer_candidate_execution
         ),
