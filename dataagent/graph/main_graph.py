@@ -10,6 +10,7 @@ from ..agents.requirement import build_requirement_graph
 from ..agents.retrieval import build_retrieval_graph
 from ..agents.shared import WorkOrderGraphState
 from ..agents.strategy import build_strategy_graph
+from ..experiences import PipelineExperienceRetriever
 from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
 from .routing import (
     route_after_pipeline_approval,
@@ -27,6 +28,7 @@ def build_main_graph(
     available_runtime_backends: frozenset[RuntimeBackend] = frozenset(
         {RuntimeBackend.CPU}
     ),
+    experience_retriever: PipelineExperienceRetriever | None = None,
 ):
     """Build the four-agent decision graph.
 
@@ -49,7 +51,10 @@ def build_main_graph(
             available_runtime_backends=available_runtime_backends,
         ),
     )
-    graph.add_node("processing_agent", build_processing_graph(operator_library))
+    graph.add_node(
+        "processing_agent",
+        build_processing_graph(operator_library, experience_retriever),
+    )
     graph.add_node("resolve_capability_gaps", resolve_capability_gaps)
     graph.add_node("approve_pipeline", approve_pipeline)
     graph.add_node("strategy_agent", build_strategy_graph())

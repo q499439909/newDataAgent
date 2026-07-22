@@ -17,7 +17,7 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..execution import NodePreviewBuilder
-from ..experiences import PipelineExperienceService
+from ..experiences import PipelineExperienceRetriever, PipelineExperienceService
 from ..graph import build_main_graph
 from ..graph.interrupts import revise_task_spec_version
 from ..infrastructure import (
@@ -115,6 +115,11 @@ class AgentRuntime:
                         else ()
                     ),
                 }
+            ),
+            experience_retriever=(
+                PipelineExperienceRetriever(self.version_store)
+                if self.version_store is not None
+                else None
             ),
         )
 

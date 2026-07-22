@@ -47,6 +47,7 @@ class PipelineVersion(VersionedModel):
     nodes: tuple[PipelineNode, ...]
     edges: tuple[PipelineEdge, ...] = ()
     created_from: str
+    template_experience_id: str | None = None
     run_id: str | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
     approved: bool = False

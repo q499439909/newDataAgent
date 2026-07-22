@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .domain.common import new_id
 from .domain.evaluations import QCReport, QCStatus
@@ -30,6 +33,7 @@ def task_signature(spec: TaskSpecVersion) -> TaskSignature:
         "modality:image",
         "capabilities:" + ",".join(sorted(capabilities)),
         "actions:" + ",".join(sorted(spec.output_actions)),
+        "objective:" + " ".join(spec.objective.lower().split()),
     ]
     if classification_mode:
         summary_parts.append(f"classification:{classification_mode}")
@@ -41,6 +45,144 @@ def task_signature(spec: TaskSpecVersion) -> TaskSignature:
         label_ids=label_ids,
         normalized_summary="; ".join(summary_parts),
     )
+
+
+class PipelineExperienceMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    experience_id: str
+    pipeline_version_id: str
+    strategy: str
+    score: float = Field(ge=0, le=100)
+    structural_score: float = Field(ge=0, le=1)
+    semantic_score: float = Field(ge=0, le=1)
+    quality_score: float = Field(ge=0, le=1)
+    reasons: tuple[str, ...]
+
+
+def _jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 1.0
+
+
+def _semantic_terms(value: str) -> set[str]:
+    normalized = " ".join(value.lower().split())
+    words = set(re.findall(r"[a-z0-9_]+", normalized))
+    compact = "".join(character for character in normalized if not character.isspace())
+    trigrams = {
+        compact[index : index + 3]
+        for index in range(max(0, len(compact) - 2))
+    }
+    return words | trigrams
+
+
+class PipelineExperienceRetriever:
+    def __init__(self, version_store: DomainVersionStore) -> None:
+        self.version_store = version_store
+
+    def search(
+        self,
+        spec: TaskSpecVersion,
+        *,
+        owner_id: str,
+        available_operator_ids: set[str] | None = None,
+        include_candidates: bool = False,
+        limit: int = 5,
+    ) -> tuple[PipelineExperienceMatch, ...]:
+        current = task_signature(spec)
+        latest: dict[str, PipelineExperience] = {}
+        for payload in self.version_store.list_for_owner(
+            kind="pipeline_experience", owner_id=owner_id
+        ):
+            experience = PipelineExperience.model_validate(payload)
+            previous = latest.get(experience.run_id)
+            if previous is None or experience.version > previous.version:
+                latest[experience.run_id] = experience
+
+        matches: list[PipelineExperienceMatch] = []
+        for experience in latest.values():
+            if experience.status == ExperienceStatus.REJECTED:
+                continue
+            if (
+                experience.status != ExperienceStatus.RECOMMENDED
+                and not include_candidates
+            ):
+                continue
+            historical = experience.task_signature
+            current_capabilities = set(current.capabilities)
+            historical_capabilities = set(historical.capabilities)
+            if not current_capabilities.issubset(historical_capabilities):
+                continue
+            if current.modality != historical.modality:
+                continue
+            if (
+                current.classification_mode
+                and current.classification_mode != historical.classification_mode
+            ):
+                continue
+            historical_operators = set(
+                experience.compatibility.get("operator_version_ids", ())
+            )
+            if (
+                available_operator_ids is not None
+                and not historical_operators.issubset(available_operator_ids)
+            ):
+                continue
+
+            capability_score = _jaccard(
+                current_capabilities, historical_capabilities
+            )
+            action_score = _jaccard(
+                set(current.output_actions), set(historical.output_actions)
+            )
+            classification_score = 1.0
+            if current.classification_mode:
+                classification_score = (
+                    1.0
+                    if len(current.label_ids) == len(historical.label_ids)
+                    else 0.5
+                )
+            structural = (
+                capability_score * 0.55
+                + action_score * 0.3
+                + classification_score * 0.15
+            )
+            semantic = _jaccard(
+                _semantic_terms(current.normalized_summary),
+                _semantic_terms(historical.normalized_summary),
+            )
+            qc_quality = 1.0 - float(
+                experience.outcome_metrics.get("execution_failure_rate", 0.0)
+            )
+            retention = float(
+                experience.outcome_metrics.get("retention_rate", 0.5)
+            )
+            rating = (experience.rating or 3) / 5
+            quality = max(0.0, min(1.0, qc_quality * 0.5 + retention * 0.2 + rating * 0.3))
+            score = round(structural * 60 + semantic * 15 + quality * 25, 4)
+            matches.append(
+                PipelineExperienceMatch(
+                    experience_id=experience.id,
+                    pipeline_version_id=experience.pipeline_version_id,
+                    strategy=experience.strategy,
+                    score=score,
+                    structural_score=round(structural, 6),
+                    semantic_score=round(semantic, 6),
+                    quality_score=round(quality, 6),
+                    reasons=(
+                        f"capability_overlap:{capability_score:.3f}",
+                        f"action_overlap:{action_score:.3f}",
+                        f"classification_shape:{classification_score:.3f}",
+                        f"user_rating:{experience.rating or 0}",
+                    ),
+                )
+            )
+        return tuple(
+            sorted(
+                matches,
+                key=lambda item: (-item.score, item.experience_id),
+            )[:limit]
+        )
 
 
 class PipelineExperienceService:
@@ -184,4 +326,9 @@ class PipelineExperienceService:
         }
 
 
-__all__ = ["PipelineExperienceService", "task_signature"]
+__all__ = [
+    "PipelineExperienceMatch",
+    "PipelineExperienceRetriever",
+    "PipelineExperienceService",
+    "task_signature",
+]

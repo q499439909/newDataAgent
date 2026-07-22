@@ -3,15 +3,23 @@ from functools import partial
 from langgraph.graph import END, START, StateGraph
 
 from ...operators import OperatorLibrary
+from ...experiences import PipelineExperienceRetriever
 from ..shared import WorkOrderGraphState
 from .nodes import generate_pipeline_variants, select_representative_pipelines
 
 
-def build_processing_graph(operator_library: OperatorLibrary | None = None):
+def build_processing_graph(
+    operator_library: OperatorLibrary | None = None,
+    experience_retriever: PipelineExperienceRetriever | None = None,
+):
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node(
         "generate_pipeline_variants",
-        partial(generate_pipeline_variants, operator_library=operator_library),
+        partial(
+            generate_pipeline_variants,
+            operator_library=operator_library,
+            experience_retriever=experience_retriever,
+        ),
     )
     graph.add_node("select_representatives", select_representative_pipelines)
     graph.add_edge(START, "generate_pipeline_variants")

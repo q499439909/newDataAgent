@@ -13,6 +13,7 @@ from ...domain.pipelines import (
 )
 from ...domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ...domain.specs import TaskSpecVersion
+from ...experiences import PipelineExperienceMatch, PipelineExperienceRetriever
 from ...operators import OperatorLibrary, build_operator_library
 from ...operators.catalog_matching import OperatorCatalogMatch
 from ...operators.validation import validate_parameters
@@ -343,6 +344,7 @@ def _build_pipeline(
     spec: TaskSpecVersion,
     owner_id: str,
     operator_library: OperatorLibrary | None,
+    template_experience_id: str | None = None,
 ) -> PipelineVersion:
     nodes = _compile_nodes(
         state,
@@ -363,7 +365,12 @@ def _build_pipeline(
         task_spec_version_id=spec.id,
         nodes=nodes,
         edges=edges,
-        created_from="processing_agent",
+        created_from=(
+            f"pipeline_experience:{template_experience_id}"
+            if template_experience_id
+            else "processing_agent"
+        ),
+        template_experience_id=template_experience_id,
     )
 
 
@@ -371,20 +378,43 @@ def generate_pipeline_variants(
     state: WorkOrderGraphState,
     *,
     operator_library: OperatorLibrary | None = None,
+    experience_retriever: PipelineExperienceRetriever | None = None,
 ) -> dict:
     spec = TaskSpecVersion.model_validate(state["task_spec"])
+    library = operator_library or build_operator_library(include_datajuicer=False)
+    available_operator_ids = {
+        item.id for item in library.registry.search(include_drafts=True)
+    }
+    experience_matches: tuple[PipelineExperienceMatch, ...] = ()
+    if experience_retriever is not None:
+        experience_matches = experience_retriever.search(
+            spec,
+            owner_id=state["owner_id"],
+            available_operator_ids=available_operator_ids,
+        )
     variants = [
         _build_pipeline(
             strategy=strategy,
             state=state,
             spec=spec,
             owner_id=state["owner_id"],
-            operator_library=operator_library,
+            operator_library=library,
+            template_experience_id=next(
+                (
+                    match.experience_id
+                    for match in experience_matches
+                    if match.strategy == strategy.value
+                ),
+                experience_matches[0].experience_id if experience_matches else None,
+            ),
         ).model_dump(mode="json")
         for strategy in PipelineStrategy
     ]
     return {
         "pipeline_variants": variants,
+        "pipeline_experience_matches": [
+            item.model_dump(mode="json") for item in experience_matches
+        ],
         "current_agent": "processing",
         "trace": append_trace(state, "processing:variants_generated"),
     }

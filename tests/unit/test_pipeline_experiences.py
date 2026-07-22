@@ -11,7 +11,7 @@ from dataagent.domain.specs import (
     TaskCapabilitySpec,
     TaskSpecVersion,
 )
-from dataagent.experiences import PipelineExperienceService
+from dataagent.experiences import PipelineExperienceRetriever, PipelineExperienceService
 from dataagent.infrastructure import DomainVersionStore, RunStore, SqliteDatabase
 
 
@@ -145,3 +145,55 @@ def test_feedback_is_versioned_and_owner_scoped(tmp_path) -> None:
         service.record_feedback(
             owner_id="another_user", run_id="run_1", accepted=True
         )
+
+
+def test_retrieval_matches_task_shape_and_requires_current_operators(tmp_path) -> None:
+    version_store, run_store = _stores(tmp_path)
+    _seed_success(version_store, run_store)
+    PipelineExperienceService(version_store, run_store).record_feedback(
+        owner_id="user_1",
+        run_id="run_1",
+        accepted=True,
+        reusable=True,
+        rating=5,
+    )
+    query = TaskSpecVersion(
+        id="spec_query",
+        version=1,
+        created_by="user_1",
+        change_reason="query",
+        work_order_id="work_query",
+        objective="Classify cats and dogs",
+        data_sources=(DataSourceSpec(type="local_directory", uri="D:/new-images"),),
+        output_actions=("classify", "partition", "manifest"),
+        capability_requirements=(
+            TaskCapabilitySpec(
+                id="image_classification",
+                capability="image_classification",
+                description="Classify images",
+            ),
+        ),
+        classification=ClassificationSpec(
+            labels=(
+                ClassificationLabelSpec(id="cat", display_name="Cat"),
+                ClassificationLabelSpec(id="dog", display_name="Dog"),
+            )
+        ),
+    )
+    retriever = PipelineExperienceRetriever(version_store)
+
+    matches = retriever.search(
+        query,
+        owner_id="user_1",
+        available_operator_ids={"provider.classifier:1"},
+    )
+    blocked = retriever.search(
+        query,
+        owner_id="user_1",
+        available_operator_ids=set(),
+    )
+
+    assert len(matches) == 1
+    assert matches[0].structural_score == 1.0
+    assert matches[0].score > 80
+    assert blocked == ()

@@ -20,6 +20,7 @@ class WorkOrderGraphState(TypedDict, total=False):
     capability_resolution: dict[str, Any]
     capability_resolution_attempt: int
     runtime_backend_overrides: list[str]
+    pipeline_experience_matches: list[dict[str, Any]]
 
     pipeline_variants: list[dict[str, Any]]
     representative_pipelines: list[dict[str, Any]]
