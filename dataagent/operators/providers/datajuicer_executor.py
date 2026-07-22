@@ -23,6 +23,7 @@ from .protocol import (
     ProviderExecuteRequest,
     ProviderExecuteResult,
 )
+from .output_adapters import adapt_provider_output
 
 
 _SAFE_OPERATOR_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -30,16 +31,6 @@ _SAFE_OPERATOR_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 def _tail(value: str, limit: int = 4000) -> str:
     return value[-limit:].strip()
-
-
-def _has_semantic_value(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, dict):
-        return any(_has_semantic_value(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_has_semantic_value(item) for item in value)
-    return False
 
 
 class DataJuicerSubprocessSearcher:
@@ -389,27 +380,33 @@ except ImportError:
                 output_fields.update(stats_meta)
             output_fields_by_id[internal_id] = output_fields
 
-        if request.provider_operator_ref == "image_tagging_vlm_mapper":
-            tag_field = str(request.parameters.get("tag_field_name") or "image_tags")
-            missing_tags = [
-                internal_id
-                for internal_id in internal_ids
-                if not _has_semantic_value(
-                    output_fields_by_id.get(internal_id, {}).get(tag_field)
-                )
-            ]
-            if missing_tags:
-                return ProviderDatasetExecuteResult(
-                    ok=False,
-                    error_type="empty_provider_semantic_output",
-                    message=(
-                        "Data-Juicer image_tagging_vlm_mapper produced no non-empty "
-                        f"{tag_field} for {len(missing_tags)}/{len(internal_ids)} assets"
-                    ),
-                    duration_seconds=duration,
-                    stdout_tail=stdout_tail,
-                    stderr_tail=stderr_tail,
-                )
+        output_errors: dict[str, tuple[str, ...]] = {}
+        for internal_id in internal_ids:
+            adapted = adapt_provider_output(
+                request.provider_operator_ref,
+                request.parameters,
+                output_fields_by_id.get(internal_id, {}),
+            )
+            output_fields_by_id[internal_id] = adapted.fields
+            if adapted.errors:
+                output_errors[internal_id] = adapted.errors
+        if output_errors:
+            examples = "; ".join(
+                f"{internal_id}: {', '.join(errors)}"
+                for internal_id, errors in list(output_errors.items())[:3]
+            )
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="provider_output_contract_violation",
+                message=(
+                    f"Data-Juicer {request.provider_operator_ref} violated its governed "
+                    f"output contract for {len(output_errors)}/{len(internal_ids)} assets: "
+                    f"{examples}"
+                ),
+                duration_seconds=duration,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            )
 
         artifacts = [
             AssetRef(

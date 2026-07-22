@@ -196,7 +196,10 @@ def test_proxy_repairs_empty_container_types_from_cached_discovery_schema() -> N
     assert properties["sampling_params"]["type"] == "object"
     normalized = validate_parameters(remote.parameter_schema, {})
     assert normalized["model_params"]["base_url"]
-    assert normalized["sampling_params"] == {}
+    assert normalized["sampling_params"] == {
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
     validation = provider.validate(
         "image_tagging_vlm_mapper",
         normalized,
@@ -437,7 +440,9 @@ Path(recipe["export_path"]).with_name("output_stats.jsonl").write_text(
     assert result.ok is True
     output = result.items[0].result.labels["datajuicer_output"]
     assert output["remote_key_present"] is True
-    assert output["image_tags"] == [["cat"]]
+    assert output["image_tags"] == ["cat"]
+    assert output["image_tags__provider_raw"] == [["cat"]]
+    assert output["_dataagent_output_contract"] == "image_tag_set:1"
     assert output["authenticity_tags"] == [["authentic"]]
     recipe_text = next((tmp_path / "runtime").rglob("recipe.yaml")).read_text(
         encoding="utf-8"
@@ -497,7 +502,7 @@ output.with_name("output_stats.jsonl").write_text(
     )
 
     assert result.ok is False
-    assert result.error_type == "empty_provider_semantic_output"
+    assert result.error_type == "provider_output_contract_violation"
     assert "1/1 assets" in result.message
 
 
@@ -631,6 +636,11 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         for node in remote_nodes
     )
     assert all(node.parameters["accelerator"] == "cpu" for node in remote_nodes)
+    assert all(
+        node.parameters["sampling_params"]
+        == {"temperature": 0, "response_format": {"type": "json_object"}}
+        for node in remote_nodes
+    )
     assert all(
         '{"tags":[' in node.parameters["system_prompt"]
         and "strict JSON only" in node.parameters["system_prompt"]

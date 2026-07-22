@@ -193,6 +193,13 @@ def _proxy_variants(
                 ("api_or_hf_model", vision_model),
                 ("api_endpoint", "/chat/completions"),
                 ("model_params", {"base_url": vision_api_base_url}),
+                (
+                    "sampling_params",
+                    {
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"},
+                    },
+                ),
                 ("accelerator", "cpu"),
             ),
             output_schema="ImageTagSet",
