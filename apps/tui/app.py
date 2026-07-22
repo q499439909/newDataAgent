@@ -91,6 +91,8 @@ class TuiApp:
             self._chat(f"{action}当前 Run。")
         elif command == "/watch":
             self._watch(argument or None)
+        elif command == "/audit":
+            self._render_audit(self.session.audit(argument or None))
         elif command == "/result":
             self._render_result(*self.session.result())
         elif command == "/help":
@@ -295,6 +297,20 @@ class TuiApp:
             )
         self.console.print(table)
 
+    def _render_audit(self, results: list[dict[str, Any]]) -> None:
+        table = Table("Image", "Node", "Operator", "Status", "Decision", "Reason", "ms")
+        for item in results:
+            table.add_row(
+                str(item.get("source_uri", "-")),
+                str(item.get("node_id", "-")),
+                str(item.get("operator_version_id", "-")),
+                str(item.get("status", "-")),
+                str(item.get("decision", "-")),
+                ", ".join(item.get("reason_codes") or []) or str(item.get("error") or "-"),
+                str(item.get("duration_ms", 0)),
+            )
+        self.console.print(table)
+
     def _render_help(self) -> None:
         table = Table("Command", "Argument")
         for command, argument in (
@@ -308,6 +324,7 @@ class TuiApp:
             ("/run", "run_id (optional)"),
             ("/pause | /resume | /cancel", "run_id (optional)"),
             ("/watch", "run_id (optional)"),
+            ("/audit", "run_id (optional)"),
             ("/result", ""),
             ("/exit", ""),
         ):

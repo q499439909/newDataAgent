@@ -85,6 +85,9 @@ class ControlPlaneClient:
     def get_run(self, run_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/runs/{run_id}")
 
+    def get_run_node_results(self, run_id: str) -> list[dict[str, Any]]:
+        return self._request("GET", f"/api/runs/{run_id}/node-results")
+
     def control_run(self, run_id: str, action: str) -> dict[str, Any]:
         return self._request(
             "POST", f"/api/runs/{run_id}/control", json={"action": action}

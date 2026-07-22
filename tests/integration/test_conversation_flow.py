@@ -1040,6 +1040,41 @@ def test_control_fact_queries_are_grounded_composable_and_repeatable() -> None:
     assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in combined
 
 
+def test_audit_fact_query_shows_grounded_rejection_and_failure_reasons() -> None:
+    audit = ConversationService._audit_control_summary(
+        [
+            {
+                "asset_sequence": 0,
+                "source_uri": "D:/images/rejected.png",
+                "node_id": "authenticity",
+                "operator_version_id": "builtin.authenticity_decision:1",
+                "status": "completed",
+                "decision": "reject",
+                "reason_codes": ["SYNTHETIC_IMAGE"],
+                "duration_ms": 4,
+            },
+            {
+                "asset_sequence": 1,
+                "source_uri": "D:/images/failed.png",
+                "node_id": "tagging",
+                "operator_version_id": "datajuicer.image_tagging_vlm_mapper.remote_api:2",
+                "status": "failed",
+                "decision": "failed",
+                "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+                "error": "request timed out",
+                "duration_ms": 300000,
+            },
+        ]
+    )
+
+    reply = ConversationService._control_facts_reply(
+        {"latest_run_audit": audit}, frozenset({"audit"})
+    )
+
+    assert "rejected.png" in reply and "SYNTHETIC_IMAGE" in reply
+    assert "failed.png" in reply and "request timed out" in reply
+
+
 def test_dataset_result_queries_use_materialized_paths_and_actual_classes(
     tmp_path,
 ) -> None:

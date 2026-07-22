@@ -794,6 +794,15 @@ class ConversationService:
             if runs:
                 context["latest_run"] = runs[0]
                 try:
+                    node_results = self.agent_runtime.get_run_node_results(
+                        run_id=runs[0]["id"], owner_id=owner_id
+                    )
+                    context["latest_run_audit"] = self._audit_control_summary(
+                        node_results
+                    )
+                except (KeyError, RuntimeError, ValueError) as exc:
+                    context["audit_lookup_error"] = str(exc)
+                try:
                     context["latest_run_pipeline"] = (
                         self.agent_runtime.pipeline_version(
                             pipeline_version_id=runs[0]["pipeline_version_id"],
@@ -835,6 +844,47 @@ class ConversationService:
                         context["qc_report_lookup_error"] = str(exc)
         context["allowed_actions"] = list(self._allowed_actions(context))
         return context
+
+    @staticmethod
+    def _audit_control_summary(node_results: list[dict[str, Any]]) -> dict[str, Any]:
+        assets: dict[tuple[int, str], list[dict[str, Any]]] = {}
+        status_counts: dict[str, int] = {}
+        decision_counts: dict[str, int] = {}
+        for item in node_results:
+            status = str(item.get("status") or "unknown")
+            decision = str(item.get("decision") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            decision_counts[decision] = decision_counts.get(decision, 0) + 1
+            key = (int(item.get("asset_sequence", 0)), str(item.get("source_uri") or "-"))
+            assets.setdefault(key, []).append(
+                {
+                    "node_id": item.get("node_id"),
+                    "operator_version_id": item.get("operator_version_id"),
+                    "status": status,
+                    "decision": decision,
+                    "reason_codes": list(item.get("reason_codes") or []),
+                    "error": item.get("error"),
+                    "duration_ms": item.get("duration_ms", 0),
+                }
+            )
+        exceptional = []
+        for (sequence, source_uri), nodes in assets.items():
+            relevant = [
+                node
+                for node in nodes
+                if node["decision"] in {"reject", "failed"} or node["status"] == "failed"
+            ]
+            if relevant:
+                exceptional.append(
+                    {"sequence": sequence, "source_uri": source_uri, "nodes": relevant}
+                )
+        return {
+            "asset_count": len(assets),
+            "node_result_count": len(node_results),
+            "status_counts": status_counts,
+            "decision_counts": decision_counts,
+            "exceptional_assets": exceptional,
+        }
 
     @staticmethod
     def _dataset_control_summary(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -961,6 +1011,7 @@ class ConversationService:
         asks_task_spec = "task_spec" in facets
         asks_dataset = "dataset" in facets
         asks_outcome = "outcome" in facets
+        asks_audit = "audit" in facets
         pipeline = (
             run_pipeline
             if asks_dataset
@@ -1018,6 +1069,46 @@ class ConversationService:
                     lookup_error=context.get("dataset_lookup_error"),
                 )
             )
+        if asks_audit:
+            lines.append(
+                ConversationService._audit_reply(
+                    context.get("latest_run_audit"),
+                    lookup_error=context.get("audit_lookup_error"),
+                )
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _audit_reply(
+        audit: dict[str, Any] | None, *, lookup_error: str | None = None
+    ) -> str:
+        if audit is None:
+            return (
+                f"无法读取 Run 审计记录：{lookup_error}。"
+                if lookup_error
+                else "当前 Run 还没有逐节点审计记录。"
+            )
+        lines = [
+            "### 逐资产节点审计",
+            (
+                f"共 {audit.get('asset_count', 0)} 张图片、"
+                f"{audit.get('node_result_count', 0)} 条节点记录。"
+            ),
+        ]
+        exceptional = audit.get("exceptional_assets") or []
+        if not exceptional:
+            lines.append("没有节点记录为拒绝或失败。")
+            return "\n".join(lines)
+        for asset in exceptional:
+            lines.append(f"- `{asset.get('source_uri', '-')}`")
+            for node in asset.get("nodes", []):
+                reasons = ", ".join(node.get("reason_codes") or []) or "无原因码"
+                error = f"；错误：{node['error']}" if node.get("error") else ""
+                lines.append(
+                    f"  - `{node.get('node_id', '-')}` -> "
+                    f"`{node.get('operator_version_id', '-')}`："
+                    f"{node.get('decision')}；原因：{reasons}{error}"
+                )
         return "\n".join(lines)
 
     @staticmethod

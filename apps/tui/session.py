@@ -30,6 +30,8 @@ class TuiClient(Protocol):
 
     def get_run(self, run_id: str) -> dict[str, Any]: ...
 
+    def get_run_node_results(self, run_id: str) -> list[dict[str, Any]]: ...
+
     def control_run(self, run_id: str, action: str) -> dict[str, Any]: ...
 
     def get_dataset(self, dataset_version_id: str) -> dict[str, Any]: ...
@@ -140,6 +142,13 @@ class TuiSession:
             raise ValueError("No active run")
         self.active_run_id = selected
         return self.client.control_run(selected, action)
+
+    def audit(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        selected = run_id or self.active_run_id
+        if not selected:
+            raise ValueError("No active run")
+        self.active_run_id = selected
+        return self.client.get_run_node_results(selected)
 
     def result(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
         run = self.run()

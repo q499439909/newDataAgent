@@ -113,6 +113,19 @@ class FakeControlPlaneClient:
     def get_run(self, run_id):
         return self._run("SUCCEEDED")
 
+    def get_run_node_results(self, run_id):
+        return [
+            {
+                "source_uri": "D:/images/rejected.png",
+                "node_id": "quality",
+                "operator_version_id": "builtin.quality_filter:1",
+                "status": "completed",
+                "decision": "reject",
+                "reason_codes": ["QUALITY_BELOW_THRESHOLD"],
+                "duration_ms": 12,
+            }
+        ]
+
     def control_run(self, run_id, action):
         self.controls.append(action)
         return self._run({"pause": "PAUSED", "resume": "QUEUED", "cancel": "CANCELLED"}[action])
@@ -333,6 +346,20 @@ def test_tui_automatically_reports_run_terminal_status() -> None:
 
     assert client.polls == 1
     assert app._run_monitors == {}
+
+
+def test_tui_audit_renders_grounded_per_node_reasons() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    session = TuiSession(FakeControlPlaneClient(), active_run_id="run_1")
+    app = TuiApp(session, console=console)
+
+    app.handle("/audit")
+
+    output = stream.getvalue()
+    assert "D:/images/rejected.png" in output
+    assert "builtin.quality_filter:1" in output
+    assert "QUALITY_BELOW_THRESHOLD" in output
 
 
 def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None:

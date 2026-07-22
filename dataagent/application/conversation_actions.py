@@ -148,6 +148,7 @@ FactFacet = Literal[
     "task_spec",
     "dataset",
     "outcome",
+    "audit",
 ]
 
 
