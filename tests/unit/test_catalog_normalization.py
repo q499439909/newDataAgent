@@ -646,6 +646,12 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         and "strict JSON only" in node.parameters["system_prompt"]
         for node in remote_nodes
     )
+    assert {node.prompt_binding.template_id for node in remote_nodes} == {
+        "image-authenticity",
+        "closed-set-image-classification",
+    }
+    assert all(node.prompt_binding.template_sha256 for node in remote_nodes)
+    assert all(node.prompt_binding.resolved_sha256 for node in remote_nodes)
 
     base.providers.register(provider)
     runtime = AgentRuntime(include_datajuicer=False)

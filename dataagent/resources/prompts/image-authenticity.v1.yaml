@@ -1,0 +1,17 @@
+id: image-authenticity
+version: 1
+purpose: authenticity_assessment
+template: |-
+  Judge whether the image is an authentic natural photograph or a synthetic AI-generated image.
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["authentic"]}.
+  The tags array must contain exactly one of: authentic, synthetic, uncertain.$task_scope_instruction
+required_variables:
+  - task_scope_instruction
+output_contract:
+  type: tag_enum
+  field: tags
+  cardinality: one
+  allowed_values:
+    - authentic
+    - synthetic
+    - uncertain

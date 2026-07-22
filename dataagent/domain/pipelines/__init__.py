@@ -3,6 +3,7 @@ from .models import (
     NodePreviewSet,
     PipelineEdge,
     PipelineNode,
+    PromptBinding,
     PipelineStrategy,
     PipelineVersion,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "NodePreviewSet",
     "PipelineEdge",
     "PipelineNode",
+    "PromptBinding",
     "PipelineStrategy",
     "PipelineVersion",
 ]

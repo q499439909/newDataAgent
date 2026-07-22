@@ -9,12 +9,14 @@ from ...domain.pipelines import (
     PipelineNode,
     PipelineStrategy,
     PipelineVersion,
+    PromptBinding,
 )
 from ...domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ...domain.specs import TaskSpecVersion
 from ...operators import OperatorLibrary, build_operator_library
 from ...operators.catalog_matching import OperatorCatalogMatch
 from ...operators.validation import validate_parameters
+from ...prompts import builtin_prompt_registry
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -60,18 +62,6 @@ _NODE_IDS = {
     "perceptual_deduplication": "deduplicate",
     "manifest": "manifest",
 }
-
-_AUTHENTICITY_PROMPT = (
-    "Judge whether the image is an authentic natural photograph or a synthetic "
-    "AI-generated image. Return strict JSON only, without markdown or explanation, "
-    'using exactly this schema: {"tags":["authentic"]}. The tags array must contain '
-    "exactly one of: authentic, synthetic, uncertain."
-)
-_CLASSIFICATION_PROMPT = (
-    "Classify the visible content for dataset partitioning. Return strict JSON only, "
-    'without markdown or explanation, using exactly this schema: {"tags":["<label>"]}. '
-)
-
 
 def _classification_contract(task_spec: TaskSpecVersion) -> dict[str, Any]:
     classification = task_spec.classification
@@ -154,14 +144,14 @@ def _runtime_for(
     return RuntimeBackend.CPU if RuntimeBackend.CPU in supported else next(iter(supported))
 
 
-def _vlm_parameters(
+def _vlm_configuration(
     operator_id: str,
     *,
     purpose: str,
     task_spec: TaskSpecVersion,
     library: OperatorLibrary,
     candidates: dict[str, OperatorCatalogMatch],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], PromptBinding | None]:
     parameters = dict(candidates.get(operator_id).parameters if operator_id in candidates else {})
     properties = library.registry.get(operator_id).parameter_schema.get("properties", {})
     if "tag_field_name" in properties:
@@ -173,10 +163,16 @@ def _vlm_parameters(
             scope = task_spec.hard_constraints.get("authenticity_scope")
             exclusions = "; ".join(task_spec.exclusion_requirements)
             task_scope = "; ".join(str(item) for item in (scope, exclusions) if item)
-            parameters["system_prompt"] = _AUTHENTICITY_PROMPT + (
-                f" Apply this task-specific exclusion scope: {task_scope}"
-                if task_scope
-                else ""
+            resolved = builtin_prompt_registry().resolve(
+                "image-authenticity",
+                1,
+                variables={
+                    "task_scope_instruction": (
+                        f" Apply this task-specific exclusion scope: {task_scope}"
+                        if task_scope
+                        else ""
+                    )
+                },
             )
         else:
             contract = _classification_contract(task_spec)
@@ -185,13 +181,14 @@ def _vlm_parameters(
                 contract["mixed_label"],
                 contract["unknown_label"],
             ]
-            parameters["system_prompt"] = (
-                _CLASSIFICATION_PROMPT
-                + "The tags array must contain exactly one of: "
-                + ", ".join(allowed)
-                + "."
+            resolved = builtin_prompt_registry().resolve(
+                "closed-set-image-classification",
+                1,
+                variables={"allowed_labels": ", ".join(allowed)},
             )
-    return parameters
+        parameters["system_prompt"] = resolved.text
+        return parameters, resolved.binding
+    return parameters, None
 
 
 def _node(
@@ -201,6 +198,7 @@ def _node(
     parameters: dict[str, Any],
     library: OperatorLibrary,
     candidates: dict[str, OperatorCatalogMatch],
+    prompt_binding: PromptBinding | None = None,
 ) -> PipelineNode:
     operator = library.registry.get(operator_id)
     normalized_parameters = validate_parameters(
@@ -217,6 +215,7 @@ def _node(
             operator_id, library=library, candidates=candidates
         ),
         required=True,
+        prompt_binding=prompt_binding,
     )
 
 
@@ -287,19 +286,21 @@ def _compile_nodes(
         )
         if capability == "authenticity_assessment" and "visual_understanding" in upstream_tags:
             vlm_id = _remote_visual_operator(library=library, candidates=candidates)
+            vlm_parameters, prompt_binding = _vlm_configuration(
+                vlm_id,
+                purpose="authenticity",
+                task_spec=task_spec,
+                library=library,
+                candidates=candidates,
+            )
             nodes.append(
                 _node(
                     node_id="authenticity_tagging",
                     operator_id=vlm_id,
-                    parameters=_vlm_parameters(
-                        vlm_id,
-                        purpose="authenticity",
-                        task_spec=task_spec,
-                        library=library,
-                        candidates=candidates,
-                    ),
+                    parameters=vlm_parameters,
                     library=library,
                     candidates=candidates,
+                    prompt_binding=prompt_binding,
                 )
             )
 
@@ -313,8 +314,9 @@ def _compile_nodes(
         parameters = _parameters_for_capability(capability, policy, task_spec)
         if operator_id in candidates:
             parameters = dict(candidates[operator_id].parameters)
+        prompt_binding = None
         if capability == "image_classification" and "visual_understanding" in operator.capability_tags:
-            parameters = _vlm_parameters(
+            parameters, prompt_binding = _vlm_configuration(
                 operator_id,
                 purpose="classification",
                 task_spec=task_spec,
@@ -328,6 +330,7 @@ def _compile_nodes(
                 parameters=parameters,
                 library=library,
                 candidates=candidates,
+                prompt_binding=prompt_binding,
             )
         )
     return tuple(nodes)

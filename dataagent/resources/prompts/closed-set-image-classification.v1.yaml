@@ -1,0 +1,13 @@
+id: closed-set-image-classification
+version: 1
+purpose: image_classification
+template: |-
+  Classify the visible content for dataset partitioning.
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["<label>"]}.
+  The tags array must contain exactly one of: $allowed_labels.
+required_variables:
+  - allowed_labels
+output_contract:
+  type: tag_enum
+  field: tags
+  cardinality: one

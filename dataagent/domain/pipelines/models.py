@@ -15,6 +15,14 @@ class PipelineStrategy(StrEnum):
     QUALITY_FIRST = "quality_first"
 
 
+class PromptBinding(DomainModel):
+    template_id: str
+    template_version: int = Field(ge=1)
+    template_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    variables: dict[str, Any] = Field(default_factory=dict)
+    resolved_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PipelineNode(DomainModel):
     id: str
     operator_version_id: str
@@ -23,6 +31,7 @@ class PipelineNode(DomainModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     runtime_backend: RuntimeBackend = RuntimeBackend.CPU
     required: bool = False
+    prompt_binding: PromptBinding | None = None
 
 
 class PipelineEdge(DomainModel):
