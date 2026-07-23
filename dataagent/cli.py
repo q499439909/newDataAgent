@@ -69,6 +69,36 @@ def version() -> None:
 
 
 @app.command()
+def start(
+    owner: Annotated[
+        str,
+        typer.Option("--owner", help="本地会话 Owner"),
+    ] = "local-user",
+    startup_timeout: Annotated[
+        float,
+        typer.Option("--startup-timeout", min=1, help="等待 API 健康的秒数"),
+    ] = 20.0,
+) -> None:
+    """一条命令启动并管理 API、Worker 和 TUI。"""
+    try:
+        from .local_stack import run_local_stack
+
+        console.print(
+            "[cyan]正在启动 DataAgent API、Worker 和 TUI...[/cyan]"
+        )
+        exit_code = run_local_stack(
+            owner_id=owner,
+            startup_timeout_seconds=startup_timeout,
+        )
+        if exit_code:
+            raise typer.Exit(exit_code)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        fail(exc)
+
+
+@app.command()
 def setup(
     with_provider: Annotated[
         str,

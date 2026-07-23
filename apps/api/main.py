@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.local_stack import health_payload
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
 from dataagent.domain.operators import OperatorCategory, RuntimeBackend
@@ -137,7 +138,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok"}
+        return health_payload(role="api")
 
     @app.post("/api/conversations", status_code=status.HTTP_201_CREATED)
     def create_conversation(

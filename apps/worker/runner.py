@@ -27,3 +27,7 @@ def main() -> None:
         worker.process_next()
         return
     worker.run_forever(max(0.1, args.poll_interval))
+
+
+if __name__ == "__main__":
+    main()

@@ -16,6 +16,18 @@ python -m venv .venv
 
 ## 启动控制面 API
 
+本地使用推荐一条命令启动 API、Worker 和 TUI：
+
+```powershell
+.\.venv\Scripts\dataagent.exe start --owner local-user
+```
+
+启动器会为本次会话生成实例 ID，等待 API 健康后再启动 Worker 和 TUI，并在发现
+8000 端口仍由旧 DataAgent 实例占用时拒绝连接。退出 TUI 后，启动器会回收本次启动
+的 API 和 Worker。日志保存在 `.dataagent/launcher/<instance_id>/`。
+
+需要分别调试服务时，仍可使用下面的独立命令。
+
 ```powershell
 .\.venv\Scripts\dataagent-api.exe
 ```

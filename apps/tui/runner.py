@@ -18,3 +18,7 @@ def main() -> None:
         TuiApp(TuiSession(client, conversation_id=args.conversation)).run()
     finally:
         client.close()
+
+
+if __name__ == "__main__":
+    main()
