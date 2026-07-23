@@ -4,6 +4,7 @@ from .artifacts import (
 )
 from .control import propose_control_action_spec
 from .inspection import query_control_facts_spec
+from .loop import GovernedToolLoop
 from .observations import ToolEvidence, ToolResult, ToolStatus
 from .planning import retrieve_operators_spec
 from .registry import FORBIDDEN_TOOL_NAMES, ToolRegistry
@@ -30,6 +31,7 @@ def build_p0_tool_registry() -> ToolRegistry:
 
 __all__ = [
     "FORBIDDEN_TOOL_NAMES",
+    "GovernedToolLoop",
     "ToolConfirmation",
     "ToolContext",
     "ToolEffect",

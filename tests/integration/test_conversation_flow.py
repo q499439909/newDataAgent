@@ -411,6 +411,7 @@ def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) 
         "task_spec_confirmation"
     )
     assert response["turn"]["state"]["task_spec"]["objective"] == requirement
+    assert gateway.calls == 1
     assert response["turn"]["state"]["task_spec"]["data_sources"][0]["uri"] == str(
         source.resolve()
     )
@@ -452,7 +453,53 @@ def test_path_adjacent_to_chinese_is_extracted_by_model(tmp_path) -> None:
         source.resolve()
     )
     assert response["turn"]["state"]["task_spec"]["objective"] == requirement
-    assert gateway.calls == 1
+
+
+def test_confirmed_task_runs_governed_planning_tools_and_persists_trace(
+    tmp_path,
+) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    requirement = "筛选清晰图片并去重"
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway(
+            [
+                _start_work_order(source, requirement),
+                {"intent": "APPROVE", "reply": "确认。"},
+            ]
+        ),
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"{requirement}',
+    )
+    assert created["turn"]["state"]["task_spec"]["ambiguities"] == []
+
+    approved = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="确认",
+    )
+
+    tools = [item["tool"] for item in approved["action_trace"]]
+    assert tools == [
+        "conversation_turn",
+        "propose_control_action",
+        "retrieve_operators",
+        "compile_pipeline_artifact",
+        "validate_pipeline_artifact",
+    ]
+    assert approved["action_trace"][2]["evidence_ids"]
+    assert all("thought" not in item for item in approved["action_trace"])
+    stored = service.get(conversation["id"], "user_1")
+    assert stored["action_trace_history"][-1]["actions"] == approved["action_trace"]
 
 
 def test_missing_path_triggers_react_self_correction(tmp_path) -> None:

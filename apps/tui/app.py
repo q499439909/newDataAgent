@@ -127,6 +127,8 @@ class TuiApp:
         self._render_conversation(response)
 
     def _render_conversation(self, response: dict[str, Any]) -> None:
+        if response.get("action_trace"):
+            self._render_action_trace(response["action_trace"])
         self.console.print("[green]DataAgent>[/green]")
         self.console.print(Markdown(response["reply"]))
         if response.get("turn"):
@@ -135,6 +137,38 @@ class TuiApp:
             run = response["run"]
             self._render_run(run)
             self._start_run_monitor(run)
+
+    def _render_action_trace(self, actions: list[dict[str, Any]]) -> None:
+        self.console.print("[bold]行动摘要[/bold]")
+        for action in actions:
+            status = str(action.get("status") or "unknown")
+            marker = "✓" if status == "succeeded" else "!"
+            style = "green" if status == "succeeded" else "yellow"
+            self.console.print(
+                f"[{style}]{marker}[/{style}] "
+                f"{action.get('stage_label') or action.get('stage', '-')}"
+            )
+            self.console.print(
+                f"  [dim]调用[/dim]  {action.get('display_name') or action.get('tool', '-')}"
+            )
+            parameters = json.dumps(
+                action.get("parameters") or {},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            self.console.print(f"  [dim]参数[/dim]  {parameters}")
+            self.console.print(
+                f"  [dim]结果[/dim]  {action.get('summary', '-')}"
+            )
+            evidence = list(action.get("evidence_ids") or ())
+            if evidence:
+                visible = ", ".join(str(item) for item in evidence[:5])
+                if len(evidence) > 5:
+                    visible += f"，另 {len(evidence) - 5} 项"
+                self.console.print(f"  [dim]证据[/dim]  {visible}")
+            self.console.print(
+                f"  [dim]耗时[/dim]  {action.get('duration_ms', 0)} ms"
+            )
 
     def _start_run_monitor(self, run: dict[str, Any]) -> None:
         terminal = {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "PAUSED"}

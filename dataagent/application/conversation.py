@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from ..agents.requirement.clarification import recommended_clarification_patch
 from ..domain.common import new_id
 from ..gateway import ModelGateway, ModelGatewayError
 from ..infrastructure import ConversationStore
+from ..tools import GovernedToolLoop, ToolContext, build_p0_tool_registry
 from .agent_runtime import AgentRuntime
 from .conversation_actions import (
     ChatAction,
@@ -21,7 +23,6 @@ from .conversation_actions import (
 )
 from .conversation_policy import (
     allowed_conversation_actions,
-    validate_conversation_action,
 )
 
 
@@ -57,6 +58,7 @@ class ConversationService:
         self.agent_runtime = agent_runtime
         self.settings = settings
         self.gateway = gateway or ModelGateway(settings)
+        self.tool_loop = GovernedToolLoop(build_p0_tool_registry())
 
     def create(self, owner_id: str) -> dict[str, Any]:
         thread = self.store.create(thread_id=new_id("conversation"), owner_id=owner_id)
@@ -101,7 +103,9 @@ class ConversationService:
         current_content = content
         decision: ConversationAction | None = None
         response: dict[str, Any] = {"reply": "我在。", "turn": None, "run": None}
+        action_trace: list[dict[str, Any]] = []
         for iteration in range(_MAX_REACT_ITERATIONS):
+            decision_started = time.perf_counter()
             try:
                 decision = self._decide(current_content, conversation_history, context)
             except ConversationActionError as exc:
@@ -128,8 +132,71 @@ class ConversationService:
                     {"role": "control", "content": feedback}
                 )
                 continue
-            violation = validate_conversation_action(decision, context)
-            if violation is None and decision.intent in {
+            action_trace.append(
+                {
+                    "id": new_id("action_trace"),
+                    "stage": "analyze_requirement",
+                    "stage_label": "正在理解需求",
+                    "kind": "model",
+                    "tool": "conversation_turn",
+                    "display_name": "Requirement Analyzer",
+                    "status": (
+                        "failed" if decision.fallback_reason else "succeeded"
+                    ),
+                    "parameters": {
+                        "model": decision.resolved_by,
+                        "message_sequence": history[-1]["sequence"],
+                    },
+                    "duration_ms": max(
+                        0,
+                        round((time.perf_counter() - decision_started) * 1000),
+                    ),
+                    "summary": (
+                        f"Model fallback used: {decision.fallback_reason}."
+                        if decision.fallback_reason
+                        else f"Resolved intent: {decision.intent.value}."
+                    ),
+                    "evidence_ids": [],
+                    "error_type": (
+                        "model_fallback" if decision.fallback_reason else None
+                    ),
+                }
+            )
+            if decision.intent != ConversationIntent.CHAT:
+                proposal, trace = self.tool_loop.execute(
+                    name="propose_control_action",
+                    stage="validate_control_action",
+                    context=self._tool_context(owner_id, context),
+                    raw_input={"action": decision.model_dump(mode="json")},
+                )
+                action_trace.append(trace)
+                if not proposal.ok:
+                    feedback = json.dumps(
+                        {
+                            "code": proposal.error_type,
+                            "message": proposal.summary,
+                            "allowed_actions": list(proposal.next_actions),
+                        },
+                        ensure_ascii=False,
+                    )
+                    if iteration == _MAX_REACT_ITERATIONS - 1:
+                        decision = ChatAction(
+                            reply=(
+                                "当前操作与任务状态不一致，因此没有修改任务。"
+                                "请根据当前待确认事项重新说明你的选择。"
+                            )
+                        ).with_resolution(resolved_by="action-policy-guard")
+                        response = {
+                            "reply": decision.reply,
+                            "turn": None,
+                            "run": None,
+                        }
+                        break
+                    conversation_history.append(
+                        {"role": "control", "content": feedback}
+                    )
+                    continue
+            if decision.intent in {
                 ConversationIntent.START_WORK_ORDER,
                 ConversationIntent.PROVIDE_SOURCE,
             }:
@@ -160,28 +227,6 @@ class ConversationService:
                         {"role": "control", "content": feedback}
                     )
                     continue
-            if violation is not None:
-                feedback = json.dumps(
-                    {
-                        "code": violation.code,
-                        "message": violation.message,
-                        "allowed_actions": violation.allowed_actions,
-                    },
-                    ensure_ascii=False,
-                )
-                if iteration == _MAX_REACT_ITERATIONS - 1:
-                    decision = ChatAction(
-                        reply=(
-                            "当前操作与任务状态不一致，因此没有修改任务。"
-                            "请根据当前待确认事项重新说明你的选择。"
-                        )
-                    ).with_resolution(resolved_by="action-policy-guard")
-                    response = {"reply": decision.reply, "turn": None, "run": None}
-                    break
-                conversation_history.append(
-                    {"role": "control", "content": feedback}
-                )
-                continue
             try:
                 response = self._apply(
                     thread=thread,
@@ -208,6 +253,17 @@ class ConversationService:
                 break
             feedback = response.pop("_react_feedback", None)
             if not feedback or iteration == _MAX_REACT_ITERATIONS - 1:
+                if not feedback and decision is not None:
+                    post_thread = self.store.get(thread_id, owner_id)
+                    post_context = self._control_context(post_thread, owner_id)
+                    action_trace.extend(
+                        self._post_action_tools(
+                            owner_id=owner_id,
+                            decision=decision,
+                            response=response,
+                            control_context=post_context,
+                        )
+                    )
                 break
             # Feed the control-plane failure back to the model so it can
             # self-correct or ask the user a precise follow-up.
@@ -251,6 +307,22 @@ class ConversationService:
                 "reason": decision.fallback_reason,
             }
         updated_thread = self.store.get(thread_id, owner_id)
+        if action_trace:
+            updated_context = dict(updated_thread["context"])
+            history_trace = list(updated_context.get("action_trace_history") or [])
+            history_trace.append(
+                {
+                    "message_sequence": history[-1]["sequence"],
+                    "actions": action_trace,
+                }
+            )
+            updated_context["action_trace_history"] = history_trace[-25:]
+            updated_thread = self.store.update(
+                thread_id=thread_id,
+                owner_id=owner_id,
+                context=updated_context,
+            )
+        response["action_trace"] = action_trace
         response["conversation_id"] = thread_id
         response["work_order_id"] = updated_thread.get("work_order_id")
         response["messages"] = self.store.messages(thread_id, owner_id)
@@ -259,6 +331,161 @@ class ConversationService:
     @staticmethod
     def _allowed_actions(context: dict[str, Any]) -> tuple[str, ...]:
         return allowed_conversation_actions(context)
+
+    def _tool_context(
+        self,
+        owner_id: str,
+        control_context: dict[str, Any],
+    ) -> ToolContext:
+        return ToolContext(
+            owner_id=owner_id,
+            operator_registry=self.agent_runtime.operator_registry,
+            version_store=self.agent_runtime.version_store,
+            control_context=control_context,
+            control_facts=self._tool_control_facts(control_context),
+            confirmed=False,
+        )
+
+    @staticmethod
+    def _tool_control_facts(
+        context: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        pipeline = (
+            context.get("latest_run_pipeline")
+            or context.get("approved_pipeline")
+            or {}
+        )
+        dataset = context.get("latest_dataset") or {}
+        facts: dict[str, dict[str, Any]] = {
+            "work_order": {"id": context.get("work_order_id")}
+            if context.get("work_order_id")
+            else {},
+            "run": context.get("latest_run") or {},
+            "pipeline": pipeline,
+            "operators": {
+                "id": pipeline.get("id"),
+                "nodes": pipeline.get("nodes") or (),
+            }
+            if pipeline
+            else {},
+            "task_spec": context.get("task_spec") or {},
+            "dataset": dataset,
+            "outcome": context.get("latest_qc_report") or {},
+            "audit": context.get("latest_run_audit") or {},
+            "repair": {
+                "id": dataset.get("id"),
+                "parent_dataset_version_id": dataset.get(
+                    "parent_dataset_version_id"
+                ),
+                "repair_run_ids": dataset.get("repair_run_ids") or (),
+                "still_failed": dataset.get("still_failed") or (),
+                "abandoned_assets": dataset.get("abandoned_assets") or (),
+                "excluded_assets": dataset.get("excluded_assets") or (),
+            }
+            if dataset
+            else {},
+        }
+        return {key: value for key, value in facts.items() if value}
+
+    def _post_action_tools(
+        self,
+        *,
+        owner_id: str,
+        decision: ConversationAction,
+        response: dict[str, Any],
+        control_context: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        traces: list[dict[str, Any]] = []
+        tool_context = self._tool_context(owner_id, control_context)
+
+        if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
+            _, trace = self.tool_loop.execute(
+                name="query_control_facts",
+                stage="inspect_control_facts",
+                context=tool_context,
+                raw_input={"facets": list(decision.facets)},
+            )
+            traces.append(trace)
+            return traces
+
+        turn = response.get("turn") or {}
+        state = turn.get("state") or {}
+        task_spec = state.get("task_spec") or {}
+        pipelines: list[dict[str, Any]] = []
+        should_retrieve = False
+        if state.get("next_action") == "approve_pipeline":
+            pipelines = list(state.get("representative_pipelines") or ())
+            should_retrieve = bool(pipelines)
+        elif decision.intent == ConversationIntent.SELECT_PIPELINE:
+            approved = state.get("approved_pipeline")
+            if approved:
+                pipelines = [approved]
+
+        if should_retrieve:
+            capability_ids = [
+                str(item.get("capability"))
+                for item in task_spec.get("capability_requirements") or ()
+                if item.get("capability")
+            ]
+            requirement_parts = [
+                str(task_spec.get("objective") or ""),
+                *[
+                    str(item)
+                    for item in task_spec.get("semantic_requirements") or ()
+                ],
+                *[
+                    str(item)
+                    for item in task_spec.get("exclusion_requirements") or ()
+                ],
+            ]
+            backends = ["cpu"]
+            if self.settings.api_key:
+                backends.append("remote")
+            _, trace = self.tool_loop.execute(
+                name="retrieve_operators",
+                stage="retrieve_operator_candidates",
+                context=tool_context,
+                raw_input={
+                    "requirement": " ".join(
+                        part.strip() for part in requirement_parts if part.strip()
+                    ),
+                    "required_capabilities": capability_ids,
+                    "allow_draft_candidates": (
+                        self.settings.allow_datajuicer_candidate_execution
+                    ),
+                    "available_runtime_backends": backends,
+                    "limit": 20,
+                },
+            )
+            traces.append(trace)
+
+        if not pipelines:
+            return traces
+        pipeline = next(
+            (
+                item
+                for item in pipelines
+                if item.get("strategy") == "balanced"
+            ),
+            pipelines[0],
+        )
+        compiled, trace = self.tool_loop.execute(
+            name="compile_pipeline_artifact",
+            stage="compile_pipeline_artifact",
+            context=tool_context,
+            raw_input={"pipeline": pipeline},
+        )
+        traces.append(trace)
+        content = compiled.data.get("content") if compiled.ok else None
+        if isinstance(content, str):
+            _, trace = self.tool_loop.execute(
+                name="validate_pipeline_artifact",
+                stage="validate_pipeline_artifact",
+                context=tool_context,
+                raw_input={"content": content},
+            )
+            traces.append(trace)
+        return traces
 
     @staticmethod
     def _source_is_user_grounded(
@@ -756,6 +983,7 @@ class ConversationService:
 
     def _control_context(self, thread: dict[str, Any], owner_id: str) -> dict[str, Any]:
         context = dict(thread["context"])
+        context.pop("action_trace_history", None)
         context["work_order_id"] = thread.get("work_order_id")
         if thread.get("work_order_id"):
             turn = self.agent_runtime.state(
@@ -994,6 +1222,9 @@ class ConversationService:
             "id": thread["id"],
             "work_order_id": thread["work_order_id"],
             "messages": self.store.messages(thread["id"], thread["owner_id"]),
+            "action_trace_history": list(
+                thread["context"].get("action_trace_history") or ()
+            ),
         }
 
     @staticmethod

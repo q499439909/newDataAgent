@@ -5,6 +5,7 @@ from dataagent.domain.operators import OperatorStatus
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 from dataagent.operators import OperatorRegistry, build_operator_library
 from dataagent.tools import (
+    GovernedToolLoop,
     ToolContext,
     ToolRegistry,
     ToolResult,
@@ -66,6 +67,39 @@ def test_tool_input_validation_returns_complete_observation() -> None:
         requires_confirmation=False,
         error_type="input_validation_error",
     )
+
+
+def test_governed_tool_loop_redacts_secrets_and_records_evidence() -> None:
+    loop = GovernedToolLoop(build_p0_tool_registry())
+    result, trace = loop.execute(
+        name="query_control_facts",
+        stage="inspect_control_facts",
+        context=_context(
+            control_facts={"run": {"id": "run_1", "status": "RUNNING"}}
+        ),
+        raw_input={"facets": ["run"]},
+    )
+
+    assert result.ok is True
+    assert trace["tool"] == "query_control_facts"
+    assert trace["display_name"] == "Control Fact Reader"
+    assert trace["evidence_ids"] == ["run_1"]
+    assert trace["duration_ms"] >= 0
+    assert "thought" not in trace
+
+    _, invalid_trace = loop.execute(
+        name="propose_control_action",
+        stage="validate_control_action",
+        context=_context(control_context={"api_key": "do-not-store"}),
+        raw_input={
+            "action": {
+                "intent": "CHAT",
+                "reply": "",
+                "api_key": "do-not-store",
+            }
+        },
+    )
+    assert invalid_trace["parameters"]["action"]["api_key"] == "***"
 
 
 def test_tool_registry_rejects_duplicates_and_forbidden_tools() -> None:

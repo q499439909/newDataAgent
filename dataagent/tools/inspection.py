@@ -17,6 +17,7 @@ FactFacet = Literal[
     "dataset",
     "outcome",
     "audit",
+    "repair",
 ]
 
 

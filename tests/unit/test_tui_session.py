@@ -339,6 +339,47 @@ def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> 
     assert "0.35" in output and "0.55" in output and "0.75" in output
 
 
+def test_tui_renders_auditable_action_summary_without_hidden_reasoning() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    app = TuiApp(TuiSession(FakeControlPlaneClient()), console=console)
+
+    app._render_conversation(
+        {
+            "reply": "TaskSpec 已确认。",
+            "turn": None,
+            "run": None,
+            "action_trace": [
+                {
+                    "id": "tool_trace_1",
+                    "stage": "retrieve_operator_candidates",
+                    "tool": "retrieve_operators",
+                    "display_name": "Operator Retriever",
+                    "status": "succeeded",
+                    "parameters": {
+                        "required_capabilities": [
+                            "image_quality",
+                            "image_classification",
+                        ]
+                    },
+                    "duration_ms": 12,
+                    "summary": "Found 12 candidate operators.",
+                    "evidence_ids": ["operator_1", "operator_2"],
+                    "error_type": None,
+                }
+            ],
+        }
+    )
+
+    output = stream.getvalue()
+    assert "行动摘要" in output
+    assert "Operator Retriever" in output
+    assert "Found 12 candidate operators." in output
+    assert "operator_1" in output
+    assert "12 ms" in output
+    assert "思维链" not in output
+
+
 def test_tui_pipeline_table_shows_execution_block_reason() -> None:
     stream = StringIO()
     console = Console(file=stream, width=220, color_system=None)
