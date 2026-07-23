@@ -632,6 +632,7 @@ class RunStore:
             status="SUCCEEDED",
             dataset_version_id=dataset_version_id,
             control_requested=False,
+            error=None,
         )
 
     def mark_partial(

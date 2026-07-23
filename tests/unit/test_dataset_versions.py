@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dataagent.application.dataset_versions import (
     build_logical_dataset_version,
+    exclude_abandoned_assets_version,
     merge_repaired_dataset_version,
     validate_dataset_references,
     write_dataset_manifest,
@@ -304,3 +305,70 @@ def test_repaired_dataset_keeps_latest_failures_with_attempt_lineage(
     assert repaired.still_failed[0].reason_codes == (
         "OPERATOR_ERROR:RateLimitError",
     )
+
+
+def test_third_failed_repair_becomes_abandoned_and_can_be_explicitly_excluded(
+    tmp_path: Path,
+) -> None:
+    kept_source = tmp_path / "kept.png"
+    failed_source = tmp_path / "failed.png"
+    kept_output = tmp_path / "parent-output.png"
+    kept_source.write_bytes(b"kept-source")
+    failed_source.write_bytes(b"failed-source")
+    kept_output.write_bytes(b"kept-output")
+    parent = build_logical_dataset_version(
+        dataset_id="dataset_parent",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_parent",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "parent.json"),
+        assets=(
+            _asset(kept_source, decision="keep", output=kept_output),
+            _asset(failed_source, decision="failed"),
+        ),
+    )
+    repair = build_logical_dataset_version(
+        dataset_id="dataset_repair_output",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_repair_3",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "repair.json"),
+        assets=(_asset(failed_source, decision="failed"),),
+    )
+
+    abandoned = merge_repaired_dataset_version(
+        dataset_id="dataset_abandoned",
+        owner_id="owner_1",
+        parent=parent,
+        repair_output=repair,
+        repair_run_id="run_repair_3",
+        repair_attempt=3,
+        manifest_uri=str(tmp_path / "abandoned.json"),
+    )
+
+    assert abandoned.still_failed == ()
+    assert abandoned.failed_count == 1
+    assert abandoned.abandoned_assets[0].repair_attempts == 3
+    resolved = exclude_abandoned_assets_version(
+        dataset_id="dataset_resolved",
+        owner_id="owner_1",
+        parent=abandoned,
+        manifest_uri=str(tmp_path / "resolved.json"),
+        audit_ref="confirmation:exclude:123",
+    )
+    assert resolved.parent_dataset_version_id == abandoned.id
+    assert resolved.still_failed == ()
+    assert resolved.abandoned_assets == ()
+    assert resolved.failed_count == 0
+    assert resolved.rejected_count == 1
+    assert resolved.assets[1].decision == "excluded"
+    assert resolved.assets[1].asset_origin == AssetOrigin.EXCLUDED
+    assert resolved.excluded_assets[0].repair_attempts == 3
+    assert "USER_CONFIRMED_EXCLUSION" in resolved.excluded_assets[0].reason_codes
+    assert "confirmation:exclude:123" in resolved.excluded_assets[0].audit_refs

@@ -16,6 +16,7 @@ from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBacke
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
+from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
 from ..experiences import PipelineExperienceRetriever, PipelineExperienceService
 from ..graph import build_main_graph
@@ -32,6 +33,10 @@ from ..operators.protocol import OperatorContext, OperatorInput
 from ..operators.providers import ProviderExecuteRequest
 from ..operators.validation import ParameterValidationError, validate_parameters
 from .dataset_exports import export_deliverable_dataset as materialize_dataset_export
+from .dataset_versions import (
+    exclude_abandoned_assets_version,
+    write_dataset_manifest,
+)
 
 
 @dataclass(frozen=True)
@@ -429,6 +434,11 @@ class AgentRuntime:
         if self.run_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
         previous = self.run_store.get(previous_run_id, owner_id)
+        if int(previous.get("repair_attempt", 0)) >= 3:
+            raise ValueError(
+                "The maximum repair attempts has been reached; "
+                "abandoned assets require explicit exclusion"
+            )
         failed_items = {
             int(item["sequence"]): item
             for item in self.run_store.items(previous_run_id)
@@ -879,6 +889,96 @@ class AgentRuntime:
             },
         )
         return exported.model_dump(mode="json")
+
+    def exclude_abandoned_assets(
+        self,
+        *,
+        dataset_version_id: str,
+        owner_id: str,
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        if not confirmed:
+            raise ValueError("Excluding abandoned assets requires explicit confirmation")
+        if self.version_store is None or self.run_store is None or self.home is None:
+            raise RuntimeError("Persistent runtime is required for asset exclusion")
+        parent = DatasetVersion.model_validate(
+            self.version_store.get(
+                kind="dataset",
+                entity_id=dataset_version_id,
+                owner_id=owner_id,
+            )
+        )
+        run = self.run_store.get(parent.run_id, owner_id)
+        if run["status"] not in {"PARTIAL", "FAILED"}:
+            raise ValueError(
+                "Abandoned assets can only be excluded from a non-final DatasetVersion"
+            )
+        resolved_id = f"dataset_resolved_{parent.id.removeprefix('dataset_')}"
+        try:
+            existing = self.version_store.get(
+                kind="dataset",
+                entity_id=resolved_id,
+                owner_id=owner_id,
+            )
+        except KeyError:
+            resolved = exclude_abandoned_assets_version(
+                dataset_id=resolved_id,
+                owner_id=owner_id,
+                parent=parent,
+                manifest_uri=str(
+                    self.home / "datasets" / resolved_id / "manifest.json"
+                ),
+                audit_ref=(
+                    f"confirmation:exclude_abandoned:{owner_id}:{parent.id}"
+                ),
+            )
+            write_dataset_manifest(resolved)
+            self.version_store.save_if_absent(
+                kind="dataset",
+                owner_id=owner_id,
+                payload=resolved.model_dump(mode="json"),
+            )
+        else:
+            resolved = DatasetVersion.model_validate(existing)
+        spec = TaskSpecVersion.model_validate(
+            self.version_store.get(
+                kind="task_spec",
+                entity_id=resolved.task_spec_version_id,
+                owner_id=owner_id,
+            )
+        )
+        report = QualityEvaluator(self.version_store).evaluate(
+            dataset=resolved,
+            spec=spec,
+            owner_id=owner_id,
+        )
+        if str(report.status) != "PASSED":
+            error = "Dataset QC failed after exclusion: " + ", ".join(
+                report.reason_codes
+            )
+            self.run_store.mark_quality_failed(resolved.run_id, resolved.id, error)
+            self.run_store.add_event(
+                resolved.run_id,
+                "abandoned_assets_exclusion_failed_qc",
+                {
+                    "dataset_version_id": resolved.id,
+                    "qc_report_id": report.id,
+                    "reason_codes": list(report.reason_codes),
+                },
+            )
+            raise ValueError(error)
+        self.run_store.mark_succeeded(resolved.run_id, resolved.id)
+        self.run_store.add_event(
+            resolved.run_id,
+            "abandoned_assets_excluded",
+            {
+                "dataset_version_id": resolved.id,
+                "parent_dataset_version_id": parent.id,
+                "excluded_count": len(resolved.excluded_assets),
+                "qc_report_id": report.id,
+            },
+        )
+        return resolved.model_dump(mode="json")
 
     def get_qc_report(self, *, qc_report_id: str, owner_id: str) -> dict[str, Any]:
         if self.version_store is None:

@@ -13,10 +13,12 @@ from apps.api.main import create_app
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.dataset_versions import (
     build_logical_dataset_version,
+    merge_repaired_dataset_version,
     write_dataset_manifest,
 )
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.domain.runs import AssetOrigin, DatasetAsset
+from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
 from dataagent.imaging import analyze_image
 from dataagent.execution.dataset_runner import _redact_parameters
 from dataagent.execution.dataset_runner import DatasetRunExecutor
@@ -514,6 +516,44 @@ def test_repair_attempt_increments_and_scope_never_includes_parent_success(
     assert str(kept.resolve()) not in {
         item["source_uri"] for item in second_repair["repair_scope"]
     }
+    second_plan = runtime.run_store.plan(second_repair["id"])
+    runtime.run_store.add_item(
+        second_repair["id"],
+        {
+            **second_plan[0],
+            "output_relative_path": None,
+            "output_sha256": None,
+            "decision": "failed",
+            "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+            "metrics": {},
+            "labels": {},
+        },
+    )
+    third_repair = runtime.retry_failed_assets(
+        previous_run_id=second_repair["id"],
+        owner_id="user_1",
+        idempotency_key="repair-3",
+    )
+    assert third_repair["repair_attempt"] == 3
+    third_plan = runtime.run_store.plan(third_repair["id"])
+    runtime.run_store.add_item(
+        third_repair["id"],
+        {
+            **third_plan[0],
+            "output_relative_path": None,
+            "output_sha256": None,
+            "decision": "failed",
+            "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+            "metrics": {},
+            "labels": {},
+        },
+    )
+    with pytest.raises(ValueError, match="maximum repair attempts"):
+        runtime.retry_failed_assets(
+            previous_run_id=third_repair["id"],
+            owner_id="user_1",
+            idempotency_key="repair-4",
+        )
 
 
 def test_executor_persists_repaired_dataset_before_quality_evaluation(
@@ -631,3 +671,154 @@ def test_executor_persists_repaired_dataset_before_quality_evaluation(
     assert runtime.run_store.events("run_repair", "user_1")[-1][
         "event_type"
     ] == "repaired_dataset_version_created"
+
+
+def test_confirmed_exclusion_promotes_abandoned_dataset_and_allows_export(
+    tmp_path,
+) -> None:
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    assert runtime.version_store is not None
+    assert runtime.run_store is not None
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    kept_source = source_root / "kept.png"
+    failed_source = source_root / "failed.png"
+    kept_output = home / "datasets" / "dataset_parent" / "files" / "kept.png"
+    kept_output.parent.mkdir(parents=True)
+    kept_source.write_bytes(b"kept-source")
+    failed_source.write_bytes(b"failed-source")
+    kept_output.write_bytes(b"kept-output")
+    task_spec = TaskSpecVersion(
+        id="task_spec_1",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_1",
+        objective="produce a deliverable dataset",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri=str(source_root)),
+        ),
+        confirmed=True,
+    )
+    runtime.version_store.save_if_absent(
+        kind="task_spec",
+        owner_id="user_1",
+        payload=task_spec.model_dump(mode="json"),
+    )
+    parent = build_logical_dataset_version(
+        dataset_id="dataset_parent",
+        owner_id="user_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id=task_spec.id,
+        run_id="run_parent",
+        source_roots=(str(source_root),),
+        manifest_uri=str(home / "datasets" / "dataset_parent" / "manifest.json"),
+        assets=(
+            DatasetAsset(
+                source_uri=str(kept_source),
+                source_sha256=_sha256(kept_source),
+                output_uri=str(kept_output),
+                output_sha256=_sha256(kept_output),
+                decision="keep",
+            ),
+            DatasetAsset(
+                source_uri=str(failed_source),
+                source_sha256=_sha256(failed_source),
+                decision="failed",
+                reason_codes=("OPERATOR_ERROR:TimeoutError",),
+            ),
+        ),
+    )
+    repair_output = build_logical_dataset_version(
+        dataset_id="dataset_repair_output",
+        owner_id="user_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id=task_spec.id,
+        run_id="run_repair_3",
+        source_roots=(str(source_root),),
+        manifest_uri=str(
+            home / "datasets" / "dataset_repair_output" / "manifest.json"
+        ),
+        assets=(
+            DatasetAsset(
+                source_uri=str(failed_source),
+                source_sha256=_sha256(failed_source),
+                decision="failed",
+                reason_codes=("OPERATOR_ERROR:TimeoutError",),
+            ),
+        ),
+    )
+    abandoned = merge_repaired_dataset_version(
+        dataset_id="dataset_abandoned",
+        owner_id="user_1",
+        parent=parent,
+        repair_output=repair_output,
+        repair_run_id="run_repair_3",
+        repair_attempt=3,
+        manifest_uri=str(
+            home / "datasets" / "dataset_abandoned" / "manifest.json"
+        ),
+    )
+    write_dataset_manifest(abandoned)
+    runtime.version_store.save_if_absent(
+        kind="dataset",
+        owner_id="user_1",
+        payload=abandoned.model_dump(mode="json"),
+    )
+    runtime.run_store.create(
+        run_id="run_repair_3",
+        work_order_id="work_order_1",
+        owner_id="user_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id=task_spec.id,
+        idempotency_key="repair-3",
+        operation_kind="repair",
+        parent_run_id="run_repair_2",
+        parent_dataset_version_id=parent.id,
+        repair_scope=(
+            {
+                "source_uri": str(failed_source),
+                "source_sha256": _sha256(failed_source),
+                "parent_sequence": 1,
+                "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+            },
+        ),
+        repair_attempt=3,
+    )
+    runtime.run_store.mark_partial(
+        "run_repair_3",
+        abandoned.id,
+        "Dataset QC failed: EXECUTION_FAILURES_PRESENT",
+    )
+
+    with pytest.raises(ValueError, match="explicit confirmation"):
+        runtime.exclude_abandoned_assets(
+            dataset_version_id=abandoned.id,
+            owner_id="user_1",
+            confirmed=False,
+        )
+    resolved = runtime.exclude_abandoned_assets(
+        dataset_version_id=abandoned.id,
+        owner_id="user_1",
+        confirmed=True,
+    )
+
+    assert resolved["abandoned_assets"] == []
+    assert len(resolved["excluded_assets"]) == 1
+    run = runtime.run_store.get("run_repair_3", "user_1")
+    assert run["status"] == "SUCCEEDED"
+    assert run["dataset_version_id"] == resolved["id"]
+    assert run["error"] is None
+    exported = runtime.export_deliverable_dataset(
+        dataset_version_id=resolved["id"],
+        owner_id="user_1",
+        destination=tmp_path / "deliverable",
+    )
+    assert exported["file_count"] == 1
+    excluded_report = json.loads(
+        Path(exported["excluded_assets_uri"]).read_text(encoding="utf-8")
+    )
+    assert len(excluded_report["excluded_assets"]) == 1

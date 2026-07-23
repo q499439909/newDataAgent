@@ -198,7 +198,7 @@ def merge_repaired_dataset_version(
             )
         )
 
-    still_failed = tuple(
+    latest_failures = tuple(
         DatasetAssetPointer(
             source_uri=asset.source_uri,
             source_sha256=asset.source_sha256,
@@ -209,6 +209,17 @@ def merge_repaired_dataset_version(
         for asset in merged_assets
         if asset.decision == "failed"
     )
+    if repair_attempt >= 3:
+        still_failed: tuple[DatasetAssetPointer, ...] = ()
+        abandoned_assets = tuple(
+            {
+                (item.source_uri, item.source_sha256): item
+                for item in (*parent.abandoned_assets, *latest_failures)
+            }.values()
+        )
+    else:
+        still_failed = latest_failures
+        abandoned_assets = parent.abandoned_assets
     repair_run_ids = tuple(
         dict.fromkeys((*parent.repair_run_ids, repair_run_id))
     )
@@ -227,10 +238,100 @@ def merge_repaired_dataset_version(
         parent_dataset_version_id=parent.id,
         repair_run_ids=repair_run_ids,
         still_failed=still_failed,
-        abandoned_assets=parent.abandoned_assets,
+        abandoned_assets=abandoned_assets,
         excluded_assets=parent.excluded_assets,
     )
     return RepairedDatasetVersion.model_validate(merged.model_dump(mode="python"))
+
+
+def exclude_abandoned_assets_version(
+    *,
+    dataset_id: str,
+    owner_id: str,
+    parent: DatasetVersion,
+    manifest_uri: str,
+    audit_ref: str,
+) -> RepairedDatasetVersion:
+    if not parent.abandoned_assets:
+        raise ValueError("DatasetVersion has no abandoned assets to exclude")
+    abandoned_by_key = {
+        (item.source_uri, item.source_sha256): item
+        for item in parent.abandoned_assets
+    }
+    excluded_assets: list[DatasetAsset] = []
+    newly_excluded: list[DatasetAssetPointer] = []
+    for index, asset in enumerate(parent.assets):
+        key = (asset.source_uri, asset.source_sha256)
+        abandoned = abandoned_by_key.get(key)
+        if abandoned is None:
+            if asset.decision == "excluded":
+                excluded_assets.append(asset)
+            else:
+                excluded_assets.append(
+                    _lineage_reference(
+                        asset,
+                        origin=AssetOrigin.PARENT_DATASET_VERSION,
+                        origin_dataset_version_id=parent.id,
+                        origin_run_id=asset.origin_run_id,
+                        audit_ref=f"dataset:{parent.id}:asset:{index}",
+                    )
+                )
+            continue
+        reason_codes = tuple(
+            dict.fromkeys((*asset.reason_codes, "USER_CONFIRMED_EXCLUSION"))
+        )
+        audit_refs = tuple(dict.fromkeys((*asset.audit_refs, audit_ref)))
+        excluded = asset.model_copy(
+            update={
+                "decision": "excluded",
+                "reason_codes": reason_codes,
+                "asset_origin": AssetOrigin.EXCLUDED,
+                "origin_dataset_version_id": parent.id,
+                "materialization": AssetMaterialization.NOT_MATERIALIZED,
+                "output_uri": None,
+                "output_sha256": None,
+                "audit_refs": audit_refs,
+            }
+        )
+        excluded_assets.append(excluded)
+        newly_excluded.append(
+            DatasetAssetPointer(
+                source_uri=excluded.source_uri,
+                source_sha256=excluded.source_sha256,
+                reason_codes=reason_codes,
+                audit_refs=audit_refs,
+                repair_attempts=abandoned.repair_attempts,
+            )
+        )
+    inherited_excluded = {
+        (item.source_uri, item.source_sha256): item
+        for item in parent.excluded_assets
+    }
+    inherited_excluded.update(
+        {
+            (item.source_uri, item.source_sha256): item
+            for item in newly_excluded
+        }
+    )
+    resolved = build_logical_dataset_version(
+        dataset_id=dataset_id,
+        owner_id=owner_id,
+        work_order_id=parent.work_order_id,
+        pipeline_version_id=parent.pipeline_version_id,
+        task_spec_version_id=parent.task_spec_version_id,
+        run_id=parent.run_id,
+        source_roots=parent.source_roots,
+        manifest_uri=manifest_uri,
+        assets=excluded_assets,
+        version=parent.version + 1,
+        change_reason="user confirmed exclusion of abandoned assets",
+        parent_dataset_version_id=parent.id,
+        repair_run_ids=parent.repair_run_ids,
+        still_failed=parent.still_failed,
+        abandoned_assets=(),
+        excluded_assets=tuple(inherited_excluded.values()),
+    )
+    return RepairedDatasetVersion.model_validate(resolved.model_dump(mode="python"))
 
 
 def validate_dataset_references(
