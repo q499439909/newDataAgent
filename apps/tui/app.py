@@ -95,6 +95,26 @@ class TuiApp:
             self._render_audit(self.session.audit(argument or None))
         elif command == "/result":
             self._render_result(*self.session.result())
+        elif command == "/repair":
+            result = self.session.repair(argument or None)
+            self._render_repair_candidates(result["candidates"])
+            if result.get("run"):
+                self._render_run(result["run"])
+                self._start_run_monitor(result["run"])
+        elif command == "/exclude":
+            if not argument:
+                raise ValueError("Use: /exclude <dataset_version_id>")
+            self._render_dataset_resolution(self.session.exclude(argument))
+        elif command == "/export":
+            try:
+                dataset_version_id, destination = argument.split(" ", 1)
+            except ValueError as exc:
+                raise ValueError(
+                    "Use: /export <dataset_version_id> <destination>"
+                ) from exc
+            self._render_export(
+                self.session.export(dataset_version_id, destination.strip())
+            )
         elif command == "/help":
             self._render_help()
         else:
@@ -321,6 +341,50 @@ class TuiApp:
             )
         self.console.print(table)
 
+    def _render_repair_candidates(self, candidates: dict[str, Any]) -> None:
+        summary = Table("Run", "Dataset", "Status", "Attempt", "Retry", "Next")
+        summary.add_row(
+            str(candidates.get("run_id") or "-"),
+            str(candidates.get("dataset_version_id") or "-"),
+            str(candidates.get("run_status") or "-"),
+            (
+                f"{candidates.get('repair_attempt', 0)}/"
+                f"{candidates.get('maximum_repair_attempts', 3)}"
+            ),
+            "yes" if candidates.get("retry_allowed") else "no",
+            ", ".join(candidates.get("next_actions") or []) or "-",
+        )
+        self.console.print(summary)
+        assets = Table("Disposition", "Source", "Reasons", "Attempts")
+        for disposition in (
+            "still_failed",
+            "abandoned_assets",
+            "excluded_assets",
+        ):
+            for item in candidates.get(disposition, ()):
+                assets.add_row(
+                    disposition,
+                    str(item.get("source_uri") or "-"),
+                    ", ".join(item.get("reason_codes") or []) or "-",
+                    str(item.get("repair_attempts", 0)),
+                )
+        self.console.print(assets)
+
+    def _render_dataset_resolution(self, dataset: dict[str, Any]) -> None:
+        self.console.print(
+            f"DatasetVersion {dataset['id']} resolved: "
+            f"still_failed={len(dataset.get('still_failed') or [])}, "
+            f"abandoned={len(dataset.get('abandoned_assets') or [])}, "
+            f"excluded={len(dataset.get('excluded_assets') or [])}."
+        )
+
+    def _render_export(self, exported: dict[str, Any]) -> None:
+        self.console.print(
+            f"Deliverable export {exported['id']}: {exported['root_uri']}\n"
+            f"files={exported['file_count']}, manifest={exported['manifest_uri']}, "
+            f"excluded={exported['excluded_assets_uri']}"
+        )
+
     def _render_help(self) -> None:
         table = Table("Command", "Argument")
         for command, argument in (
@@ -336,6 +400,9 @@ class TuiApp:
             ("/watch", "run_id (optional)"),
             ("/audit", "run_id (optional)"),
             ("/result", ""),
+            ("/repair", "run_id | dataset_version_id (optional)"),
+            ("/exclude", "<dataset_version_id>"),
+            ("/export", "<dataset_version_id> <destination>"),
             ("/exit", ""),
         ):
             table.add_row(command, argument)

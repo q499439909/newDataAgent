@@ -38,6 +38,18 @@ class TuiClient(Protocol):
 
     def get_qc_report(self, qc_report_id: str) -> dict[str, Any]: ...
 
+    def repair_candidates(self, reference_id: str) -> dict[str, Any]: ...
+
+    def retry_failed_assets(
+        self, run_id: str, idempotency_key: str
+    ) -> dict[str, Any]: ...
+
+    def exclude_abandoned_assets(self, dataset_version_id: str) -> dict[str, Any]: ...
+
+    def export_dataset(
+        self, dataset_version_id: str, destination: str
+    ) -> dict[str, Any]: ...
+
 
 @dataclass
 class TuiSession:
@@ -165,6 +177,31 @@ class TuiSession:
             else None
         )
         return dataset or {}, report
+
+    def repair(self, reference_id: str | None = None) -> dict[str, Any]:
+        selected = reference_id or self.active_run_id
+        if not selected:
+            raise ValueError("Run or DatasetVersion id is required")
+        candidates = self.client.repair_candidates(selected)
+        result: dict[str, Any] = {"candidates": candidates, "run": None}
+        if candidates.get("retry_allowed"):
+            run = self.client.retry_failed_assets(
+                candidates["run_id"],
+                f"tui-repair-{candidates['run_id']}-{uuid.uuid4().hex[:12]}",
+            )
+            self.active_run_id = run["id"]
+            result["run"] = run
+        return result
+
+    def exclude(self, dataset_version_id: str) -> dict[str, Any]:
+        if not dataset_version_id:
+            raise ValueError("DatasetVersion id is required")
+        return self.client.exclude_abandoned_assets(dataset_version_id)
+
+    def export(self, dataset_version_id: str, destination: str) -> dict[str, Any]:
+        if not dataset_version_id or not destination:
+            raise ValueError("DatasetVersion id and destination are required")
+        return self.client.export_dataset(dataset_version_id, destination)
 
     def _interrupt(self) -> dict[str, Any]:
         if not self.turn:

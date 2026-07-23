@@ -17,6 +17,7 @@ class FakeControlPlaneClient:
     def __init__(self) -> None:
         self.stage = "new"
         self.controls: list[str] = []
+        self.exports: list[tuple[str, str]] = []
 
     def create_conversation(self):
         return {"id": "conversation_1", "work_order_id": None, "messages": []}
@@ -142,6 +143,52 @@ class FakeControlPlaneClient:
 
     def get_qc_report(self, qc_report_id):
         return {"id": qc_report_id, "status": "PASSED"}
+
+    def repair_candidates(self, reference_id):
+        return {
+            "reference_id": reference_id,
+            "run_id": "run_1",
+            "dataset_version_id": "dataset_partial",
+            "run_status": "PARTIAL",
+            "repair_attempt": 1,
+            "maximum_repair_attempts": 3,
+            "retry_allowed": True,
+            "still_failed": [
+                {
+                    "source_uri": "D:/images/failed.png",
+                    "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+                    "repair_attempts": 1,
+                }
+            ],
+            "abandoned_assets": [],
+            "excluded_assets": [],
+            "next_actions": ["retry_failed_assets"],
+        }
+
+    def retry_failed_assets(self, run_id, idempotency_key):
+        assert run_id == "run_1"
+        assert idempotency_key.startswith("tui-repair-run_1-")
+        return {**self._run("QUEUED"), "id": "run_repair_2"}
+
+    def exclude_abandoned_assets(self, dataset_version_id):
+        assert dataset_version_id == "dataset_abandoned"
+        return {
+            "id": "dataset_resolved",
+            "still_failed": [],
+            "abandoned_assets": [],
+            "excluded_assets": [{"source_uri": "D:/images/failed.png"}],
+        }
+
+    def export_dataset(self, dataset_version_id, destination):
+        self.exports.append((dataset_version_id, destination))
+        return {
+            "id": "export_1",
+            "dataset_version_id": dataset_version_id,
+            "root_uri": destination,
+            "manifest_uri": f"{destination}/manifest.json",
+            "excluded_assets_uri": f"{destination}/excluded_assets.json",
+            "file_count": 1,
+        }
 
     @staticmethod
     def _turn(interrupts):
@@ -367,6 +414,29 @@ def test_tui_audit_renders_grounded_per_node_reasons() -> None:
     assert "D:/images/rejected.png" in output
     assert "builtin.quality_filter:1" in output
     assert "QUALITY_BELOW_THRESHOLD" in output
+
+
+def test_tui_repair_exclude_and_export_use_grounded_control_endpoints() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    client = FakeControlPlaneClient()
+    session = TuiSession(client, active_run_id="run_1")
+    app = TuiApp(session, console=console)
+
+    app.handle("/repair")
+    app.handle("/exclude dataset_abandoned")
+    app.handle(r"/export dataset_resolved D:\exports\cat dog result")
+
+    output = stream.getvalue()
+    assert session.active_run_id == "run_repair_2"
+    assert "D:/images/failed.png" in output
+    assert "OPERATOR_ERROR:TimeoutError" in output
+    assert "1/3" in output
+    assert "dataset_resolved" in output
+    assert "export_1" in output
+    assert client.exports == [
+        ("dataset_resolved", r"D:\exports\cat dog result")
+    ]
 
 
 def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None:

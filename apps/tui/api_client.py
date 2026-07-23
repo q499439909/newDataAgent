@@ -99,6 +99,38 @@ class ControlPlaneClient:
     def get_qc_report(self, qc_report_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/qc-reports/{qc_report_id}")
 
+    def repair_candidates(self, reference_id: str) -> dict[str, Any]:
+        resource = "datasets" if reference_id.startswith("dataset_") else "runs"
+        return self._request(
+            "GET",
+            f"/api/{resource}/{reference_id}/repair-candidates",
+        )
+
+    def retry_failed_assets(
+        self, run_id: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/runs/{run_id}/repairs",
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
+    def exclude_abandoned_assets(self, dataset_version_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/datasets/{dataset_version_id}/exclude-abandoned",
+            json={"confirmed": True},
+        )
+
+    def export_dataset(
+        self, dataset_version_id: str, destination: str
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/datasets/{dataset_version_id}/exports",
+            json={"destination": destination},
+        )
+
     def _request(self, method: str, path: str, **kwargs: Any):
         try:
             response = self._client.request(method, path, **kwargs)
