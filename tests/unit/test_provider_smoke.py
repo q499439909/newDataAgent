@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from dataagent.acceptance import (
+    collect_acceptance_run_record,
     run_remote_vlm_smoke,
     write_provider_smoke_record,
 )
@@ -139,3 +140,56 @@ def test_provider_smoke_record_is_written_atomically(tmp_path: Path) -> None:
     assert written == destination.resolve()
     assert json.loads(destination.read_text(encoding="utf-8"))["status"] == "PASSED"
     assert not list(destination.parent.glob("*.tmp"))
+
+
+def test_acceptance_run_record_requires_grounded_provider_and_qc_evidence() -> None:
+    record = collect_acceptance_run_record(
+        run={
+            "id": "run_1",
+            "status": "SUCCEEDED",
+            "pipeline_version_id": "pipeline_1",
+            "created_at": "2026-07-23T00:00:00Z",
+            "updated_at": "2026-07-23T00:00:10Z",
+        },
+        dataset={
+            "id": "dataset_1",
+            "assets": [
+                {
+                    "source_uri": "D:/images/cat.jpg",
+                    "decision": "keep",
+                    "labels": {
+                        "datajuicer_output": {"image_tags": ["cat"]}
+                    },
+                }
+            ],
+        },
+        qc_report={"id": "qc_1", "status": "PASSED", "reason_codes": []},
+        node_results=[
+            {
+                "operator_version_id": (
+                    "datajuicer.image_tagging_vlm_mapper.remote_api:2"
+                ),
+                "reason_codes": [],
+            }
+        ],
+        events=[
+            {
+                "event_type": "provider_process_completed",
+                "details": {
+                    "stdout_tail": "done",
+                    "stderr_tail": "HTTP 200",
+                },
+            }
+        ],
+        provider_id="datajuicer",
+        provider_version="1.5.3",
+        model_version="qwen3.7-plus",
+        export_path="D:/exports/export_1",
+    )
+
+    assert record.status == "PASSED"
+    assert record.duration_seconds == 10
+    assert record.remote_call_count == 1
+    assert record.classifications == {"cat.jpg": ("cat",)}
+    assert record.stdout_summaries == ("done",)
+    assert record.stderr_summaries == ("HTTP 200",)

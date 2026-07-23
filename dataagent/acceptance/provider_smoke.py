@@ -41,12 +41,33 @@ class ProviderSmokeRecord(DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class AcceptanceRunRecord(DomainModel):
+    id: str
+    status: str
+    run_id: str
+    dataset_version_id: str
+    qc_report_id: str
+    pipeline_version_id: str
+    provider_id: str
+    provider_version: str
+    model_version: str
+    duration_seconds: float = Field(ge=0)
+    remote_call_count: int = Field(ge=0)
+    node_result_count: int = Field(ge=0)
+    failure_reason_codes: tuple[str, ...] = ()
+    classifications: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    stdout_summaries: tuple[str, ...] = ()
+    stderr_summaries: tuple[str, ...] = ()
+    export_path: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def write_provider_smoke_record(
-    record: ProviderSmokeRecord,
+    record: ProviderSmokeRecord | AcceptanceRunRecord,
     destination: Path,
 ) -> Path:
     destination = destination.expanduser().resolve()
@@ -65,6 +86,91 @@ def write_provider_smoke_record(
     finally:
         temporary.unlink(missing_ok=True)
     return destination
+
+
+def _as_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def collect_acceptance_run_record(
+    *,
+    run: dict[str, Any],
+    dataset: dict[str, Any],
+    qc_report: dict[str, Any],
+    node_results: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    provider_id: str,
+    provider_version: str,
+    model_version: str,
+    export_path: str,
+) -> AcceptanceRunRecord:
+    provider_events = [
+        item for item in events if item.get("event_type") == "provider_process_completed"
+    ]
+    reasons = tuple(
+        dict.fromkeys(
+            [
+                *(qc_report.get("reason_codes") or []),
+                *(
+                    reason
+                    for item in node_results
+                    for reason in item.get("reason_codes") or []
+                ),
+            ]
+        )
+    )
+    classifications = {
+        str(Path(asset["source_uri"]).name): tuple(
+            (
+                asset.get("labels", {})
+                .get("datajuicer_output", {})
+                .get("image_tags", [])
+            )
+        )
+        for asset in dataset.get("assets", [])
+        if asset.get("decision") == "keep"
+    }
+    stdout = tuple(
+        str(item.get("details", {}).get("stdout_tail") or "")
+        for item in provider_events
+        if item.get("details", {}).get("stdout_tail")
+    )
+    stderr = tuple(
+        str(item.get("details", {}).get("stderr_tail") or "")
+        for item in provider_events
+        if item.get("details", {}).get("stderr_tail")
+    )
+    passed = (
+        run.get("status") == "SUCCEEDED"
+        and qc_report.get("status") == "PASSED"
+        and bool(provider_events)
+        and not reasons
+        and all(classifications.values())
+    )
+    duration = (
+        _as_datetime(run["updated_at"]) - _as_datetime(run["created_at"])
+    ).total_seconds()
+    return AcceptanceRunRecord(
+        id=f"acceptance_run_{uuid.uuid4().hex[:16]}",
+        status="PASSED" if passed else "FAILED",
+        run_id=run["id"],
+        dataset_version_id=dataset["id"],
+        qc_report_id=qc_report["id"],
+        pipeline_version_id=run["pipeline_version_id"],
+        provider_id=provider_id,
+        provider_version=provider_version,
+        model_version=model_version,
+        duration_seconds=max(0, duration),
+        remote_call_count=len(provider_events),
+        node_result_count=len(node_results),
+        failure_reason_codes=reasons,
+        classifications=classifications,
+        stdout_summaries=stdout,
+        stderr_summaries=stderr,
+        export_path=export_path,
+    )
 
 
 def run_remote_vlm_smoke(
