@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -122,6 +124,17 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     assert dataset["kept_count"] == 1
     assert dataset["rejected_count"] == 1
     assert dataset["original_files_unchanged"] is True
+    assert dataset["version_kind"] == "logical"
+    assert dataset["deliverable"] is False
+    assert dataset["still_failed"] == []
+    assert all(asset["origin_run_id"] == completed["id"] for asset in dataset["assets"])
+    assert {
+        asset["materialization"] for asset in dataset["assets"]
+    } == {"local_file", "not_materialized"}
+    manifest = Path(dataset["manifest_uri"])
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_payload["id"] == dataset["id"]
+    assert manifest_payload["assets"] == dataset["assets"]
     report = client.get(
         f"/api/qc-reports/{run['qc_report_id']}",
         headers={"X-Owner-ID": "user_1"},

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import shutil
 import time
 from pathlib import Path
@@ -16,6 +15,11 @@ from ..imaging import scan_images
 from ..infrastructure import DomainVersionStore, RunStore
 from ..operators import OperatorRuntime
 from ..operators.protocol import OperatorContext, OperatorInput
+from ..application.dataset_versions import (
+    build_logical_dataset_version,
+    validate_dataset_references,
+    write_dataset_manifest,
+)
 
 
 _OPERATOR_OUTPUTS_KEY = "_dataagent_operator_outputs"
@@ -172,18 +176,13 @@ class DatasetRunExecutor:
         manifest = Path(dataset.manifest_uri)
         if not manifest.is_file():
             raise RuntimeError(f"Published Dataset manifest is missing: {manifest}")
-        for asset in dataset.assets:
-            if asset.decision != "keep":
-                continue
-            if not asset.output_uri or not asset.output_sha256:
-                raise RuntimeError(
-                    f"Kept asset has no materialized output: {asset.source_uri}"
-                )
-            output = Path(asset.output_uri)
-            if not output.is_file():
-                raise RuntimeError(f"Published Dataset output is missing: {output}")
-            if _sha256(output) != asset.output_sha256:
-                raise RuntimeError(f"Published Dataset output hash changed: {output}")
+        issues = validate_dataset_references(dataset)
+        if issues:
+            issue = issues[0]
+            raise RuntimeError(
+                f"Published Dataset reference is invalid: {issue.code}: "
+                f"{issue.output_uri or issue.source_uri}"
+            )
 
     def _execute(self, run: dict[str, Any]) -> DatasetVersion | None:
         owner_id = run["owner_id"]
@@ -560,7 +559,7 @@ class DatasetRunExecutor:
             return artifact
 
         assets: list[DatasetAsset] = []
-        for item in items:
+        for sequence, item in enumerate(items):
             labels = dict(item["labels"])
             operator_outputs = labels.pop(_OPERATOR_OUTPUTS_KEY, {})
             assets.append(DatasetAsset(
@@ -588,32 +587,21 @@ class DatasetRunExecutor:
                     EmbeddingRef.model_validate(value)
                     for value in operator_outputs.get("embeddings", ())
                 ),
+                origin_run_id=run["id"],
+                audit_refs=(f"run:{run['id']}:asset:{sequence}",),
             ))
-        assets_tuple = tuple(assets)
-        dataset = DatasetVersion(
-            id=dataset_id,
-            version=1,
-            created_by=run["owner_id"],
-            change_reason="approved pipeline dataset run",
+        dataset = build_logical_dataset_version(
+            dataset_id=dataset_id,
+            owner_id=run["owner_id"],
             work_order_id=run["work_order_id"],
             pipeline_version_id=pipeline.id,
             task_spec_version_id=spec.id,
             run_id=run["id"],
             source_roots=tuple(str(root) for root in roots),
             manifest_uri=str(manifest_path.resolve()),
-            assets=assets_tuple,
-            source_count=len(assets_tuple),
-            kept_count=sum(item.decision == "keep" for item in assets_tuple),
-            rejected_count=sum(item.decision == "reject" for item in assets_tuple),
-            failed_count=sum(item.decision == "failed" for item in assets_tuple),
-            original_files_unchanged=True,
+            assets=assets,
         )
-        temporary = manifest_path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(dataset.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(manifest_path)
+        write_dataset_manifest(dataset)
         self.version_store.save_if_absent(
             kind="dataset", owner_id=run["owner_id"], payload=dataset.model_dump(mode="json")
         )
