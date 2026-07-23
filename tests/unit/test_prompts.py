@@ -30,6 +30,8 @@ def test_builtin_prompt_registry_resolves_shared_visual_tagging_prompt() -> None
         variables={
             "task_scope_instruction": "Exclude screenshots.",
             "allowed_labels": "pig, dog, mixed, unknown",
+            "semantic_requirements": "Subject is a pig or dog.",
+            "exclusion_requirements": "No other animals.",
         },
     )
 

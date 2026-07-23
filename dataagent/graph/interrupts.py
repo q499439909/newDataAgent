@@ -60,7 +60,12 @@ def revise_task_spec_version(
     planning_text = " ".join(
         [objective, *semantic_requirements, *exclusion_requirements]
     )
-    capabilities = decompose_task_capabilities(planning_text)
+    capabilities = decompose_task_capabilities(
+        planning_text,
+        has_semantic_selection=bool(
+            semantic_requirements or exclusion_requirements
+        ),
+    )
     disabled = {
         str(item)
         for item in hard_constraints.get("disabled_capabilities", [])

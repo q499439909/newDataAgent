@@ -174,6 +174,14 @@ _SEMANTIC_CONCEPTS: dict[str, frozenset[str]] = {
     "authenticity_assessment": frozenset(
         {"authenticity", "aigc", "synthetic", "fake", "vlm_judgement"}
     ),
+    "visual_semantic_selection": frozenset(
+        {
+            "image_tagging",
+            "tagging",
+            "visual_understanding",
+            "visual_semantic_selection",
+        }
+    ),
     "image_classification": frozenset(
         {
             "classification",

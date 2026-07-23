@@ -19,6 +19,7 @@ _NATIVE_CAPABILITY_TAGS: dict[str, frozenset[str]] = {
     "image_decode": frozenset({"decode"}),
     "image_quality": frozenset({"quality", "filter"}),
     "authenticity_assessment": frozenset({"authenticity_assessment"}),
+    "visual_semantic_selection": frozenset({"visual_semantic_selection"}),
     "class_resolution": frozenset({"class_resolution"}),
     "dataset_partition": frozenset({"dataset_partition"}),
     "perceptual_deduplication": frozenset({"deduplication"}),

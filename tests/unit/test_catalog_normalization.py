@@ -16,6 +16,8 @@ from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.domain.pipelines import PipelineVersion
+from dataagent.domain.specs import TaskSpecVersion
+from dataagent.graph.interrupts import revise_task_spec_version
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
     DataJuicerOperatorProvider,
@@ -663,3 +665,96 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
     runtime.operator_registry = registry
     eligibility = runtime.pipeline_execution_eligibility(balanced)
     assert eligibility == {"eligible": True, "violations": []}
+
+
+def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(provider_version="1.5.3")
+    proxies = build_datajuicer_proxy_operators(provider, [_raw_vlm_descriptor()])
+    operators = (*base.operators, *proxies)
+    registry = OperatorRegistry(item.spec for item in operators)
+    library = OperatorLibrary(
+        operators=operators,
+        registry=registry,
+        runtime=OperatorRuntime(operators),
+        providers=base.providers,
+    )
+    initial = generate_task_spec(
+        {
+            "work_order_id": "work_order_black_clothing",
+            "owner_id": "user_1",
+            "requirement": "筛选出里面穿了黑色衣服的图片",
+            "data_sources": [
+                {
+                    "type": "local_directory",
+                    "uri": "D:/images",
+                    "mapping": {},
+                }
+            ],
+            "trace": [],
+        }
+    )
+    revised = revise_task_spec_version(
+        TaskSpecVersion.model_validate(initial["task_spec"]),
+        patch={
+            "semantic_requirements": ["图片中的人物穿着黑色衣服"],
+            "exclusion_requirements": ["人物未穿着黑色衣服的图片"],
+        },
+        actor="user_1",
+    )
+
+    assert [item.capability for item in revised.capability_requirements] == [
+        "image_decode",
+        "visual_semantic_selection",
+        "manifest",
+    ]
+    assert revised.output_actions == ("filter", "manifest")
+
+    retrieval = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": revised.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset(
+            {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+        ),
+    )
+    coverage = {
+        item["capability"]: item for item in retrieval["capability_coverage"]
+    }
+    assert coverage["visual_semantic_selection"]["status"] == (
+        CapabilityCoverageStatus.COVERED
+    )
+    assert coverage["visual_semantic_selection"][
+        "selected_operator_version_id"
+    ] == "builtin.visual_semantic_selection:1"
+
+    pipelines = [
+        PipelineVersion.model_validate(item)
+        for item in generate_pipeline_variants(
+            {
+                "owner_id": "user_1",
+                "task_spec": revised.model_dump(mode="json"),
+                "trace": [],
+                **retrieval,
+            },
+            operator_library=library,
+        )["pipeline_variants"]
+    ]
+
+    assert all(
+        [node.id for node in pipeline.nodes]
+        == ["ingest", "visual_tagging", "visual_semantic_selection", "manifest"]
+        for pipeline in pipelines
+    )
+    visual_node = pipelines[0].nodes[1]
+    assert visual_node.operator_version_id == (
+        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
+    )
+    assert visual_node.prompt_binding is not None
+    assert visual_node.prompt_binding.template_id == "image-semantic-selection"
+    assert "图片中的人物穿着黑色衣服" in visual_node.parameters["system_prompt"]
+    assert "人物未穿着黑色衣服的图片" in visual_node.parameters["system_prompt"]

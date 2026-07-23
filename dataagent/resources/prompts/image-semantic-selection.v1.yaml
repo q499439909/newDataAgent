@@ -1,0 +1,20 @@
+id: image-semantic-selection
+version: 1
+purpose: visual_semantic_selection
+template: |-
+  Evaluate whether the image satisfies the task-specific visual selection criteria.
+  Required visual conditions: $semantic_requirements
+  Rejecting visual conditions: $exclusion_requirements
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["semantic_match"]}.
+  Return exactly one tag: semantic_match when every required condition is satisfied and no rejecting condition is present; semantic_mismatch when the image should be excluded; semantic_uncertain when the visible evidence is insufficient.
+required_variables:
+  - semantic_requirements
+  - exclusion_requirements
+output_contract:
+  type: tag_enum
+  field: tags
+  cardinality: one
+  allowed_values:
+    - semantic_match
+    - semantic_mismatch
+    - semantic_uncertain

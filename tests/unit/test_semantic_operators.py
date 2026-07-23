@@ -4,6 +4,7 @@ from dataagent.operators.builtin.semantic import (
     AuthenticityDecisionOperator,
     ClassResolutionOperator,
     DatasetPartitionOperator,
+    VisualSemanticSelectionOperator,
 )
 from dataagent.operators.protocol import OperatorContext, OperatorInput
 
@@ -39,6 +40,26 @@ def test_authenticity_decision_rejects_synthetic_and_governs_uncertain() -> None
     assert synthetic.labels["authenticity"] == "synthetic"
     assert uncertain.decision == "continue"
     assert uncertain.labels["authenticity_review_required"] is True
+
+
+def test_visual_semantic_selection_rejects_mismatch_and_governs_uncertain() -> None:
+    operator = VisualSemanticSelectionOperator()
+
+    mismatch = operator.execute(
+        _context(),
+        _input(["semantic_mismatch"]),
+        {"uncertain_policy": "review"},
+    )
+    uncertain = operator.execute(
+        _context(),
+        _input([]),
+        {"uncertain_policy": "review"},
+    )
+
+    assert mismatch.decision == "reject"
+    assert mismatch.reason_codes == ["VISUAL_SEMANTIC_CRITERIA_NOT_MET"]
+    assert uncertain.decision == "continue"
+    assert uncertain.labels["visual_semantic_review_required"] is True
 
 
 def test_class_resolution_handles_cat_dog_mixed_and_unknown() -> None:

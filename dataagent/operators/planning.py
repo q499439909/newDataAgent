@@ -145,7 +145,11 @@ _TASK_CAPABILITY_RULES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 
 
-def decompose_task_capabilities(requirement: str) -> tuple[TaskCapabilitySpec, ...]:
+def decompose_task_capabilities(
+    requirement: str,
+    *,
+    has_semantic_selection: bool = False,
+) -> tuple[TaskCapabilitySpec, ...]:
     normalized = " ".join(requirement.lower().split())
     selected = [
         (capability, description)
@@ -164,6 +168,13 @@ def decompose_task_capabilities(requirement: str) -> tuple[TaskCapabilitySpec, .
         "face_identity": "Match person or face identity using governed references.",
     }
     selected.extend((item, descriptions[item]) for item in specialized)
+    if has_semantic_selection:
+        selected.append(
+            (
+                "visual_semantic_selection",
+                "Evaluate task-specific visual inclusion and exclusion criteria.",
+            )
+        )
 
     capabilities: list[TaskCapabilitySpec] = [
         TaskCapabilitySpec(
@@ -254,7 +265,9 @@ def infer_output_actions(
 ) -> tuple[str, ...]:
     names = {item.capability for item in capabilities}
     actions: list[str] = []
-    if names.intersection({"image_quality", "authenticity_assessment"}):
+    if names.intersection(
+        {"image_quality", "authenticity_assessment", "visual_semantic_selection"}
+    ):
         actions.append("filter")
     if "image_classification" in names:
         actions.append("classify")

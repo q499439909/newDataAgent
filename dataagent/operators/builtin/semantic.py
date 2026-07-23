@@ -174,6 +174,63 @@ class AuthenticityDecisionOperator:
         )
 
 
+class VisualSemanticSelectionOperator:
+    spec = _spec(
+        operator_id="builtin.visual_semantic_selection:1",
+        name="VisualSemanticSelectionOperator",
+        summary=(
+            "Resolve task-specific VLM evidence into keep, review, or reject decisions."
+        ),
+        category=OperatorCategory.FILTERING,
+        secondary="semantic_rule",
+        tags=frozenset(
+            {"image", "visual_semantic_selection", "filter", "cpu"}
+        ),
+        resource_requirements={"upstream_capability_tags": ["visual_understanding"]},
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "uncertain_policy": {
+                    "type": "string",
+                    "enum": ["keep", "review", "reject"],
+                    "default": "review",
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+
+    def execute(
+        self, context: OperatorContext, input_data: OperatorInput, parameters: dict[str, Any]
+    ) -> OperatorResult:
+        evidence = _semantic_values(input_data)
+        if "semantic-match" in evidence:
+            resolved = "match"
+            action = "keep"
+        elif "semantic-mismatch" in evidence:
+            resolved = "mismatch"
+            action = "reject"
+        else:
+            resolved = "uncertain"
+            action = parameters["uncertain_policy"]
+        reject = action == "reject"
+        return OperatorResult(
+            output_path=input_data.current_path,
+            metrics=input_data.metrics,
+            labels={
+                **input_data.labels,
+                "visual_semantic_selection": resolved,
+                "visual_semantic_review_required": action == "review",
+            },
+            artifacts=input_data.artifacts,
+            annotations=input_data.annotations,
+            embeddings=input_data.embeddings,
+            decision="reject" if reject else "continue",
+            reason_codes=["VISUAL_SEMANTIC_CRITERIA_NOT_MET"] if reject else [],
+            confidence=1.0 if resolved != "uncertain" else 0.5,
+        )
+
+
 class ClassResolutionOperator:
     spec = _spec(
         operator_id="builtin.class_resolution:1",
@@ -331,6 +388,7 @@ class DatasetPartitionOperator:
 def builtin_semantic_operators() -> tuple:
     return (
         AuthenticityDecisionOperator(),
+        VisualSemanticSelectionOperator(),
         ClassResolutionOperator(),
         DatasetPartitionOperator(),
     )
@@ -340,5 +398,6 @@ __all__ = [
     "AuthenticityDecisionOperator",
     "ClassResolutionOperator",
     "DatasetPartitionOperator",
+    "VisualSemanticSelectionOperator",
     "builtin_semantic_operators",
 ]

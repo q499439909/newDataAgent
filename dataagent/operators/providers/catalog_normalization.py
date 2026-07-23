@@ -46,6 +46,7 @@ DATAJUICER_CATALOG_OVERLAYS = (
                 "image",
                 "image_classification",
                 "image_tagging",
+                "visual_semantic_selection",
                 "visual_understanding",
             }
         ),
