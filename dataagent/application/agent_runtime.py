@@ -32,6 +32,7 @@ from ..operators import build_operator_library
 from ..operators.protocol import OperatorContext, OperatorInput
 from ..operators.providers import ProviderExecuteRequest
 from ..operators.validation import ParameterValidationError, validate_parameters
+from ..prompts import prompt_execution_violation
 from .dataset_exports import export_deliverable_dataset as materialize_dataset_export
 from .dataset_versions import (
     exclude_abandoned_assets_version,
@@ -798,6 +799,8 @@ class AgentRuntime:
         except (KeyError, ValueError) as exc:
             violations.append(str(exc))
         for node in pipeline.nodes:
+            if prompt_violation := prompt_execution_violation(node.prompt_binding):
+                violations.append(prompt_violation)
             try:
                 spec = self.operator_registry.get(node.operator_version_id)
             except KeyError as exc:

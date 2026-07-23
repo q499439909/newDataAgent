@@ -780,3 +780,30 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
     assert "Required visual conditions: none" not in visual_node.parameters[
         "system_prompt"
     ]
+
+    base.providers.register(provider)
+    runtime = AgentRuntime(include_datajuicer=False)
+    runtime.operator_library = library
+    runtime.operator_registry = registry
+    assert runtime.pipeline_execution_eligibility(pipelines[0]) == {
+        "eligible": True,
+        "violations": [],
+    }
+    legacy_nodes = tuple(
+        node.model_copy(
+            update={
+                "prompt_binding": node.prompt_binding.model_copy(
+                    update={"template_version": 1}
+                )
+            }
+        )
+        if node.prompt_binding is not None
+        else node
+        for node in pipelines[0].nodes
+    )
+    legacy = pipelines[0].model_copy(update={"nodes": legacy_nodes})
+
+    eligibility = runtime.pipeline_execution_eligibility(legacy)
+
+    assert eligibility["eligible"] is False
+    assert "retained for audit only" in eligibility["violations"][0]

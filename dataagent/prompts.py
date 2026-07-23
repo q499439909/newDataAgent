@@ -13,6 +13,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .domain.pipelines import PromptBinding
 
 
+_MINIMUM_EXECUTABLE_PROMPT_VERSIONS = {
+    "image-semantic-selection": 2,
+    "image-task-visual-tagging": 2,
+}
+
+
+def prompt_execution_violation(binding: PromptBinding | None) -> str | None:
+    if binding is None:
+        return None
+    minimum = _MINIMUM_EXECUTABLE_PROMPT_VERSIONS.get(binding.template_id, 1)
+    if binding.template_version < minimum:
+        return (
+            f"Prompt {binding.template_id}:{binding.template_version} is retained "
+            f"for audit only; production execution requires version {minimum} or newer"
+        )
+    return None
+
+
 class PromptTemplateVersion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -119,4 +137,5 @@ __all__ = [
     "PromptTemplateVersion",
     "ResolvedPrompt",
     "builtin_prompt_registry",
+    "prompt_execution_violation",
 ]
