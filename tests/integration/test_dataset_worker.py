@@ -413,11 +413,22 @@ def test_retry_failed_assets_creates_a_new_run_with_only_failed_sources(tmp_path
             },
         )
 
-    retry = runtime.retry_failed_assets(
-        previous_run_id=previous["id"],
-        owner_id="user_1",
-        idempotency_key="retry-failed-only",
+    candidates = client.get(
+        f"/api/runs/{previous['id']}/repair-candidates",
+        headers={"X-Owner-ID": "user_1"},
     )
+    assert candidates.status_code == 200
+    assert candidates.json()["retry_allowed"] is True
+    assert len(candidates.json()["still_failed"]) == 1
+    response = client.post(
+        f"/api/runs/{previous['id']}/repairs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "retry-failed-only",
+        },
+    )
+    assert response.status_code == 202
+    retry = response.json()
 
     retry_plan = runtime.run_store.plan(retry["id"])
     assert retry["id"] != previous["id"]
@@ -794,17 +805,27 @@ def test_confirmed_exclusion_promotes_abandoned_dataset_and_allows_export(
         "Dataset QC failed: EXECUTION_FAILURES_PRESENT",
     )
 
-    with pytest.raises(ValueError, match="explicit confirmation"):
-        runtime.exclude_abandoned_assets(
-            dataset_version_id=abandoned.id,
-            owner_id="user_1",
-            confirmed=False,
-        )
-    resolved = runtime.exclude_abandoned_assets(
-        dataset_version_id=abandoned.id,
-        owner_id="user_1",
-        confirmed=True,
+    client = TestClient(create_app(runtime))
+    candidates = client.get(
+        f"/api/datasets/{abandoned.id}/repair-candidates",
+        headers={"X-Owner-ID": "user_1"},
     )
+    assert candidates.status_code == 200
+    assert candidates.json()["retry_allowed"] is False
+    assert candidates.json()["next_actions"] == ["exclude_abandoned_assets"]
+    unconfirmed = client.post(
+        f"/api/datasets/{abandoned.id}/exclude-abandoned",
+        headers={"X-Owner-ID": "user_1"},
+        json={"confirmed": False},
+    )
+    assert unconfirmed.status_code == 422
+    response = client.post(
+        f"/api/datasets/{abandoned.id}/exclude-abandoned",
+        headers={"X-Owner-ID": "user_1"},
+        json={"confirmed": True},
+    )
+    assert response.status_code == 200
+    resolved = response.json()
 
     assert resolved["abandoned_assets"] == []
     assert len(resolved["excluded_assets"]) == 1
@@ -812,11 +833,13 @@ def test_confirmed_exclusion_promotes_abandoned_dataset_and_allows_export(
     assert run["status"] == "SUCCEEDED"
     assert run["dataset_version_id"] == resolved["id"]
     assert run["error"] is None
-    exported = runtime.export_deliverable_dataset(
-        dataset_version_id=resolved["id"],
-        owner_id="user_1",
-        destination=tmp_path / "deliverable",
+    export_response = client.post(
+        f"/api/datasets/{resolved['id']}/exports",
+        headers={"X-Owner-ID": "user_1"},
+        json={"destination": str(tmp_path / "deliverable")},
     )
+    assert export_response.status_code == 200
+    exported = export_response.json()
     assert exported["file_count"] == 1
     excluded_report = json.loads(
         Path(exported["excluded_assets_uri"]).read_text(encoding="utf-8")

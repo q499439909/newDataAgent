@@ -492,6 +492,91 @@ class AgentRuntime:
         )
         return self._run_payload(self.run_store.get(new_run["id"], owner_id))
 
+    def repair_candidates(
+        self,
+        *,
+        reference_id: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        if self.run_store is None or self.version_store is None:
+            raise RuntimeError("Persistent runtime is required for repair inspection")
+        dataset: DatasetVersion | None = None
+        if reference_id.startswith("dataset_"):
+            dataset = DatasetVersion.model_validate(
+                self.version_store.get(
+                    kind="dataset",
+                    entity_id=reference_id,
+                    owner_id=owner_id,
+                )
+            )
+            run = self.run_store.get(dataset.run_id, owner_id)
+        else:
+            run = self.run_store.get(reference_id, owner_id)
+            if run.get("dataset_version_id"):
+                dataset = DatasetVersion.model_validate(
+                    self.version_store.get(
+                        kind="dataset",
+                        entity_id=run["dataset_version_id"],
+                        owner_id=owner_id,
+                    )
+                )
+        if dataset is not None:
+            still_failed = [
+                item.model_dump(mode="json") for item in dataset.still_failed
+            ]
+            abandoned = [
+                item.model_dump(mode="json") for item in dataset.abandoned_assets
+            ]
+            excluded = [
+                item.model_dump(mode="json") for item in dataset.excluded_assets
+            ]
+        else:
+            still_failed = [
+                {
+                    "source_uri": item["source_uri"],
+                    "source_sha256": item["source_sha256"],
+                    "reason_codes": item["reason_codes"],
+                    "audit_refs": [
+                        f"run:{run['id']}:asset:{item['sequence']}"
+                    ],
+                    "repair_attempts": int(run.get("repair_attempt", 0)),
+                }
+                for item in self.run_store.items(run["id"])
+                if item["decision"] == "failed"
+            ]
+            abandoned = []
+            excluded = []
+        retry_allowed = (
+            bool(still_failed)
+            and not abandoned
+            and int(run.get("repair_attempt", 0)) < 3
+        )
+        next_actions: list[str] = []
+        if retry_allowed:
+            next_actions.append("retry_failed_assets")
+        if abandoned:
+            next_actions.append("exclude_abandoned_assets")
+        if (
+            dataset is not None
+            and run["status"] == "SUCCEEDED"
+            and not still_failed
+            and not abandoned
+        ):
+            next_actions.append("export_deliverable_dataset")
+        return {
+            "reference_id": reference_id,
+            "run_id": run["id"],
+            "dataset_version_id": dataset.id if dataset else None,
+            "run_status": run["status"],
+            "repair_attempt": int(run.get("repair_attempt", 0)),
+            "maximum_repair_attempts": 3,
+            "retry_allowed": retry_allowed,
+            "still_failed": still_failed,
+            "abandoned_assets": abandoned,
+            "excluded_assets": excluded,
+            "next_actions": next_actions,
+        }
+
     def reselect_pipeline(
         self,
         *,

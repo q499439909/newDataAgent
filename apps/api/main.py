@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -45,6 +46,18 @@ class RunFeedbackRequest(BaseModel):
     reusable: bool = False
     rating: int | None = Field(default=None, ge=1, le=5)
     comment: str = ""
+
+
+class DatasetExclusionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool
+
+
+class DatasetExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    destination: str = Field(min_length=1)
 
 
 class ProviderExecuteRequestBody(BaseModel):
@@ -485,6 +498,44 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/api/runs/{run_id}/repair-candidates")
+    def get_run_repair_candidates(
+        run_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.repair_candidates(
+                reference_id=run_id,
+                owner_id=owner_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/runs/{run_id}/repairs", status_code=status.HTTP_202_ACCEPTED)
+    def retry_run_failed_assets(
+        run_id: str,
+        idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.retry_failed_assets(
+                previous_run_id=run_id,
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/api/datasets/{dataset_version_id}")
     def get_dataset_version(
         dataset_version_id: str,
@@ -498,6 +549,66 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/datasets/{dataset_version_id}/repair-candidates")
+    def get_dataset_repair_candidates(
+        dataset_version_id: str,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.repair_candidates(
+                reference_id=dataset_version_id,
+                owner_id=owner_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/datasets/{dataset_version_id}/exclude-abandoned")
+    def exclude_dataset_abandoned_assets(
+        dataset_version_id: str,
+        request: DatasetExclusionRequest,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.exclude_abandoned_assets(
+                dataset_version_id=dataset_version_id,
+                owner_id=owner_id,
+                confirmed=request.confirmed,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/datasets/{dataset_version_id}/exports")
+    def export_dataset_deliverable(
+        dataset_version_id: str,
+        request: DatasetExportRequest,
+        owner_id: str = Depends(require_owner),
+        agent_runtime: AgentRuntime = Depends(get_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return agent_runtime.export_deliverable_dataset(
+                dataset_version_id=dataset_version_id,
+                owner_id=owner_id,
+                destination=Path(request.destination),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/qc-reports/{qc_report_id}")
