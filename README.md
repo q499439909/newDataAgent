@@ -43,14 +43,20 @@ API 暂以 `X-Owner-ID` 请求头传递本地 Owner，上线认证模块后将�
 
 本地部署配置使用 SQLite 持久队列和单 Worker。Agent 审批完成后，通过 `POST /api/work-orders/{work_order_id}/runs` 提交 Run；请求必须带 `Idempotency-Key`，重复提交同一键只返回原 Run。Worker 只接受已确认 TaskSpec 和已批准 PipelineVersion，逐图保存断点并支持暂停、恢复和取消。进程异常退出后，重新启动 Worker 会从已保存的资产断点继续。
 
-当前本地 Worker 支持 `local_directory` 图片源。成功 Run 将只读校验原图，在 `DATAAGENT_HOME/platform/datasets` 下发布不可变 DatasetVersion、Manifest 和保留图片副本；空输出或原图执行期间发生变化时禁止发布。发布后由独立 Quality Evaluator 对保留资产执行全量硬规则检查，生成版本化 QCReport；尚未接入 Golden Set 时会明确标记语义质量未经验证，不把清晰度等代理指标描述为真实准确率。
+当前本地 Worker 支持 `local_directory` 图片源。成功 Run 将只读校验原图，在 `DATAAGENT_HOME/platform/datasets` 下发布不可变 Logical DatasetVersion 和 Manifest；初次 Run 可物化本次保留文件，修复版本只引用父版本和 Repair Run 的成功文件，不复制全量图片。发布后由独立 Quality Evaluator 对保留资产执行全量硬规则检查，生成版本化 QCReport；尚未接入 Golden Set 时会明确标记语义质量未经验证，不把清晰度等代理指标描述为真实准确率。
+
+`PARTIAL` DatasetVersion 不能交付。Repair Run 只处理失败资产，同一资产第三次修复仍失败后进入 `abandoned_assets`，必须由用户显式确认后才能进入 `excluded_assets`。只有关联 Run 达到 `SUCCEEDED` 且没有 unresolved/abandoned 资产时，系统才允许生成包含完整文件目录、Manifest 和 excluded report 的 Deliverable Dataset Export。
 
 相关控制面接口：
 
 - `GET /api/work-orders/{work_order_id}/runs`：查看工单 Run；
 - `GET /api/runs/{run_id}`：查看进度和结果；
 - `POST /api/runs/{run_id}/control`：执行 `pause`、`resume` 或 `cancel`；
+- `GET /api/runs/{run_id}/repair-candidates`：查看失败、abandoned 和下一步动作；
+- `POST /api/runs/{run_id}/repairs`：只重试失败资产；
 - `GET /api/datasets/{dataset_version_id}`：查看 DatasetVersion 和资产血缘。
+- `POST /api/datasets/{dataset_version_id}/exclude-abandoned`：显式确认剔除 abandoned 资产；
+- `POST /api/datasets/{dataset_version_id}/exports`：从 `SUCCEEDED` 版本生成交付目录；
 - `GET /api/qc-reports/{qc_report_id}`：查看质量结论、指标、失败资产和返工建议。
 
 ## 启动 Agentic TUI
@@ -61,7 +67,7 @@ API 和 Worker 运行后，再开一个 PowerShell 窗口：
 .\.venv\Scripts\dataagent-tui.exe --owner local-user
 ```
 
-TUI 启动后会创建持久 `ConversationThread`，普通文本由配置的规划模型理解和回复。可以先闲聊、询问使用方式或当前模型，也可以自然描述数据目标；只有识别到明确任务后才会继续追问图片目录、约束和审批，不会把普通问题当成工单。也可使用 `/new D:\images | 筛选清晰图片并去重` 快速创建任务。当前驾驶舱支持 TaskSpec 与 Pipeline 审批、状态同步、Run 提交与查看、暂停、恢复、取消，以及 DatasetVersion 和 QCReport 摘要；输入 `/help` 查看可选快捷命令。
+TUI 启动后会创建持久 `ConversationThread`，普通文本由配置的规划模型理解和回复。可以先闲聊、询问使用方式或当前模型，也可以自然描述数据目标；只有识别到明确任务后才会继续追问图片目录、约束和审批，不会把普通问题当成工单。也可使用 `/new D:\images | 筛选清晰图片并去重` 快速创建任务。当前驾驶舱支持 TaskSpec 与 Pipeline 审批、状态同步、Run 提交与查看、暂停、恢复、取消，以及 DatasetVersion 和 QCReport 摘要；`/repair` 查看并重试失败资产，`/exclude <dataset_version_id>` 显式确认 abandoned 剔除，`/export <dataset_version_id> <destination>` 生成交付目录。输入 `/help` 查看全部快捷命令。
 
 启动时会显示 conversation ID。关闭后可恢复同一段消息历史和关联工单：
 
@@ -225,6 +231,39 @@ dataagent provider report --blocked-only
 能力报告区分可发现、机器可承载和受治理可执行。发现 217 个算子不表示任意 Windows
 CPU 机器可以执行全部算子；CUDA/VLLM 算子会标记为需要 Linux GPU Worker，API 算子
 会标记凭据要求，未完成准入的算子保持 `DRAFT`。
+
+## P0 验收
+
+Acceptance Dataset v1 由本地带 `labels.csv` 的猫狗源集确定性构建，不把二进制验收图片提交到 Git。生成器固定选取 40 张基准图并创建 20 个质量、重复、混合、合成、损坏和修复故障 case，Manifest 记录 SHA256、期望分类、故障模式和最终处置：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_p0_acceptance.py `
+  --source D:\data\cats_dogs_mixed `
+  --destination .dataagent\acceptance\p0-v1
+```
+
+真实 Remote VLM 单图冒烟会调用 Data-Juicer Provider 和配置的百炼视觉模型。输出记录不包含 API Key；空或畸形结构化标签会直接失败，不降级为 `unknown`：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_p0_provider_smoke.py `
+  --repo . `
+  --image .dataagent\acceptance\p0-v1\assets\base\cat_01.jpg `
+  --output .dataagent\acceptance\smoke\remote-vlm.json
+```
+
+对已完成的小集合 Run，可同时生成 Deliverable Export 和验收记录。记录包含 Run、DatasetVersion、QCReport、Provider/模型版本、远程调用数、节点数、原因码、分类结果、时长和导出路径：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\record_p0_acceptance_run.py `
+  --repo . `
+  --runtime-home .dataagent\acceptance\small-runtime `
+  --run-id run_xxx `
+  --owner acceptance `
+  --export .dataagent\acceptance\exports\small-real `
+  --output .dataagent\acceptance\smoke\small-set.json
+```
+
+验收生成器、冒烟记录和导出都默认拒绝覆盖已存在目标，避免历史证据被静默改写。
 
 ## 算子库开发模式
 
