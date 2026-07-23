@@ -6,6 +6,15 @@ from ..domain.specs import TaskSpecVersion
 from ..infrastructure import DomainVersionStore
 
 
+_SEMANTIC_CAPABILITIES = frozenset(
+    {
+        "authenticity_assessment",
+        "image_classification",
+        "visual_semantic_selection",
+    }
+)
+
+
 def _has_semantic_value(value) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
@@ -62,6 +71,20 @@ class QualityEvaluator:
         failure_rate = dataset.failed_count / source_count
         semantic_missing_rate = len(semantic_missing) / checked_count
         retention_rate = dataset.kept_count / source_count
+        semantic_capabilities = required_capabilities.intersection(
+            _SEMANTIC_CAPABILITIES
+        )
+        semantic_quality_verified = bool(semantic_capabilities) and not (
+            semantic_missing or failed_assets
+        )
+        selection_counts = {
+            value: sum(
+                asset.labels.get("visual_semantic_selection") == value
+                for asset in dataset.assets
+            )
+            for value in ("match", "mismatch", "uncertain")
+        }
+        selection_total = sum(selection_counts.values())
         threshold = spec.acceptance.hard_rule_violation_rate
         reasons: list[str] = []
         recommendations: list[str] = []
@@ -85,6 +108,22 @@ class QualityEvaluator:
             and dataset.failed_count == 0
             and not semantic_missing
         )
+        metrics = {
+            "hard_rule_violation_rate": round(violation_rate, 6),
+            "retention_rate": round(retention_rate, 6),
+            "execution_failure_rate": round(failure_rate, 6),
+            "semantic_output_missing_rate": round(semantic_missing_rate, 6),
+        }
+        if selection_total:
+            metrics.update(
+                {
+                    f"semantic_selection_{value}_rate": round(
+                        count / selection_total,
+                        6,
+                    )
+                    for value, count in selection_counts.items()
+                }
+            )
         report = QCReport(
             id=f"qc_report_{dataset.id.removeprefix('dataset_')}",
             version=1,
@@ -98,13 +137,8 @@ class QualityEvaluator:
             evaluator_version=self.VERSION,
             status=QCStatus.PASSED if passed else QCStatus.FAILED,
             full_hard_rule_check=True,
-            semantic_quality_verified=False,
-            metrics={
-                "hard_rule_violation_rate": round(violation_rate, 6),
-                "retention_rate": round(retention_rate, 6),
-                "execution_failure_rate": round(failure_rate, 6),
-                "semantic_output_missing_rate": round(semantic_missing_rate, 6),
-            },
+            semantic_quality_verified=semantic_quality_verified,
+            metrics=metrics,
             failed_asset_uris=tuple(
                 dict.fromkeys(
                     asset.source_uri
@@ -140,6 +174,17 @@ class QualityEvaluator:
                 else None
             )
             if not _has_semantic_value(authenticity_evidence):
+                return True
+        if "visual_semantic_selection" in required_capabilities:
+            selection = labels.get("visual_semantic_selection")
+            provider_evidence = (
+                provider_output.get("visual_tags")
+                if isinstance(provider_output, dict)
+                else None
+            )
+            if selection not in {"match", "mismatch", "uncertain"}:
+                return True
+            if not _has_semantic_value(provider_evidence):
                 return True
         return False
 

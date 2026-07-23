@@ -116,3 +116,124 @@ def test_quality_evaluator_fails_when_required_vlm_evidence_is_missing(
     assert report.status == "FAILED"
     assert report.metrics["semantic_output_missing_rate"] == 1
     assert "REQUIRED_SEMANTIC_OUTPUT_MISSING" in report.reason_codes
+
+
+def test_quality_evaluator_verifies_visual_selection_contract(tmp_path) -> None:
+    store = DomainVersionStore(SqliteDatabase(tmp_path / "control.db"))
+    spec = TaskSpecVersion(
+        id="spec_visual_selection",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_1",
+        objective="keep people wearing black clothing",
+        data_sources=(DataSourceSpec(type="local_directory", uri=str(tmp_path)),),
+        capability_requirements=(
+            TaskCapabilitySpec(
+                id="visual_selection",
+                capability="visual_semantic_selection",
+                description="select black clothing",
+            ),
+        ),
+        confirmed=True,
+    )
+    matched = DatasetAsset(
+        source_uri=str(tmp_path / "matched.png"),
+        source_sha256="a" * 64,
+        output_uri=str(tmp_path / "output.png"),
+        output_sha256="b" * 64,
+        decision="keep",
+        labels={
+            "visual_semantic_selection": "match",
+            "datajuicer_output": {"visual_tags": ["semantic_match"]},
+        },
+    )
+    dataset = DatasetVersion(
+        id="dataset_visual_selection",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id=spec.id,
+        run_id="run_1",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "manifest.json"),
+        assets=(matched,),
+        source_count=1,
+        kept_count=1,
+        rejected_count=0,
+        failed_count=0,
+        original_files_unchanged=True,
+    )
+
+    report = QualityEvaluator(store).evaluate(
+        dataset=dataset,
+        spec=spec,
+        owner_id="user_1",
+    )
+
+    assert report.status == "PASSED"
+    assert report.semantic_quality_verified is True
+    assert report.metrics["semantic_selection_match_rate"] == 1
+    assert report.metrics["semantic_selection_mismatch_rate"] == 0
+
+
+def test_quality_evaluator_rejects_missing_visual_selection_contract(
+    tmp_path,
+) -> None:
+    store = DomainVersionStore(SqliteDatabase(tmp_path / "control.db"))
+    spec = TaskSpecVersion(
+        id="spec_visual_selection_missing",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_1",
+        objective="keep people wearing black clothing",
+        data_sources=(DataSourceSpec(type="local_directory", uri=str(tmp_path)),),
+        capability_requirements=(
+            TaskCapabilitySpec(
+                id="visual_selection",
+                capability="visual_semantic_selection",
+                description="select black clothing",
+            ),
+        ),
+        confirmed=True,
+    )
+    dataset = DatasetVersion(
+        id="dataset_visual_selection_missing",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id=spec.id,
+        run_id="run_1",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "manifest.json"),
+        assets=(
+            DatasetAsset(
+                source_uri=str(tmp_path / "missing.png"),
+                source_sha256="a" * 64,
+                output_uri=str(tmp_path / "output.png"),
+                output_sha256="b" * 64,
+                decision="keep",
+                labels={"datajuicer_output": {}},
+            ),
+        ),
+        source_count=1,
+        kept_count=1,
+        rejected_count=0,
+        failed_count=0,
+        original_files_unchanged=True,
+    )
+
+    report = QualityEvaluator(store).evaluate(
+        dataset=dataset,
+        spec=spec,
+        owner_id="user_1",
+    )
+
+    assert report.status == "FAILED"
+    assert report.semantic_quality_verified is False
+    assert "REQUIRED_SEMANTIC_OUTPUT_MISSING" in report.reason_codes
