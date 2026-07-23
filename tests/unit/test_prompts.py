@@ -41,6 +41,29 @@ def test_builtin_prompt_registry_resolves_shared_visual_tagging_prompt() -> None
     assert resolved.output_contract["type"] == "tag_set"
 
 
+def test_semantic_selection_v2_keeps_objective_and_label_context() -> None:
+    resolved = builtin_prompt_registry().resolve(
+        "image-semantic-selection",
+        2,
+        variables={
+            "task_objective": "筛选出穿黑色衣服的图片",
+            "semantic_requirements": "筛选出穿黑色衣服的图片",
+            "exclusion_requirements": "排除不属于上述类别的图片",
+            "classification_contract": [
+                {
+                    "id": "black_clothing",
+                    "display_name": "穿了黑色衣服",
+                    "aliases": ["黑色衣物"],
+                }
+            ],
+        },
+    )
+
+    assert "筛选出穿黑色衣服的图片" in resolved.text
+    assert '"black_clothing"' in resolved.text
+    assert "Required visual conditions: none" not in resolved.text
+
+
 def test_prompt_registry_rejects_missing_or_extra_variables() -> None:
     registry = builtin_prompt_registry()
 

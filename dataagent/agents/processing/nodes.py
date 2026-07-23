@@ -89,6 +89,33 @@ def _classification_contract(task_spec: TaskSpecVersion) -> dict[str, Any]:
     }
 
 
+def _classification_prompt_context(task_spec: TaskSpecVersion) -> list[dict[str, Any]]:
+    classification = task_spec.classification
+    if classification is None:
+        return []
+    return [
+        {
+            "id": label.id,
+            "display_name": label.display_name,
+            "aliases": list(label.aliases),
+        }
+        for label in classification.labels
+    ]
+
+
+def _semantic_selection_variables(task_spec: TaskSpecVersion) -> dict[str, Any]:
+    return {
+        "task_objective": task_spec.objective,
+        "semantic_requirements": (
+            "; ".join(task_spec.semantic_requirements) or task_spec.objective
+        ),
+        "exclusion_requirements": (
+            "; ".join(task_spec.exclusion_requirements) or "none"
+        ),
+        "classification_contract": _classification_prompt_context(task_spec),
+    }
+
+
 def _candidate_map(state: WorkOrderGraphState) -> dict[str, OperatorCatalogMatch]:
     return {
         item.operator_version_id: item
@@ -194,15 +221,8 @@ def _vlm_configuration(
         elif purpose == "semantic_selection":
             resolved = builtin_prompt_registry().resolve(
                 "image-semantic-selection",
-                1,
-                variables={
-                    "semantic_requirements": (
-                        "; ".join(task_spec.semantic_requirements) or "none"
-                    ),
-                    "exclusion_requirements": (
-                        "; ".join(task_spec.exclusion_requirements) or "none"
-                    ),
-                },
+                2,
+                variables=_semantic_selection_variables(task_spec),
             )
         else:
             scope = task_spec.hard_constraints.get("authenticity_scope")
@@ -216,16 +236,11 @@ def _vlm_configuration(
             ]
             resolved = builtin_prompt_registry().resolve(
                 "image-task-visual-tagging",
-                1,
+                2,
                 variables={
                     "task_scope_instruction": task_scope or "No additional exclusions.",
                     "allowed_labels": ", ".join(allowed),
-                    "semantic_requirements": (
-                        "; ".join(task_spec.semantic_requirements) or "none"
-                    ),
-                    "exclusion_requirements": (
-                        "; ".join(task_spec.exclusion_requirements) or "none"
-                    ),
+                    **_semantic_selection_variables(task_spec),
                 },
             )
         parameters["system_prompt"] = resolved.text

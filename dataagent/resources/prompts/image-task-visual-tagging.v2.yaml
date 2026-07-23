@@ -1,0 +1,43 @@
+id: image-task-visual-tagging
+version: 2
+purpose: shared_visual_evidence
+template: |-
+  Inspect the image once and return all visual evidence needed by downstream deterministic policy nodes.
+  Task objective: $task_objective
+  Required visual conditions: $semantic_requirements
+  Rejecting visual conditions: $exclusion_requirements
+  Structured label context: $classification_contract
+  Apply this task-specific authenticity and exclusion scope: $task_scope_instruction
+  Resolve references such as "the categories above" from the task objective and structured label context.
+  Judge only visible image evidence. Do not treat an absent or unclear condition as a match.
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["authentic","direct_photo","semantic_match","cat"]}.
+  Include exactly one authenticity tag: authentic, synthetic, or uncertain.
+  Include exactly one capture tag: direct_photo, edited_photo, screenshot, illustration, composite, or uncertain_capture.
+  Include exactly one semantic-selection tag: semantic_match, semantic_mismatch, or semantic_uncertain.
+  Include exactly one task class tag from: $allowed_labels.
+required_variables:
+  - task_objective
+  - semantic_requirements
+  - exclusion_requirements
+  - classification_contract
+  - allowed_labels
+  - task_scope_instruction
+output_contract:
+  type: tag_set
+  field: tags
+  groups:
+    authenticity:
+      - authentic
+      - synthetic
+      - uncertain
+    capture:
+      - direct_photo
+      - edited_photo
+      - screenshot
+      - illustration
+      - composite
+      - uncertain_capture
+    semantic_selection:
+      - semantic_match
+      - semantic_mismatch
+      - semantic_uncertain

@@ -697,8 +697,24 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
     revised = revise_task_spec_version(
         TaskSpecVersion.model_validate(initial["task_spec"]),
         patch={
-            "semantic_requirements": ["图片中的人物穿着黑色衣服"],
-            "exclusion_requirements": ["人物未穿着黑色衣服的图片"],
+            "classification": {
+                "mode": "closed_set",
+                "labels": [
+                    {
+                        "id": "black_clothing",
+                        "display_name": "穿了黑色衣服",
+                        "aliases": ["穿黑色衣服", "黑色衣物"],
+                    },
+                    {
+                        "id": "not_black_clothing",
+                        "display_name": "未穿黑色衣服",
+                        "aliases": ["没穿黑色衣服", "非黑色衣物"],
+                    },
+                ],
+                "mixed_label": "mixed",
+                "unknown_label": "unknown",
+            },
+            "exclusion_requirements": ["排除不属于上述任一类别的图片"],
         },
         actor="user_1",
     )
@@ -756,5 +772,11 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
     )
     assert visual_node.prompt_binding is not None
     assert visual_node.prompt_binding.template_id == "image-semantic-selection"
-    assert "图片中的人物穿着黑色衣服" in visual_node.parameters["system_prompt"]
-    assert "人物未穿着黑色衣服的图片" in visual_node.parameters["system_prompt"]
+    assert visual_node.prompt_binding.template_version == 2
+    assert "筛选出里面穿了黑色衣服的图片" in visual_node.parameters[
+        "system_prompt"
+    ]
+    assert '"black_clothing"' in visual_node.parameters["system_prompt"]
+    assert "Required visual conditions: none" not in visual_node.parameters[
+        "system_prompt"
+    ]

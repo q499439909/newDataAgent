@@ -1,0 +1,26 @@
+id: image-semantic-selection
+version: 2
+purpose: visual_semantic_selection
+template: |-
+  Evaluate whether the image should be included by this dataset task.
+  Task objective: $task_objective
+  Required visual conditions: $semantic_requirements
+  Rejecting visual conditions: $exclusion_requirements
+  Structured label context: $classification_contract
+  Resolve references such as "the categories above" from the task objective and structured label context.
+  Judge only visible image evidence. Do not treat an absent or unclear condition as a match.
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["semantic_match"]}.
+  Return exactly one tag: semantic_match when every required condition is visibly satisfied and no rejecting condition is present; semantic_mismatch when the image should be excluded; semantic_uncertain when the visible evidence is insufficient.
+required_variables:
+  - task_objective
+  - semantic_requirements
+  - exclusion_requirements
+  - classification_contract
+output_contract:
+  type: tag_enum
+  field: tags
+  cardinality: one
+  allowed_values:
+    - semantic_match
+    - semantic_mismatch
+    - semantic_uncertain
