@@ -20,6 +20,8 @@ def main() -> None:
         datajuicer_process_bin=settings.datajuicer_process_bin,
         datajuicer_timeout_seconds=settings.datajuicer_timeout_seconds,
         remote_asset_timeout_seconds=settings.remote_asset_timeout_seconds,
+        vision_model=settings.vision_model,
+        vision_api_base_url=settings.vision_api_base_url,
     )
     if args.once:
         worker.process_next()
