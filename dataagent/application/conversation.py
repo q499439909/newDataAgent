@@ -955,6 +955,26 @@ class ConversationService:
             "missing_output_examples": missing_outputs[:5],
             "empty_semantic_output_count": empty_semantic_outputs,
             "materialized": manifest.is_file() and not missing_outputs,
+            "parent_dataset_version_id": dataset.get("parent_dataset_version_id"),
+            "repair_run_ids": list(dataset.get("repair_run_ids") or []),
+            "still_failed": list(dataset.get("still_failed") or []),
+            "abandoned_assets": list(dataset.get("abandoned_assets") or []),
+            "excluded_assets": list(dataset.get("excluded_assets") or []),
+            "asset_lineage": [
+                {
+                    "source_uri": item.get("source_uri"),
+                    "decision": item.get("decision"),
+                    "asset_origin": item.get("asset_origin"),
+                    "origin_dataset_version_id": item.get(
+                        "origin_dataset_version_id"
+                    ),
+                    "origin_run_id": item.get("origin_run_id"),
+                    "materialization": item.get("materialization"),
+                    "reason_codes": list(item.get("reason_codes") or []),
+                    "audit_refs": list(item.get("audit_refs") or []),
+                }
+                for item in assets
+            ],
         }
 
     def _current_run(
@@ -1033,10 +1053,12 @@ class ConversationService:
         asks_dataset = "dataset" in facets
         asks_outcome = "outcome" in facets
         asks_audit = "audit" in facets
+        asks_repair = "repair" in facets
         pipeline = (
             run_pipeline
             if asks_dataset
             or asks_outcome
+            or asks_repair
             or latest_run.get("status") in active_statuses
             or asks_run
             else approved_pipeline or run_pipeline
@@ -1106,6 +1128,69 @@ class ConversationService:
                     lookup_error=context.get("audit_lookup_error"),
                 )
             )
+        if asks_repair:
+            lines.append(
+                ConversationService._repair_facts_reply(
+                    context.get("latest_dataset"),
+                    lookup_error=context.get("dataset_lookup_error"),
+                )
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _repair_facts_reply(
+        dataset: dict[str, Any] | None,
+        *,
+        lookup_error: str | None = None,
+    ) -> str:
+        if dataset is None:
+            return (
+                f"无法读取 DatasetVersion 修复事实：{lookup_error}。"
+                if lookup_error
+                else "当前还没有可查询修复状态的 DatasetVersion。"
+            )
+        still_failed = dataset.get("still_failed") or []
+        abandoned = dataset.get("abandoned_assets") or []
+        excluded = dataset.get("excluded_assets") or []
+        lines = [
+            "### DatasetVersion 修复事实",
+            f"- 当前版本：`{dataset.get('id', '-')}`",
+            f"- 父版本：`{dataset.get('parent_dataset_version_id') or '无'}`",
+            "- Repair Runs："
+            + (
+                ", ".join(
+                    f"`{item}`" for item in dataset.get("repair_run_ids") or []
+                )
+                or "无"
+            ),
+            (
+                f"- still_failed={len(still_failed)}，"
+                f"abandoned={len(abandoned)}，excluded={len(excluded)}。"
+            ),
+        ]
+        for label, items in (
+            ("still_failed", still_failed),
+            ("abandoned", abandoned),
+            ("excluded", excluded),
+        ):
+            for item in items:
+                reasons = ", ".join(item.get("reason_codes") or []) or "无原因码"
+                lines.append(
+                    f"- {label}：`{item.get('source_uri', '-')}`；"
+                    f"尝试 {item.get('repair_attempts', 0)}；原因：{reasons}"
+                )
+        lineage = dataset.get("asset_lineage") or []
+        if lineage:
+            lines.append("资产血缘：")
+            for item in lineage:
+                lines.append(
+                    f"- `{item.get('source_uri', '-')}`："
+                    f"decision={item.get('decision', '-')}，"
+                    f"origin={item.get('asset_origin', '-')}，"
+                    f"dataset={item.get('origin_dataset_version_id') or '-'}，"
+                    f"run={item.get('origin_run_id') or '-'}，"
+                    f"materialization={item.get('materialization', '-')}"
+                )
         return "\n".join(lines)
 
     @staticmethod

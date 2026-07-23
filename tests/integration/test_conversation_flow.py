@@ -1140,6 +1140,68 @@ def test_dataset_result_queries_use_materialized_paths_and_actual_classes(
     assert "unknown=keep" in explanation
 
 
+def test_repair_fact_queries_are_rendered_from_dataset_manifest() -> None:
+    summary = ConversationService._dataset_control_summary(
+        {
+            "id": "dataset_repaired_3",
+            "manifest_uri": "D:/datasets/dataset_repaired_3/manifest.json",
+            "source_count": 2,
+            "kept_count": 1,
+            "rejected_count": 0,
+            "failed_count": 1,
+            "original_files_unchanged": True,
+            "parent_dataset_version_id": "dataset_parent",
+            "repair_run_ids": ["run_repair_1", "run_repair_2", "run_repair_3"],
+            "still_failed": [],
+            "abandoned_assets": [
+                {
+                    "source_uri": "D:/images/failed.png",
+                    "source_sha256": "abc",
+                    "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+                    "audit_refs": ["run:run_repair_3:asset:0"],
+                    "repair_attempts": 3,
+                }
+            ],
+            "excluded_assets": [],
+            "assets": [
+                {
+                    "source_uri": "D:/images/kept.png",
+                    "output_uri": "D:/datasets/parent/files/kept.png",
+                    "decision": "keep",
+                    "asset_origin": "parent_dataset_version",
+                    "origin_dataset_version_id": "dataset_parent",
+                    "origin_run_id": "run_parent",
+                    "materialization": "referenced_file",
+                    "labels": {},
+                },
+                {
+                    "source_uri": "D:/images/failed.png",
+                    "decision": "failed",
+                    "asset_origin": "repair_run",
+                    "origin_dataset_version_id": "dataset_repair_output",
+                    "origin_run_id": "run_repair_3",
+                    "materialization": "not_materialized",
+                    "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+                    "labels": {},
+                },
+            ],
+        }
+    )
+
+    reply = ConversationService._control_facts_reply(
+        {"latest_dataset": summary},
+        frozenset({"repair"}),
+    )
+
+    assert "dataset_parent" in reply
+    assert "run_repair_3" in reply
+    assert "abandoned=1" in reply
+    assert "D:/images/failed.png" in reply
+    assert "OPERATOR_ERROR:TimeoutError" in reply
+    assert "parent_dataset_version" in reply
+    assert "repair_run" in reply
+
+
 def test_ungrounded_control_plane_identifiers_are_detected() -> None:
     context = {
         "work_order_id": "work_order_real",
