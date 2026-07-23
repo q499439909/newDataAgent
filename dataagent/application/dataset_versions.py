@@ -15,6 +15,7 @@ from ..domain.runs import (
     DatasetAssetPointer,
     DatasetVersion,
     DatasetVersionKind,
+    RepairedDatasetVersion,
 )
 
 
@@ -103,6 +104,133 @@ def build_logical_dataset_version(
         excluded_assets=excluded_assets,
         deliverable=False,
     )
+
+
+def _lineage_reference(
+    asset: DatasetAsset,
+    *,
+    origin: AssetOrigin,
+    origin_dataset_version_id: str,
+    origin_run_id: str | None,
+    audit_ref: str,
+) -> DatasetAsset:
+    audit_refs = tuple(dict.fromkeys((*asset.audit_refs, audit_ref)))
+    return asset.model_copy(
+        update={
+            "asset_origin": origin,
+            "origin_dataset_version_id": origin_dataset_version_id,
+            "origin_run_id": origin_run_id,
+            "materialization": (
+                AssetMaterialization.REFERENCED_FILE
+                if asset.output_uri
+                else AssetMaterialization.NOT_MATERIALIZED
+            ),
+            "audit_refs": audit_refs,
+        }
+    )
+
+
+def merge_repaired_dataset_version(
+    *,
+    dataset_id: str,
+    owner_id: str,
+    parent: DatasetVersion,
+    repair_output: DatasetVersion,
+    repair_run_id: str,
+    repair_attempt: int,
+    manifest_uri: str,
+) -> RepairedDatasetVersion:
+    repair_by_asset: dict[tuple[str, str], DatasetAsset] = {}
+    for asset in repair_output.assets:
+        key = (asset.source_uri, asset.source_sha256)
+        if key in repair_by_asset:
+            raise ValueError(f"Repair output contains duplicate asset identity: {key[0]}")
+        repair_by_asset[key] = asset
+
+    merged_assets: list[DatasetAsset] = []
+    for index, parent_asset in enumerate(parent.assets):
+        key = (parent_asset.source_uri, parent_asset.source_sha256)
+        repaired_asset = repair_by_asset.pop(key, None)
+        if parent_asset.decision != "failed":
+            audit_ref = f"dataset:{parent.id}:asset:{index}"
+            if repaired_asset is not None:
+                audit_ref += f":repair:{repair_run_id}:ignored_out_of_scope"
+            merged_assets.append(
+                _lineage_reference(
+                    parent_asset,
+                    origin=AssetOrigin.PARENT_DATASET_VERSION,
+                    origin_dataset_version_id=parent.id,
+                    origin_run_id=parent_asset.origin_run_id,
+                    audit_ref=audit_ref,
+                )
+            )
+            continue
+        selected = repaired_asset or parent_asset
+        if repaired_asset is None:
+            merged_assets.append(
+                _lineage_reference(
+                    selected,
+                    origin=AssetOrigin.PARENT_DATASET_VERSION,
+                    origin_dataset_version_id=parent.id,
+                    origin_run_id=selected.origin_run_id,
+                    audit_ref=f"dataset:{parent.id}:asset:{index}:repair_output_missing",
+                )
+            )
+            continue
+        merged_assets.append(
+            _lineage_reference(
+                selected,
+                origin=AssetOrigin.REPAIR_RUN,
+                origin_dataset_version_id=repair_output.id,
+                origin_run_id=repair_run_id,
+                audit_ref=f"repair:{repair_run_id}:asset:{index}",
+            )
+        )
+
+    for index, repaired_asset in enumerate(repair_by_asset.values()):
+        merged_assets.append(
+            _lineage_reference(
+                repaired_asset,
+                origin=AssetOrigin.REPAIR_RUN,
+                origin_dataset_version_id=repair_output.id,
+                origin_run_id=repair_run_id,
+                audit_ref=f"repair:{repair_run_id}:missing_parent_asset:{index}",
+            )
+        )
+
+    still_failed = tuple(
+        DatasetAssetPointer(
+            source_uri=asset.source_uri,
+            source_sha256=asset.source_sha256,
+            reason_codes=asset.reason_codes,
+            audit_refs=asset.audit_refs,
+            repair_attempts=repair_attempt,
+        )
+        for asset in merged_assets
+        if asset.decision == "failed"
+    )
+    repair_run_ids = tuple(
+        dict.fromkeys((*parent.repair_run_ids, repair_run_id))
+    )
+    merged = build_logical_dataset_version(
+        dataset_id=dataset_id,
+        owner_id=owner_id,
+        work_order_id=parent.work_order_id,
+        pipeline_version_id=parent.pipeline_version_id,
+        task_spec_version_id=parent.task_spec_version_id,
+        run_id=repair_run_id,
+        source_roots=parent.source_roots,
+        manifest_uri=manifest_uri,
+        assets=merged_assets,
+        version=parent.version + 1,
+        change_reason="merged parent DatasetVersion with Repair Run output",
+        parent_dataset_version_id=parent.id,
+        repair_run_ids=repair_run_ids,
+        still_failed=still_failed,
+        abandoned_assets=parent.abandoned_assets,
+        excluded_assets=parent.excluded_assets,
+    )
+    return RepairedDatasetVersion.model_validate(merged.model_dump(mode="python"))
 
 
 def validate_dataset_references(

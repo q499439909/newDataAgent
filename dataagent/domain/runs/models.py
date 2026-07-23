@@ -244,3 +244,13 @@ class DatasetVersion(VersionedModel):
         ):
             raise ValueError("Dataset parent lineage fields must agree")
         return self
+
+
+class RepairedDatasetVersion(DatasetVersion):
+    @model_validator(mode="after")
+    def validate_repair_lineage(self) -> "RepairedDatasetVersion":
+        if not self.parent_dataset_version_id or not self.repair_run_ids:
+            raise ValueError(
+                "RepairedDatasetVersion requires parent DatasetVersion and repair Runs"
+            )
+        return self

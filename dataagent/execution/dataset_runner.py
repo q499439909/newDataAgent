@@ -17,6 +17,7 @@ from ..operators import OperatorRuntime
 from ..operators.protocol import OperatorContext, OperatorInput
 from ..application.dataset_versions import (
     build_logical_dataset_version,
+    merge_repaired_dataset_version,
     validate_dataset_references,
     write_dataset_manifest,
 )
@@ -107,6 +108,7 @@ class DatasetRunExecutor:
             )
             raise
         if dataset is not None:
+            dataset = self._merge_repair_output(run, dataset)
             self.run_store.mark_evaluating(run_id)
             self.run_store.add_event(run_id, "evaluation_started")
             try:
@@ -164,6 +166,60 @@ class DatasetRunExecutor:
             )
         return self.run_store.get(run_id)
 
+    def _merge_repair_output(
+        self,
+        run: dict[str, Any],
+        repair_output: DatasetVersion,
+    ) -> DatasetVersion:
+        parent_dataset_version_id = run.get("parent_dataset_version_id")
+        if run.get("operation_kind") != "repair" or not parent_dataset_version_id:
+            return repair_output
+        dataset_id = f"dataset_repaired_{run['id'].removeprefix('run_')}"
+        try:
+            existing = self.version_store.get(
+                kind="dataset",
+                entity_id=dataset_id,
+                owner_id=run["owner_id"],
+            )
+        except KeyError:
+            pass
+        else:
+            return DatasetVersion.model_validate(existing)
+        parent = DatasetVersion.model_validate(
+            self.version_store.get(
+                kind="dataset",
+                entity_id=parent_dataset_version_id,
+                owner_id=run["owner_id"],
+            )
+        )
+        manifest_path = self.home / "datasets" / dataset_id / "manifest.json"
+        repaired = merge_repaired_dataset_version(
+            dataset_id=dataset_id,
+            owner_id=run["owner_id"],
+            parent=parent,
+            repair_output=repair_output,
+            repair_run_id=run["id"],
+            repair_attempt=int(run["repair_attempt"]),
+            manifest_uri=str(manifest_path),
+        )
+        write_dataset_manifest(repaired)
+        self.version_store.save_if_absent(
+            kind="dataset",
+            owner_id=run["owner_id"],
+            payload=repaired.model_dump(mode="json"),
+        )
+        self.run_store.add_event(
+            run["id"],
+            "repaired_dataset_version_created",
+            {
+                "dataset_version_id": repaired.id,
+                "parent_dataset_version_id": parent.id,
+                "repair_output_dataset_version_id": repair_output.id,
+                "still_failed_count": len(repaired.still_failed),
+            },
+        )
+        return repaired
+
     @staticmethod
     def _is_partial_completion(dataset: DatasetVersion, report: Any) -> bool:
         return (
@@ -187,6 +243,17 @@ class DatasetRunExecutor:
         }
         if actual_scope != expected_scope or len(planned) != len(expected_scope):
             raise RuntimeError("Repair Run plan escaped its frozen failed-asset scope")
+
+    @staticmethod
+    def _validate_publication_outcomes(
+        run: dict[str, Any],
+        completed: list[dict[str, Any]],
+    ) -> None:
+        if (
+            run.get("operation_kind") != "repair"
+            and not any(item["decision"] == "keep" for item in completed)
+        ):
+            raise RuntimeError("Run produced an empty dataset; publication was blocked")
 
     @staticmethod
     def _validate_materialized_dataset(dataset: DatasetVersion) -> None:
@@ -530,8 +597,7 @@ class DatasetRunExecutor:
             )
 
         completed = self.run_store.items(run["id"])
-        if not any(item["decision"] == "keep" for item in completed):
-            raise RuntimeError("Run produced an empty dataset; publication was blocked")
+        self._validate_publication_outcomes(run, completed)
         return self._publish(run, spec, pipeline, roots, completed)
 
     @staticmethod
@@ -566,6 +632,7 @@ class DatasetRunExecutor:
         dataset_root = self.home / "datasets" / dataset_id
         if not dataset_root.exists():
             dataset_root.parent.mkdir(parents=True, exist_ok=True)
+            staging_root.mkdir(parents=True, exist_ok=True)
             staging_root.replace(dataset_root)
         manifest_path = dataset_root / "manifest.json"
 

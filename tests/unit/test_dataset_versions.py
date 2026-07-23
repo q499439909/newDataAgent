@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dataagent.application.dataset_versions import (
     build_logical_dataset_version,
+    merge_repaired_dataset_version,
     validate_dataset_references,
     write_dataset_manifest,
 )
@@ -14,6 +15,7 @@ from dataagent.domain.runs import (
     AssetOrigin,
     DatasetAsset,
     DatasetVersionKind,
+    RepairedDatasetVersion,
 )
 
 
@@ -179,3 +181,126 @@ def test_manifest_write_is_atomic_and_round_trips(tmp_path: Path) -> None:
     assert written == manifest.resolve()
     assert json.loads(manifest.read_text(encoding="utf-8"))["id"] == "dataset_1"
     assert not list(manifest.parent.glob("*.tmp"))
+
+
+def test_repaired_dataset_references_parent_and_repair_outputs_without_copy(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    parent_root = tmp_path / "parent"
+    repair_root = tmp_path / "repair"
+    source_root.mkdir()
+    parent_root.mkdir()
+    repair_root.mkdir()
+    kept_source = source_root / "kept.png"
+    failed_source = source_root / "failed.png"
+    kept_source.write_bytes(b"kept-source")
+    failed_source.write_bytes(b"failed-source")
+    parent_output = parent_root / "files" / "kept.png"
+    parent_output.parent.mkdir()
+    parent_output.write_bytes(b"parent-output")
+    repair_output = repair_root / "files" / "failed.png"
+    repair_output.parent.mkdir()
+    repair_output.write_bytes(b"repair-output")
+    parent = build_logical_dataset_version(
+        dataset_id="dataset_parent",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_parent",
+        source_roots=(str(source_root),),
+        manifest_uri=str(parent_root / "manifest.json"),
+        assets=(
+            _asset(kept_source, decision="keep", output=parent_output),
+            _asset(failed_source, decision="failed"),
+        ),
+    )
+    repair = build_logical_dataset_version(
+        dataset_id="dataset_repair_output",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_repair",
+        source_roots=(str(source_root),),
+        manifest_uri=str(repair_root / "manifest.json"),
+        assets=(_asset(failed_source, decision="keep", output=repair_output),),
+    )
+
+    repaired = merge_repaired_dataset_version(
+        dataset_id="dataset_repaired",
+        owner_id="owner_1",
+        parent=parent,
+        repair_output=repair,
+        repair_run_id="run_repair",
+        repair_attempt=1,
+        manifest_uri=str(tmp_path / "repaired" / "manifest.json"),
+    )
+
+    assert isinstance(repaired, RepairedDatasetVersion)
+    assert repaired.parent_dataset_version_id == parent.id
+    assert repaired.repair_run_ids == ("run_repair",)
+    assert repaired.source_count == 2
+    assert repaired.kept_count == 2
+    assert repaired.failed_count == 0
+    assert repaired.still_failed == ()
+    parent_asset, repaired_asset = repaired.assets
+    assert parent_asset.asset_origin == AssetOrigin.PARENT_DATASET_VERSION
+    assert parent_asset.origin_dataset_version_id == parent.id
+    assert parent_asset.materialization == AssetMaterialization.REFERENCED_FILE
+    assert repaired_asset.asset_origin == AssetOrigin.REPAIR_RUN
+    assert repaired_asset.origin_dataset_version_id == repair.id
+    assert repaired_asset.origin_run_id == "run_repair"
+    assert repaired_asset.materialization == AssetMaterialization.REFERENCED_FILE
+    assert validate_dataset_references(repaired) == ()
+    assert not (tmp_path / "repaired" / "files").exists()
+
+
+def test_repaired_dataset_keeps_latest_failures_with_attempt_lineage(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "failed.png"
+    source.write_bytes(b"source")
+    parent = build_logical_dataset_version(
+        dataset_id="dataset_parent",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_parent",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "parent.json"),
+        assets=(_asset(source, decision="failed"),),
+    )
+    repair_asset = _asset(source, decision="failed").model_copy(
+        update={"reason_codes": ("OPERATOR_ERROR:RateLimitError",)}
+    )
+    repair = build_logical_dataset_version(
+        dataset_id="dataset_repair_output",
+        owner_id="owner_1",
+        work_order_id="work_order_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        run_id="run_repair",
+        source_roots=(str(tmp_path),),
+        manifest_uri=str(tmp_path / "repair.json"),
+        assets=(repair_asset,),
+    )
+
+    repaired = merge_repaired_dataset_version(
+        dataset_id="dataset_repaired",
+        owner_id="owner_1",
+        parent=parent,
+        repair_output=repair,
+        repair_run_id="run_repair",
+        repair_attempt=2,
+        manifest_uri=str(tmp_path / "repaired.json"),
+    )
+
+    assert repaired.failed_count == 1
+    assert repaired.assets[0].asset_origin == AssetOrigin.REPAIR_RUN
+    assert repaired.still_failed[0].repair_attempts == 2
+    assert repaired.still_failed[0].reason_codes == (
+        "OPERATOR_ERROR:RateLimitError",
+    )
