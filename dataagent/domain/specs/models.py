@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..common.models import DomainModel, VersionedModel
 
@@ -41,6 +41,15 @@ class ClassificationSpec(DomainModel):
     mixed_label: str = Field(default="mixed", pattern=r"^[a-z0-9][a-z0-9_-]*$")
     unknown_label: str = Field(default="unknown", pattern=r"^[a-z0-9][a-z0-9_-]*$")
 
+    @field_validator("mixed_label", "unknown_label", mode="before")
+    @classmethod
+    def normalize_special_label_reference(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            label_id = value.get("id")
+            if isinstance(label_id, str) and label_id.strip():
+                return label_id.strip()
+        return value
+
     @model_validator(mode="after")
     def validate_labels(self) -> "ClassificationSpec":
         label_ids = [item.id for item in self.labels]
@@ -51,6 +60,77 @@ class ClassificationSpec(DomainModel):
         if {self.mixed_label, self.unknown_label}.intersection(label_ids):
             raise ValueError("Task labels cannot reuse mixed or unknown labels")
         return self
+
+
+class TaskSpecHardConstraintsPatch(BaseModel):
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    authenticity_scope: str | dict[str, Any] | None = None
+    preserve_source: bool | None = None
+    disabled_capabilities: tuple[str, ...] | None = None
+
+
+class TaskSpecPreferencesPatch(BaseModel):
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    mixed_policy: Literal["keep", "review", "reject"] | None = None
+    unknown_policy: Literal["keep", "review", "reject"] | None = None
+    output_layout: str | None = None
+
+
+def _requirement_texts(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if isinstance(value, dict):
+        description = value.get("description")
+        if isinstance(description, str) and description.strip():
+            return (description.strip(),)
+        if "rules" in value:
+            return _requirement_texts(value["rules"])
+        return tuple(
+            text
+            for item in value.values()
+            for text in _requirement_texts(item)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            text
+            for item in value
+            for text in _requirement_texts(item)
+        )
+    raise ValueError("Requirements must contain strings or structured descriptions")
+
+
+class TaskSpecPatch(DomainModel):
+    objective: str | None = Field(default=None, min_length=1)
+    hard_constraints: TaskSpecHardConstraintsPatch | None = None
+    semantic_requirements: tuple[str, ...] | None = None
+    exclusion_requirements: tuple[str, ...] | None = None
+    preferences: TaskSpecPreferencesPatch | None = None
+    classification: ClassificationSpec | None = None
+
+    @field_validator(
+        "semantic_requirements",
+        "exclusion_requirements",
+        mode="before",
+    )
+    @classmethod
+    def normalize_requirements(cls, value: Any) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        return tuple(dict.fromkeys(_requirement_texts(value)))
+
+    @model_validator(mode="after")
+    def require_change(self) -> "TaskSpecPatch":
+        if not self.model_fields_set:
+            raise ValueError("TaskSpecPatch must contain at least one change")
+        return self
+
+    def as_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="python", exclude_unset=True)
 
 
 class TaskSpecVersion(VersionedModel):

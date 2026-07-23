@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..domain.specs import TaskSpecPatch
+
 
 class ConversationIntent(StrEnum):
     CHAT = "CHAT"
@@ -73,7 +75,7 @@ class StartWorkOrderAction(_ActionBase):
     intent: Literal[ConversationIntent.START_WORK_ORDER]
     requirement: str = Field(min_length=1)
     source: str | None = None
-    task_spec_patch: dict[str, Any] | None = None
+    task_spec_patch: TaskSpecPatch | None = None
 
 
 class ProvideSourceAction(_ActionBase):
@@ -84,7 +86,7 @@ class ProvideSourceAction(_ActionBase):
 class EditTaskSpecAction(_ActionBase):
     intent: Literal[ConversationIntent.EDIT_TASK_SPEC]
     action: Literal["accept_defaults"] | None = None
-    task_spec_patch: dict[str, Any] | None = None
+    task_spec_patch: TaskSpecPatch | None = None
     confirm_after_edit: bool = False
 
     @model_validator(mode="after")
@@ -200,3 +202,7 @@ def parse_conversation_action(payload: dict[str, Any]) -> ConversationAction:
 
 def conversation_action_json_schema() -> dict[str, Any]:
     return _ACTION_ADAPTER.json_schema()
+
+
+def task_spec_patch_payload(patch: TaskSpecPatch | None) -> dict[str, Any]:
+    return patch.as_payload() if patch is not None else {}

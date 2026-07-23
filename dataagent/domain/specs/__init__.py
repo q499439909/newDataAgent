@@ -4,6 +4,9 @@ from .models import (
     ClassificationSpec,
     DataSourceSpec,
     TaskCapabilitySpec,
+    TaskSpecHardConstraintsPatch,
+    TaskSpecPatch,
+    TaskSpecPreferencesPatch,
     TaskSpecVersion,
 )
 
@@ -13,5 +16,8 @@ __all__ = [
     "ClassificationSpec",
     "DataSourceSpec",
     "TaskCapabilitySpec",
+    "TaskSpecHardConstraintsPatch",
+    "TaskSpecPatch",
+    "TaskSpecPreferencesPatch",
     "TaskSpecVersion",
 ]

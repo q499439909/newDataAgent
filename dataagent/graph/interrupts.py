@@ -7,7 +7,7 @@ from langgraph.types import interrupt
 from ..agents.shared import WorkOrderGraphState, append_trace
 from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
-from ..domain.specs import ClassificationSpec, TaskSpecVersion
+from ..domain.specs import TaskSpecPatch, TaskSpecVersion
 from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
 from ..operators.planning import (
     decompose_task_capabilities,
@@ -39,6 +39,8 @@ def revise_task_spec_version(
     patch: dict[str, Any],
     actor: str,
 ) -> TaskSpecVersion:
+    validated_patch = TaskSpecPatch.model_validate(patch)
+    patch = validated_patch.as_payload()
     hard_constraints = dict(spec.hard_constraints)
     if isinstance(patch.get("hard_constraints"), dict):
         hard_constraints.update(patch["hard_constraints"])
@@ -48,12 +50,7 @@ def revise_task_spec_version(
     objective = str(patch.get("objective") or spec.objective).strip()
     classification = spec.classification
     if "classification" in patch:
-        raw_classification = patch.get("classification")
-        classification = (
-            ClassificationSpec.model_validate(raw_classification)
-            if raw_classification is not None
-            else None
-        )
+        classification = validated_patch.classification
     semantic_requirements = _merge_unique(
         spec.semantic_requirements, patch.get("semantic_requirements")
     )

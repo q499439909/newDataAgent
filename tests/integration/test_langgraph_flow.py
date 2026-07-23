@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -115,6 +116,30 @@ def test_task_spec_can_be_revised_before_confirmation() -> None:
     approved = graph.invoke(Command(resume={"approved": True}), config)
     assert approved["task_spec"]["confirmed"] is True
     assert approved["__interrupt__"][0].value["kind"] == "capability_resolution"
+
+
+def test_graph_rejects_unknown_task_patch_fields_at_the_revision_boundary() -> None:
+    graph = build_main_graph(InMemorySaver())
+    config = {"configurable": {"thread_id": "thread_invalid_patch"}}
+    graph.invoke(initial_state(), config)
+
+    with pytest.raises(ValueError, match="clasification"):
+        graph.invoke(
+            Command(
+                resume={
+                    "action": "edit_spec",
+                    "task_spec_patch": {
+                        "clasification": {
+                            "labels": [
+                                {"id": "cat", "display_name": "Cat"},
+                                {"id": "dog", "display_name": "Dog"},
+                            ]
+                        }
+                    },
+                }
+            ),
+            config,
+        )
 
 
 def test_graph_does_not_confirm_task_spec_with_unresolved_ambiguities() -> None:

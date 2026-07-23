@@ -99,7 +99,49 @@ def test_governed_tool_loop_redacts_secrets_and_records_evidence() -> None:
             }
         },
     )
-    assert invalid_trace["parameters"]["action"]["api_key"] == "***"
+    assert "api_key" not in invalid_trace["parameters"]["action"]
+    assert "do-not-store" not in str(invalid_trace)
+
+
+def test_control_action_trace_summarizes_task_patch_instead_of_dumping_it() -> None:
+    loop = GovernedToolLoop(build_p0_tool_registry())
+    _, trace = loop.execute(
+        name="propose_control_action",
+        stage="validate_control_action",
+        context=_context(
+            control_context={
+                "allowed_actions": ["START_WORK_ORDER"],
+            }
+        ),
+        raw_input={
+            "action": {
+                "intent": "START_WORK_ORDER",
+                "source": "D:/images",
+                "requirement": "Filter and classify images",
+                "task_spec_patch": {
+                    "classification": {
+                        "labels": [
+                            {"id": "cat", "display_name": "Cat"},
+                            {"id": "dog", "display_name": "Dog"},
+                        ],
+                        "mixed_label": "mixed",
+                        "unknown_label": "unknown",
+                    },
+                    "semantic_requirements": [
+                        "a detailed private requirement",
+                        "another private requirement",
+                    ],
+                    "hard_constraints": {"preserve_source": True},
+                },
+            }
+        },
+    )
+
+    patch = trace["parameters"]["action"]["task_spec_patch"]
+    assert patch["classification"]["label_ids"] == ["cat", "dog"]
+    assert patch["semantic_requirement_count"] == 2
+    assert patch["hard_constraint_fields"] == ["preserve_source"]
+    assert "a detailed private requirement" not in str(trace)
 
 
 def test_tool_registry_rejects_duplicates_and_forbidden_tools() -> None:

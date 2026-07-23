@@ -43,6 +43,52 @@ def _safe_value(value: Any, key: str = "") -> Any:
             "strategy": value.get("strategy"),
             "node_count": len(value.get("nodes") or ()),
         }
+    if normalized_key == "action" and isinstance(value, dict):
+        summary = {
+            item_key: _safe_value(value[item_key], item_key)
+            for item_key in (
+                "intent",
+                "source",
+                "requirement",
+                "action",
+                "strategy",
+                "facets",
+                "run_id",
+            )
+            if value.get(item_key) is not None
+        }
+        patch = value.get("task_spec_patch")
+        if isinstance(patch, dict):
+            classification = patch.get("classification")
+            patch_summary: dict[str, Any] = {
+                "fields": sorted(patch),
+                "semantic_requirement_count": len(
+                    patch.get("semantic_requirements") or ()
+                ),
+                "exclusion_requirement_count": len(
+                    patch.get("exclusion_requirements") or ()
+                ),
+            }
+            if isinstance(classification, dict):
+                patch_summary["classification"] = {
+                    "label_ids": [
+                        item.get("id")
+                        for item in classification.get("labels") or ()
+                        if isinstance(item, dict)
+                    ],
+                    "mixed_label": classification.get("mixed_label"),
+                    "unknown_label": classification.get("unknown_label"),
+                }
+            hard_constraints = patch.get("hard_constraints")
+            if isinstance(hard_constraints, dict):
+                patch_summary["hard_constraint_fields"] = sorted(
+                    hard_constraints
+                )
+            preferences = patch.get("preferences")
+            if isinstance(preferences, dict):
+                patch_summary["preference_fields"] = sorted(preferences)
+            summary["task_spec_patch"] = patch_summary
+        return summary
     if isinstance(value, dict):
         return {
             str(item_key): _safe_value(item_value, str(item_key))

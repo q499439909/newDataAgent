@@ -20,6 +20,7 @@ from .conversation_actions import (
     ConversationActionError,
     ConversationIntent,
     parse_conversation_action,
+    task_spec_patch_payload,
 )
 from .conversation_policy import (
     allowed_conversation_actions,
@@ -593,7 +594,9 @@ class ConversationService:
             if decision.source:
                 context["pending_source"] = decision.source
             if decision.task_spec_patch:
-                context["pending_task_spec_patch"] = decision.task_spec_patch
+                context["pending_task_spec_patch"] = task_spec_patch_payload(
+                    decision.task_spec_patch
+                )
             return self._maybe_start(thread, owner_id, context, base)
         if decision.intent == ConversationIntent.PROVIDE_SOURCE:
             context["pending_source"] = decision.source or content
@@ -631,9 +634,28 @@ class ConversationService:
                 )
                 ambiguities = tuple(interrupt_spec.get("ambiguities") or ())
                 if decision.action == "accept_defaults":
+                    if not ambiguities:
+                        if decision.confirm_after_edit:
+                            turn = self.agent_runtime.resume(
+                                work_order_id=work_order_id,
+                                owner_id=owner_id,
+                                decision={
+                                    "approved": True,
+                                    "channel": "conversation",
+                                },
+                            )
+                            base["turn"] = turn
+                            base["reply"] = self._turn_reply(turn, True)
+                            return base
+                        base["turn"] = turn
+                        base["reply"] = (
+                            "当前 TaskSpec 没有剩余待补默认值，"
+                            "请直接确认当前版本或提出具体修改。"
+                        )
+                        return base
                     patch = recommended_clarification_patch(ambiguities)
                 else:
-                    patch = decision.task_spec_patch
+                    patch = task_spec_patch_payload(decision.task_spec_patch)
                 turn = self.agent_runtime.resume(
                     work_order_id=work_order_id,
                     owner_id=owner_id,
@@ -644,7 +666,7 @@ class ConversationService:
                     },
                 )
             elif turn["state"].get("task_spec", {}).get("confirmed"):
-                patch = decision.task_spec_patch
+                patch = task_spec_patch_payload(decision.task_spec_patch)
                 turn = self.agent_runtime.revise_task_spec(
                     work_order_id=work_order_id,
                     owner_id=owner_id,

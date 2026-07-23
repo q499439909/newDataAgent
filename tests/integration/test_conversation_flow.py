@@ -505,6 +505,97 @@ def test_confirmed_task_runs_governed_planning_tools_and_persists_trace(
     assert stored["action_trace_history"][-1]["actions"] == approved["action_trace"]
 
 
+def test_start_work_order_normalizes_model_task_patch_before_control_execution(
+    tmp_path,
+) -> None:
+    source = tmp_path / "mix"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            {
+                "intent": "START_WORK_ORDER",
+                "source": str(source),
+                "requirement": "去掉不真实、不清晰、非实拍直出、非猫狗图片并分类",
+                "task_spec_patch": {
+                    "classification": {
+                        "mode": "closed_set",
+                        "labels": [
+                            {
+                                "id": "cat",
+                                "display_name": "猫",
+                                "aliases": ["猫咪", "小猫"],
+                            },
+                            {
+                                "id": "dog",
+                                "display_name": "狗",
+                                "aliases": ["犬", "小狗"],
+                            },
+                        ],
+                        "mixed_label": {
+                            "id": "mixed",
+                            "display_name": "猫狗同框",
+                            "aliases": ["混合"],
+                        },
+                        "unknown_label": {
+                            "id": "unknown",
+                            "display_name": "非猫狗",
+                            "aliases": ["其他动物"],
+                        },
+                    },
+                    "hard_constraints": {
+                        "preserve_source": True,
+                        "authenticity_scope": {
+                            "authentic": "真实实拍直出照片",
+                            "inauthentic": "AI生成、截图、合成或编辑图片",
+                        },
+                    },
+                    "preferences": {
+                        "mixed_policy": "review",
+                        "unknown_policy": "reject",
+                        "output_layout": "按类别分目录输出",
+                    },
+                    "semantic_requirements": {
+                        "authenticity": "排除非实拍直出的图片",
+                        "clarity": "排除模糊、不清晰的图片",
+                        "relevance": "排除既不是猫也不是狗的图片",
+                    },
+                    "exclusion_requirements": [
+                        "不真实的图片",
+                        "不清晰的图片",
+                        "非猫狗图片",
+                    ],
+                },
+            }
+        ]
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f"{source} 去掉不真实、不清晰、非实拍直出、非猫狗图片并分类",
+    )
+
+    assert response["work_order_id"] is not None
+    assert "控制面拒绝" not in response["reply"]
+    spec = response["turn"]["state"]["task_spec"]
+    assert spec["classification"]["mixed_label"] == "mixed"
+    assert spec["classification"]["unknown_label"] == "unknown"
+    assert spec["semantic_requirements"] == [
+        "排除非实拍直出的图片",
+        "排除模糊、不清晰的图片",
+        "排除既不是猫也不是狗的图片",
+    ]
+
+
 def test_missing_path_triggers_react_self_correction(tmp_path) -> None:
     """An invalid source is fed back so the model asks the user, in one turn."""
     runtime = AgentRuntime(tmp_path / "runtime")
