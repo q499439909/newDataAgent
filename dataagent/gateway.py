@@ -162,6 +162,11 @@ class ModelGateway:
             "For mixed or unknown classes, use preferences.mixed_policy and "
             "preferences.unknown_policy with keep, review, or reject. For output safety, use "
             "hard_constraints.preserve_source and preferences.output_layout. When the user "
+            "explicitly excludes content outside the requested closed-set labels, set "
+            "preferences.unknown_policy=\"reject\" and preserve that exclusion in "
+            "exclusion_requirements. Do not leave an explicitly answered field unresolved. "
+            "Clarification questions are generated separately from the resulting TaskSpec; "
+            "do not put natural-language questions in task_spec_patch. When the user "
             "removes a processing capability from a confirmed task, use "
             "hard_constraints.disabled_capabilities with canonical capability IDs such as "
             "image_quality. For QUERY_CONTROL_FACTS, set `facets` to a non-empty list drawn from: "
@@ -188,6 +193,57 @@ class ModelGateway:
             max_tokens=1000,
         )
         return _extract_json(result.text), result.usage
+
+    def task_clarifications(
+        self,
+        *,
+        task_spec: dict[str, Any],
+    ) -> tuple[dict[str, Any], ModelUsage]:
+        route = self.routing.route(ModelTaskKind.CONVERSATION)
+        missing_fields = [
+            str(item) for item in task_spec.get("ambiguities", ()) if str(item)
+        ]
+        system = (
+            "You generate concise clarification questions for an image-data task. "
+            "Use the complete TaskSpec and its `ambiguities` field paths. Summarize "
+            "constraints that are already captured, then ask exactly one natural-language "
+            "question for each missing field. Never ask for a field that already has a "
+            "value, never add requirements, and do not use a fixed domain-specific question "
+            "template. Return JSON only with this shape: "
+            '{"summary":"...","questions":[{"field":"...","question":"..."}]}. '
+            "Every question field must be one of the supplied ambiguity paths and every "
+            "ambiguity path must appear exactly once."
+        )
+        result = self._messages(
+            route.model_id,
+            system,
+            json.dumps(
+                {
+                    "task_spec": task_spec,
+                    "missing_fields": missing_fields,
+                },
+                ensure_ascii=False,
+            ),
+            max_tokens=1000,
+        )
+        payload = _extract_json(result.text)
+        questions = payload.get("questions")
+        if not isinstance(payload.get("summary"), str) or not isinstance(
+            questions, list
+        ):
+            raise ValueError("Clarification model returned an invalid payload")
+        fields = [
+            str(item.get("field"))
+            for item in questions
+            if isinstance(item, dict)
+            and isinstance(item.get("question"), str)
+            and item.get("question", "").strip()
+        ]
+        if fields != missing_fields:
+            raise ValueError(
+                "Clarification model questions do not match TaskSpec ambiguities"
+            )
+        return payload, result.usage
 
     def plan_task(self, requirement: str, source_path: str) -> tuple[TaskSpec, ModelUsage]:
         route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)

@@ -20,9 +20,11 @@ class FakeConversationGateway:
 
     configured = True
 
-    def __init__(self, decisions):
+    def __init__(self, decisions, clarification_responses=None):
         self.decisions = list(decisions)
+        self.clarification_responses = list(clarification_responses or [])
         self.calls = 0
+        self.clarification_calls = 0
 
     def conversation_turn(self, *, history, context):
         self.calls += 1
@@ -30,6 +32,21 @@ class FakeConversationGateway:
         if not self.decisions:
             raise AssertionError("FakeConversationGateway ran out of scripted decisions")
         return self.decisions.pop(0), None
+
+    def task_clarifications(self, *, task_spec):
+        self.clarification_calls += 1
+        if self.clarification_responses:
+            return self.clarification_responses.pop(0), None
+        return {
+            "summary": "已记录当前需求。",
+            "questions": [
+                {
+                    "field": field,
+                    "question": f"请补充 {field}。",
+                }
+                for field in task_spec.get("ambiguities", [])
+            ],
+        }, None
 
 
 class FailingConversationGateway:
@@ -399,7 +416,13 @@ def test_quoted_path_and_requirement_in_one_message_create_work_order(tmp_path) 
     )
     assert gateway.calls == 1
     assert "还需要你补充" in response["reply"]
-    assert len(response["turn"]["state"]["task_spec"]["ambiguities"]) == 3
+    assert response["turn"]["state"]["task_spec"]["ambiguities"] == [
+        "hard_constraints.authenticity_scope",
+        "preferences.mixed_policy",
+        "preferences.unknown_policy",
+        "hard_constraints.preserve_source",
+        "preferences.output_layout",
+    ]
 
 
 def test_path_adjacent_to_chinese_is_extracted_by_model(tmp_path) -> None:
@@ -609,12 +632,88 @@ def test_complex_task_requires_clarification_before_confirmation(tmp_path) -> No
     assert spec["ambiguities"] == []
     assert spec["hard_constraints"]["preserve_source"] is True
     assert spec["preferences"]["mixed_policy"] == "review"
-    assert "重度滤镜" in spec["exclusion_requirements"][0]
+    assert spec["hard_constraints"]["authenticity_scope"] == {
+        "uncertain_policy": "review"
+    }
 
     approved = service.send(
         thread_id=conversation["id"], owner_id="user_1", content="确认"
     )
     assert approved["turn"]["state"]["task_spec"]["confirmed"] is True
+
+
+def test_clarification_questions_are_generated_by_the_model(tmp_path) -> None:
+    source = tmp_path / "categories"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = FakeConversationGateway(
+        [
+            _decision(
+                intent="START_WORK_ORDER",
+                source=str(source),
+                requirement="把猫和狗图片分开，排除其他图片",
+                task_spec_patch={
+                    "classification": {
+                        "mode": "closed_set",
+                        "labels": [
+                            {
+                                "id": "cat",
+                                "display_name": "猫",
+                                "aliases": ["猫"],
+                            },
+                            {
+                                "id": "dog",
+                                "display_name": "狗",
+                                "aliases": ["狗"],
+                            },
+                        ],
+                        "mixed_label": "mixed",
+                        "unknown_label": "unknown",
+                    },
+                    "preferences": {"unknown_policy": "reject"},
+                    "exclusion_requirements": ["排除目标类别集合之外的图片"],
+                },
+                reply="创建分类任务。",
+            )
+        ],
+        clarification_responses=[
+            {
+                "summary": "已记录：类别集合之外的图片直接排除。",
+                "questions": [
+                    {
+                        "field": "preferences.mixed_policy",
+                        "question": "目标类别同时出现时，你希望保留、复核还是排除？",
+                    },
+                    {
+                        "field": "hard_constraints.preserve_source",
+                        "question": "是否保持源目录只读？",
+                    },
+                    {
+                        "field": "preferences.output_layout",
+                        "question": "结果希望采用哪种目录布局？",
+                    },
+                ],
+            }
+        ],
+    )
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f'"{source}"筛选目标类别并分类',
+    )
+
+    assert "已记录：类别集合之外的图片直接排除。" in response["reply"]
+    assert "目标类别同时出现时" in response["reply"]
+    assert gateway.clarification_calls == 1
 
 
 def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -> None:
@@ -656,12 +755,12 @@ def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -
                     "mixed_policy": "review",
                     "unknown_policy": "review",
                 },
-                "semantic_requirements": ["好", "继续"],
             },
         ),
     )
     assert partial["turn"]["state"]["task_spec"]["ambiguities"] == [
-        "是否按默认安全方式复制到新的版本化分类目录，并保持源目录只读？"
+        "hard_constraints.preserve_source",
+        "preferences.output_layout",
     ]
 
     continued = service.send(
@@ -673,8 +772,6 @@ def test_contextual_continue_accepts_remaining_defaults_and_confirms(tmp_path) -
     assert spec["ambiguities"] == []
     assert spec["hard_constraints"]["preserve_source"] is True
     assert spec["preferences"]["output_layout"] == "versioned_class_directories"
-    assert "好" not in spec["semantic_requirements"]
-    assert "继续" not in spec["semantic_requirements"]
     assert continued["turn"]["state"]["next_action"] != "confirm_task_spec"
     assert "已采纳剩余推荐值" in continued["reply"]
 

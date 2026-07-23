@@ -124,7 +124,13 @@ def test_graph_does_not_confirm_task_spec_with_unresolved_ambiguities() -> None:
         "requirement": "去掉不真实、不是实拍直出的图片，把猫和狗分开"
     }
     first = graph.invoke(state, config)
-    assert len(first["task_spec"]["ambiguities"]) == 3
+    assert first["task_spec"]["ambiguities"] == [
+        "hard_constraints.authenticity_scope",
+        "preferences.mixed_policy",
+        "preferences.unknown_policy",
+        "hard_constraints.preserve_source",
+        "preferences.output_layout",
+    ]
 
     still_waiting = graph.invoke(Command(resume={"approved": True}), config)
     assert still_waiting["task_spec_confirmed"] is False

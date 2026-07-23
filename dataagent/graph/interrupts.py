@@ -33,27 +33,6 @@ def _merge_unique(current: tuple[str, ...], additions: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*current, *requirement_texts(additions)]))
 
 
-_CONVERSATION_FILLERS = {
-    "好",
-    "好的",
-    "可以",
-    "继续",
-    "确认",
-    "同意",
-    "是",
-    "yes",
-    "ok",
-}
-
-
-def _remove_conversation_fillers(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        value
-        for value in values
-        if value.strip().lower().strip("!！。,.，~～ ") not in _CONVERSATION_FILLERS
-    )
-
-
 def revise_task_spec_version(
     spec: TaskSpecVersion,
     *,
@@ -75,11 +54,11 @@ def revise_task_spec_version(
             if raw_classification is not None
             else None
         )
-    semantic_requirements = _remove_conversation_fillers(
-        _merge_unique(spec.semantic_requirements, patch.get("semantic_requirements"))
+    semantic_requirements = _merge_unique(
+        spec.semantic_requirements, patch.get("semantic_requirements")
     )
-    exclusion_requirements = _remove_conversation_fillers(
-        _merge_unique(spec.exclusion_requirements, patch.get("exclusion_requirements"))
+    exclusion_requirements = _merge_unique(
+        spec.exclusion_requirements, patch.get("exclusion_requirements")
     )
     planning_text = " ".join(
         [objective, *semantic_requirements, *exclusion_requirements]

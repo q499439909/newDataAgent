@@ -1260,14 +1260,34 @@ class ConversationService:
         ]
         return "\n".join(lines)
 
-    @staticmethod
     def _clarification_reply(
-        task_spec: dict[str, Any], *, include_intro: bool = True
+        self,
+        task_spec: dict[str, Any],
+        *,
+        include_intro: bool = True,
     ) -> str:
-        ambiguities = task_spec.get("ambiguities") or []
+        ambiguities = [str(item) for item in task_spec.get("ambiguities") or []]
+        try:
+            generated, _ = self.gateway.task_clarifications(task_spec=task_spec)
+            questions = generated["questions"]
+            if [str(item.get("field")) for item in questions] != ambiguities:
+                raise ValueError(
+                    "Clarification questions do not cover the current missing fields"
+                )
+            summary = str(generated.get("summary") or "").strip()
+        except (AttributeError, ModelGatewayError, TypeError, ValueError) as exc:
+            logger.warning("Task clarification generation failed: %s", exc)
+            summary = "模型未能生成自然语言澄清问题；以下字段仍缺少信息。"
+            questions = [
+                {"field": field, "question": f"请补充字段 `{field}`。"}
+                for field in ambiguities
+            ]
         lines = ["当前 TaskSpec 仍有待澄清项："] if include_intro else []
+        if summary:
+            lines.append(summary)
         lines.extend(
-            f"{index}. {question}" for index, question in enumerate(ambiguities, 1)
+            f"{index}. {item['question']}"
+            for index, item in enumerate(questions, 1)
         )
         lines.append(
             "请直接回答这些问题；也可以说“按推荐默认值”，"

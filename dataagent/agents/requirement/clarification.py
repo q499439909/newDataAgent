@@ -5,16 +5,11 @@ from typing import Any
 from ...domain.specs import TaskCapabilitySpec
 
 
-AUTHENTICITY_SCOPE_QUESTION = (
-    "请明确“不真实/非实拍直出”的范围：是否排除插画、截图、明显合成、"
-    "美颜滤镜和后期调色照片？"
-)
-CLASS_POLICY_QUESTION = (
-    "猫狗同时出现或无法判断类别的图片，应保留、进入人工复核还是直接排除？"
-)
-OUTPUT_POLICY_QUESTION = (
-    "是否按默认安全方式复制到新的版本化分类目录，并保持源目录只读？"
-)
+AUTHENTICITY_SCOPE_FIELD = "hard_constraints.authenticity_scope"
+MIXED_POLICY_FIELD = "preferences.mixed_policy"
+UNKNOWN_POLICY_FIELD = "preferences.unknown_policy"
+PRESERVE_SOURCE_FIELD = "hard_constraints.preserve_source"
+OUTPUT_LAYOUT_FIELD = "preferences.output_layout"
 
 
 def infer_task_ambiguities(
@@ -26,66 +21,62 @@ def infer_task_ambiguities(
     preferences: dict[str, Any],
 ) -> tuple[str, ...]:
     names = {item.capability for item in capabilities}
-    ambiguities: list[str] = []
+    missing: list[str] = []
 
     if "authenticity_assessment" in names:
         has_scope = bool(hard_constraints.get("authenticity_scope")) or bool(
             semantic_requirements or exclusion_requirements
         )
         if not has_scope:
-            ambiguities.append(AUTHENTICITY_SCOPE_QUESTION)
+            missing.append(AUTHENTICITY_SCOPE_FIELD)
 
     if "class_resolution" in names:
-        if not all(key in preferences for key in ("mixed_policy", "unknown_policy")):
-            ambiguities.append(CLASS_POLICY_QUESTION)
+        if preferences.get("mixed_policy") is None:
+            missing.append(MIXED_POLICY_FIELD)
+        if preferences.get("unknown_policy") is None:
+            missing.append(UNKNOWN_POLICY_FIELD)
 
     if "dataset_partition" in names:
-        output_defined = (
-            "preserve_source" in hard_constraints
-            and (
-                bool(hard_constraints.get("output_directory"))
-                or bool(preferences.get("output_layout"))
-            )
-        )
-        if not output_defined:
-            ambiguities.append(OUTPUT_POLICY_QUESTION)
+        if hard_constraints.get("preserve_source") is None:
+            missing.append(PRESERVE_SOURCE_FIELD)
+        if not preferences.get("output_layout"):
+            missing.append(OUTPUT_LAYOUT_FIELD)
 
-    return tuple(ambiguities)
+    return tuple(missing)
 
 
-def recommended_clarification_patch(ambiguities: tuple[str, ...]) -> dict[str, Any]:
-    patch: dict[str, Any] = {
-        "hard_constraints": {},
-        "preferences": {},
-        "semantic_requirements": [],
-        "exclusion_requirements": [],
-    }
-    if AUTHENTICITY_SCOPE_QUESTION in ambiguities:
-        patch["hard_constraints"]["authenticity_scope"] = (
-            "Exclude AI-generated, composited, illustrated, screenshot, heavily filtered, "
-            "beautified, or materially retouched images; uncertain cases require review."
-        )
-        patch["exclusion_requirements"].append(
-            "排除 AI 生成、明显合成、插画、截图、重度滤镜、美颜或明显后期修改的图片；"
-            "无法判断时进入复核。"
-        )
-    if CLASS_POLICY_QUESTION in ambiguities:
-        patch["preferences"].update(
-            {"mixed_policy": "review", "unknown_policy": "review"}
-        )
-    if OUTPUT_POLICY_QUESTION in ambiguities:
-        patch["hard_constraints"]["preserve_source"] = True
-        patch["preferences"]["output_layout"] = "versioned_class_directories"
-        patch["semantic_requirements"].append(
-            "将保留图片复制到新的版本化分类目录，源目录保持只读。"
-        )
+def recommended_clarification_patch(
+    ambiguities: tuple[str, ...],
+) -> dict[str, Any]:
+    hard_constraints: dict[str, Any] = {}
+    preferences: dict[str, Any] = {}
+    missing = set(ambiguities)
+    if AUTHENTICITY_SCOPE_FIELD in missing:
+        hard_constraints["authenticity_scope"] = {
+            "uncertain_policy": "review"
+        }
+    if MIXED_POLICY_FIELD in missing:
+        preferences["mixed_policy"] = "review"
+    if UNKNOWN_POLICY_FIELD in missing:
+        preferences["unknown_policy"] = "review"
+    if PRESERVE_SOURCE_FIELD in missing:
+        hard_constraints["preserve_source"] = True
+    if OUTPUT_LAYOUT_FIELD in missing:
+        preferences["output_layout"] = "versioned_class_directories"
+    patch: dict[str, Any] = {}
+    if hard_constraints:
+        patch["hard_constraints"] = hard_constraints
+    if preferences:
+        patch["preferences"] = preferences
     return patch
 
 
 __all__ = [
-    "AUTHENTICITY_SCOPE_QUESTION",
-    "CLASS_POLICY_QUESTION",
-    "OUTPUT_POLICY_QUESTION",
+    "AUTHENTICITY_SCOPE_FIELD",
+    "MIXED_POLICY_FIELD",
+    "OUTPUT_LAYOUT_FIELD",
+    "PRESERVE_SOURCE_FIELD",
+    "UNKNOWN_POLICY_FIELD",
     "infer_task_ambiguities",
     "recommended_clarification_patch",
 ]
