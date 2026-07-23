@@ -23,6 +23,11 @@ class RunStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class RunOperationKind(StrEnum):
+    PRODUCTION = "production"
+    REPAIR = "repair"
+
+
 class DatasetVersionKind(StrEnum):
     LOGICAL = "logical"
 
@@ -38,6 +43,13 @@ class AssetMaterialization(StrEnum):
     LOCAL_FILE = "local_file"
     REFERENCED_FILE = "referenced_file"
     NOT_MATERIALIZED = "not_materialized"
+
+
+class RepairScopeAsset(DomainModel):
+    source_uri: str
+    source_sha256: str
+    parent_sequence: int = Field(ge=0)
+    reason_codes: tuple[str, ...] = ()
 
 
 class RunSnapshot(DomainModel):
@@ -56,6 +68,11 @@ class RunSnapshot(DomainModel):
     dataset_version_id: str | None = None
     qc_report_id: str | None = None
     error: str | None = None
+    operation_kind: RunOperationKind = RunOperationKind.PRODUCTION
+    parent_run_id: str | None = None
+    parent_dataset_version_id: str | None = None
+    repair_scope: tuple[RepairScopeAsset, ...] = ()
+    repair_attempt: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
 
@@ -65,6 +82,19 @@ class RunSnapshot(DomainModel):
             raise ValueError("Run progress cannot exceed total")
         if self.kept + self.rejected + self.failed > self.progress:
             raise ValueError("Run outcome counts cannot exceed progress")
+        if self.operation_kind == RunOperationKind.PRODUCTION:
+            if (
+                self.parent_run_id
+                or self.parent_dataset_version_id
+                or self.repair_scope
+                or self.repair_attempt
+            ):
+                raise ValueError("Production Run cannot carry repair lineage")
+        else:
+            if not self.parent_run_id or not self.repair_scope or self.repair_attempt < 1:
+                raise ValueError(
+                    "Repair Run requires parent_run_id, repair_scope, and repair_attempt"
+                )
         return self
 
 

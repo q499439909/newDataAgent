@@ -13,7 +13,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    inspect,
     select,
+    text,
     update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -69,6 +71,15 @@ class RunRow(Base):
     dataset_version_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     control_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    operation_kind: Mapped[str] = mapped_column(
+        String(32), default="production", nullable=False
+    )
+    parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    parent_dataset_version_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    repair_scope_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    repair_attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -191,9 +202,26 @@ class SqliteDatabase:
         )
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
+        self._migrate_run_lineage()
 
     def session(self) -> Session:
         return self.session_factory()
+
+    def _migrate_run_lineage(self) -> None:
+        columns = {item["name"] for item in inspect(self.engine).get_columns("runs")}
+        additions = {
+            "operation_kind": "VARCHAR(32) NOT NULL DEFAULT 'production'",
+            "parent_run_id": "VARCHAR(128)",
+            "parent_dataset_version_id": "VARCHAR(128)",
+            "repair_scope_json": "TEXT NOT NULL DEFAULT '[]'",
+            "repair_attempt": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with self.engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(
+                        text(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+                    )
 
 
 class AgentThreadStore:
@@ -294,7 +322,22 @@ class RunStore:
         pipeline_version_id: str,
         task_spec_version_id: str,
         idempotency_key: str,
+        operation_kind: str = "production",
+        parent_run_id: str | None = None,
+        parent_dataset_version_id: str | None = None,
+        repair_scope: tuple[dict[str, Any], ...] = (),
+        repair_attempt: int = 0,
     ) -> dict[str, Any]:
+        if operation_kind == "production":
+            if parent_run_id or parent_dataset_version_id or repair_scope or repair_attempt:
+                raise ValueError("Production Run cannot carry repair lineage")
+        elif operation_kind == "repair":
+            if not parent_run_id or not repair_scope or repair_attempt < 1:
+                raise ValueError(
+                    "Repair Run requires parent_run_id, repair_scope, and repair_attempt"
+                )
+        else:
+            raise ValueError(f"Unsupported Run operation kind: {operation_kind}")
         with self.database.session() as session, session.begin():
             existing = session.scalar(
                 select(RunRow).where(
@@ -303,11 +346,25 @@ class RunStore:
                 )
             )
             if existing is not None:
-                expected = (work_order_id, pipeline_version_id, task_spec_version_id)
+                expected = (
+                    work_order_id,
+                    pipeline_version_id,
+                    task_spec_version_id,
+                    operation_kind,
+                    parent_run_id,
+                    parent_dataset_version_id,
+                    list(repair_scope),
+                    repair_attempt,
+                )
                 actual = (
                     existing.work_order_id,
                     existing.pipeline_version_id,
                     existing.task_spec_version_id,
+                    existing.operation_kind,
+                    existing.parent_run_id,
+                    existing.parent_dataset_version_id,
+                    json.loads(existing.repair_scope_json),
+                    existing.repair_attempt,
                 )
                 if actual != expected:
                     raise ValueError("Idempotency key was already used for another run request")
@@ -320,6 +377,13 @@ class RunStore:
                 task_spec_version_id=task_spec_version_id,
                 status="QUEUED",
                 idempotency_key=idempotency_key,
+                operation_kind=operation_kind,
+                parent_run_id=parent_run_id,
+                parent_dataset_version_id=parent_dataset_version_id,
+                repair_scope_json=json.dumps(
+                    repair_scope, ensure_ascii=False, sort_keys=True
+                ),
+                repair_attempt=repair_attempt,
             )
             session.add(row)
             session.flush()
@@ -631,6 +695,11 @@ class RunStore:
             "idempotency_key": row.idempotency_key,
             "dataset_version_id": row.dataset_version_id,
             "error": row.error,
+            "operation_kind": row.operation_kind,
+            "parent_run_id": row.parent_run_id,
+            "parent_dataset_version_id": row.parent_dataset_version_id,
+            "repair_scope": json.loads(row.repair_scope_json),
+            "repair_attempt": row.repair_attempt,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }

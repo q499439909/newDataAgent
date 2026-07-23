@@ -172,6 +172,23 @@ class DatasetRunExecutor:
         )
 
     @staticmethod
+    def _validate_repair_scope(
+        run: dict[str, Any],
+        planned: list[dict[str, Any]],
+    ) -> None:
+        if run.get("operation_kind") != "repair":
+            return
+        expected_scope = {
+            (item["source_uri"], item["source_sha256"])
+            for item in run.get("repair_scope", ())
+        }
+        actual_scope = {
+            (item["source_uri"], item["source_sha256"]) for item in planned
+        }
+        if actual_scope != expected_scope or len(planned) != len(expected_scope):
+            raise RuntimeError("Repair Run plan escaped its frozen failed-asset scope")
+
+    @staticmethod
     def _validate_materialized_dataset(dataset: DatasetVersion) -> None:
         manifest = Path(dataset.manifest_uri)
         if not manifest.is_file():
@@ -212,6 +229,8 @@ class DatasetRunExecutor:
         if not roots:
             raise ValueError("Local worker currently requires a local_directory data source")
         planned = self.run_store.plan(run["id"])
+        if run.get("operation_kind") == "repair" and not planned:
+            raise RuntimeError("Repair Run has no frozen repair plan")
         if not planned:
             discovered: list[dict[str, Any]] = []
             for root_index, root in enumerate(roots, start=1):
@@ -228,6 +247,7 @@ class DatasetRunExecutor:
             planned = self.run_store.initialize_plan(run["id"], discovered)
         if not planned:
             raise ValueError("No supported images found in the approved data sources")
+        self._validate_repair_scope(run, planned)
         self.run_store.set_total(run["id"], len(planned))
         self.operator_runtime.validate_pipeline(pipeline)
         ordered_nodes = _ordered_nodes(pipeline)

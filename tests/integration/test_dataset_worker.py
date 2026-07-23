@@ -5,6 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -47,6 +48,28 @@ def test_only_retryable_execution_failures_are_partial_completions() -> None:
 
     assert DatasetRunExecutor._is_partial_completion(Dataset(), ExecutionFailureReport())
     assert not DatasetRunExecutor._is_partial_completion(Dataset(), MixedFailureReport())
+
+
+def test_worker_rejects_repair_plan_outside_frozen_scope() -> None:
+    run = {
+        "operation_kind": "repair",
+        "repair_scope": [
+            {"source_uri": "D:/data/failed.png", "source_sha256": "failed-hash"}
+        ],
+    }
+    escaped_plan = [
+        {
+            "source_uri": "D:/data/failed.png",
+            "source_sha256": "failed-hash",
+        },
+        {
+            "source_uri": "D:/data/already-kept.png",
+            "source_sha256": "kept-hash",
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="escaped"):
+        DatasetRunExecutor._validate_repair_scope(run, escaped_plan)
 
 
 def _ready_work_order(client: TestClient, source, work_order_id: str = "run_work_order"):
@@ -377,8 +400,98 @@ def test_retry_failed_assets_creates_a_new_run_with_only_failed_sources(tmp_path
 
     retry_plan = runtime.run_store.plan(retry["id"])
     assert retry["id"] != previous["id"]
+    assert retry["operation_kind"] == "repair"
+    assert retry["parent_run_id"] == previous["id"]
+    assert retry["parent_dataset_version_id"] is None
+    assert retry["repair_attempt"] == 1
     assert [item["source_uri"] for item in retry_plan] == [str(second.resolve())]
     assert retry_plan[0]["sequence"] == 0
+    assert retry["repair_scope"] == [
+        {
+            "source_uri": str(second.resolve()),
+            "source_sha256": _sha256(second),
+            "parent_sequence": 1,
+            "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+        }
+    ]
     event = runtime.run_store.events(retry["id"], "user_1")[0]
     assert event["event_type"] == "failed_assets_retry_scheduled"
     assert event["details"]["previous_run_id"] == previous["id"]
+
+
+def test_repair_attempt_increments_and_scope_never_includes_parent_success(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    kept = source / "kept.png"
+    failed = source / "failed.png"
+    Image.new("RGB", (64, 64), "white").save(kept)
+    Image.new("RGB", (64, 64), "black").save(failed)
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.run_store is not None
+    original = runtime.run_store.create(
+        run_id="run_original",
+        work_order_id="work_order_1",
+        owner_id="user_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        idempotency_key="original",
+    )
+    plan = [
+        {
+            "sequence": index,
+            "source_uri": str(path.resolve()),
+            "source_sha256": _sha256(path),
+            "output_relative_path": path.name,
+        }
+        for index, path in enumerate((kept, failed))
+    ]
+    runtime.run_store.initialize_plan(original["id"], plan)
+    for item, decision in zip(plan, ("keep", "failed"), strict=True):
+        runtime.run_store.add_item(
+            original["id"],
+            {
+                **item,
+                "output_relative_path": None,
+                "output_sha256": None,
+                "decision": decision,
+                "reason_codes": ["OPERATOR_ERROR:TimeoutError"] if decision == "failed" else [],
+                "metrics": {},
+                "labels": {},
+            },
+        )
+
+    first_repair = runtime.retry_failed_assets(
+        previous_run_id=original["id"],
+        owner_id="user_1",
+        idempotency_key="repair-1",
+    )
+    first_plan = runtime.run_store.plan(first_repair["id"])
+    runtime.run_store.add_item(
+        first_repair["id"],
+        {
+            **first_plan[0],
+            "output_relative_path": None,
+            "output_sha256": None,
+            "decision": "failed",
+            "reason_codes": ["OPERATOR_ERROR:TimeoutError"],
+            "metrics": {},
+            "labels": {},
+        },
+    )
+
+    second_repair = runtime.retry_failed_assets(
+        previous_run_id=first_repair["id"],
+        owner_id="user_1",
+        idempotency_key="repair-2",
+    )
+
+    assert second_repair["repair_attempt"] == 2
+    assert second_repair["parent_run_id"] == first_repair["id"]
+    assert [item["source_uri"] for item in second_repair["repair_scope"]] == [
+        str(failed.resolve())
+    ]
+    assert str(kept.resolve()) not in {
+        item["source_uri"] for item in second_repair["repair_scope"]
+    }

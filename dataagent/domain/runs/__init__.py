@@ -5,6 +5,8 @@ from .models import (
     DatasetAssetPointer,
     DatasetVersion,
     DatasetVersionKind,
+    RepairScopeAsset,
+    RunOperationKind,
     RunSnapshot,
     RunStatus,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "DatasetAssetPointer",
     "DatasetVersion",
     "DatasetVersionKind",
+    "RepairScopeAsset",
+    "RunOperationKind",
     "RunSnapshot",
     "RunStatus",
 ]

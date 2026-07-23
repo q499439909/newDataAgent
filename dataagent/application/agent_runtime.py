@@ -429,13 +429,28 @@ class AgentRuntime:
         if self.run_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
         previous = self.run_store.get(previous_run_id, owner_id)
-        failed_sequences = {
-            int(item["sequence"])
+        failed_items = {
+            int(item["sequence"]): item
             for item in self.run_store.items(previous_run_id)
             if item["decision"] == "failed"
         }
-        if not failed_sequences:
+        if not failed_items:
             raise ValueError("The selected Run has no failed assets to retry")
+        previous_plan = self.run_store.plan(previous_run_id)
+        failed_plan = [
+            item
+            for item in previous_plan
+            if int(item["sequence"]) in failed_items
+        ]
+        repair_scope = tuple(
+            {
+                "source_uri": item["source_uri"],
+                "source_sha256": item["source_sha256"],
+                "parent_sequence": int(item["sequence"]),
+                "reason_codes": failed_items[int(item["sequence"])]["reason_codes"],
+            }
+            for item in failed_plan
+        )
         new_run = self.run_store.create(
             run_id=new_id("run"),
             work_order_id=previous["work_order_id"],
@@ -443,15 +458,15 @@ class AgentRuntime:
             pipeline_version_id=previous["pipeline_version_id"],
             task_spec_version_id=previous["task_spec_version_id"],
             idempotency_key=idempotency_key,
+            operation_kind="repair",
+            parent_run_id=previous_run_id,
+            parent_dataset_version_id=previous.get("dataset_version_id"),
+            repair_scope=repair_scope,
+            repair_attempt=int(previous.get("repair_attempt", 0)) + 1,
         )
-        previous_plan = self.run_store.plan(previous_run_id)
         retry_plan = [
             {**item, "sequence": retry_sequence}
-            for retry_sequence, item in enumerate(
-                item
-                for item in previous_plan
-                if int(item["sequence"]) in failed_sequences
-            )
+            for retry_sequence, item in enumerate(failed_plan)
         ]
         self.run_store.initialize_plan(new_run["id"], retry_plan)
         self.run_store.add_event(
@@ -459,6 +474,8 @@ class AgentRuntime:
             "failed_assets_retry_scheduled",
             {
                 "previous_run_id": previous_run_id,
+                "parent_dataset_version_id": previous.get("dataset_version_id"),
+                "repair_attempt": new_run["repair_attempt"],
                 "asset_count": len(retry_plan),
                 "source_uris": [item["source_uri"] for item in retry_plan],
             },
