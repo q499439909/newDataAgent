@@ -80,6 +80,9 @@ class RunRow(Base):
     )
     repair_scope_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     repair_attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    claim_protocol_version: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -203,6 +206,7 @@ class SqliteDatabase:
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
         self._migrate_run_lineage()
+        self._install_worker_claim_guard()
 
     def session(self) -> Session:
         return self.session_factory()
@@ -215,6 +219,7 @@ class SqliteDatabase:
             "parent_dataset_version_id": "VARCHAR(128)",
             "repair_scope_json": "TEXT NOT NULL DEFAULT '[]'",
             "repair_attempt": "INTEGER NOT NULL DEFAULT 0",
+            "claim_protocol_version": "INTEGER NOT NULL DEFAULT 0",
         }
         with self.engine.begin() as connection:
             for name, definition in additions.items():
@@ -222,6 +227,27 @@ class SqliteDatabase:
                     connection.execute(
                         text(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
                     )
+
+    def _install_worker_claim_guard(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text("DROP TRIGGER IF EXISTS require_worker_claim_protocol"))
+            connection.execute(
+                text(
+                    """
+                    CREATE TRIGGER require_worker_claim_protocol
+                    BEFORE UPDATE OF status ON runs
+                    WHEN OLD.status = 'QUEUED'
+                      AND NEW.status = 'RUNNING'
+                      AND NEW.claim_protocol_version < 2
+                    BEGIN
+                      SELECT RAISE(
+                        ABORT,
+                        'Worker is too old for the current queue protocol'
+                      );
+                    END
+                    """
+                )
+            )
 
 
 class AgentThreadStore:
@@ -425,7 +451,11 @@ class RunStore:
                 claimed = session.execute(
                     update(RunRow)
                     .where(RunRow.id == row.id, RunRow.status == "QUEUED")
-                    .values(status="RUNNING", updated_at=now)
+                    .values(
+                        status="RUNNING",
+                        updated_at=now,
+                        claim_protocol_version=2,
+                    )
                 )
                 if claimed.rowcount == 1:
                     row.status = "RUNNING"
