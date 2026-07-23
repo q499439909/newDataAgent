@@ -5,7 +5,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import Settings
 from ..agents.requirement.clarification import recommended_clarification_patch
@@ -80,7 +80,14 @@ class ConversationService:
         )
         return self._public_thread(updated)
 
-    def send(self, *, thread_id: str, owner_id: str, content: str) -> dict[str, Any]:
+    def send(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        content: str,
+        action_sink: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         content = content.strip()
         if not content:
             raise ValueError("Message must not be empty")
@@ -104,6 +111,12 @@ class ConversationService:
         decision: ConversationAction | None = None
         response: dict[str, Any] = {"reply": "我在。", "turn": None, "run": None}
         action_trace: list[dict[str, Any]] = []
+
+        def record_action(trace: dict[str, Any]) -> None:
+            action_trace.append(trace)
+            if action_sink is not None:
+                action_sink(trace)
+
         for iteration in range(_MAX_REACT_ITERATIONS):
             decision_started = time.perf_counter()
             try:
@@ -132,7 +145,7 @@ class ConversationService:
                     {"role": "control", "content": feedback}
                 )
                 continue
-            action_trace.append(
+            record_action(
                 {
                     "id": new_id("action_trace"),
                     "stage": "analyze_requirement",
@@ -169,7 +182,7 @@ class ConversationService:
                     context=self._tool_context(owner_id, context),
                     raw_input={"action": decision.model_dump(mode="json")},
                 )
-                action_trace.append(trace)
+                record_action(trace)
                 if not proposal.ok:
                     feedback = json.dumps(
                         {
@@ -256,14 +269,13 @@ class ConversationService:
                 if not feedback and decision is not None:
                     post_thread = self.store.get(thread_id, owner_id)
                     post_context = self._control_context(post_thread, owner_id)
-                    action_trace.extend(
-                        self._post_action_tools(
+                    for trace in self._post_action_tools(
                             owner_id=owner_id,
                             decision=decision,
                             response=response,
                             control_context=post_context,
-                        )
-                    )
+                        ):
+                        record_action(trace)
                 break
             # Feed the control-plane failure back to the model so it can
             # self-correct or ask the user a precise follow-up.

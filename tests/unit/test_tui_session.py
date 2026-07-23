@@ -282,6 +282,42 @@ def test_tui_requirement_is_sent_to_conversation_without_local_prompt() -> None:
     assert any("DataAgent" in message for message in console.messages)
 
 
+def test_tui_streams_actions_before_rendering_the_final_reply() -> None:
+    class StreamingClient(FakeControlPlaneClient):
+        def stream_message(self, conversation_id, content):
+            yield {
+                "type": "action",
+                "action": {
+                    "id": "action_trace_1",
+                    "stage": "analyze_requirement",
+                    "stage_label": "正在理解需求",
+                    "kind": "model",
+                    "tool": "conversation_turn",
+                    "display_name": "Requirement Analyzer",
+                    "status": "succeeded",
+                    "parameters": {"model": "glm-5.2"},
+                    "duration_ms": 8,
+                    "summary": "Resolved intent: CHAT.",
+                    "evidence_ids": [],
+                    "error_type": None,
+                },
+            }
+            yield {
+                "type": "final",
+                "response": self.send_message(conversation_id, content),
+            }
+
+    stream = StringIO()
+    console = Console(file=stream, width=220, color_system=None)
+    app = TuiApp(TuiSession(StreamingClient()), console=console)
+
+    app.handle("你好")
+
+    output = stream.getvalue()
+    assert output.index("Requirement Analyzer") < output.index("DataAgent>")
+    assert output.count("Requirement Analyzer") == 1
+
+
 def test_tui_pipeline_approval_renders_real_nodes_and_strategy_differences() -> None:
     stream = StringIO()
     console = Console(file=stream, width=220, color_system=None)
@@ -504,4 +540,34 @@ def test_control_plane_errors_are_translated_without_raw_status_prefix() -> None
     assert message.startswith("请求未执行：")
     assert "Pipeline cannot be approved for execution" in message
     assert not message.startswith("422:")
+    client.close()
+
+
+def test_control_plane_client_parses_ndjson_conversation_stream() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/messages/stream")
+        return httpx.Response(
+            200,
+            content=(
+                '{"type":"action","action":{"tool":"conversation_turn"}}\n'
+                '{"type":"final","response":{"reply":"完成"}}\n'
+            ).encode("utf-8"),
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    client = ControlPlaneClient(
+        base_url="http://dataagent.test",
+        owner_id="user_1",
+    )
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url="http://dataagent.test",
+        headers={"X-Owner-ID": "user_1"},
+    )
+
+    events = list(client.stream_message("conversation_1", "你好"))
+
+    assert [event["type"] for event in events] == ["action", "final"]
+    assert events[1]["response"]["reply"] == "完成"
     client.close()

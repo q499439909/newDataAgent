@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 
 class TuiClient(Protocol):
@@ -11,6 +11,10 @@ class TuiClient(Protocol):
     def get_conversation(self, conversation_id: str) -> dict[str, Any]: ...
 
     def send_message(self, conversation_id: str, content: str) -> dict[str, Any]: ...
+
+    def stream_message(
+        self, conversation_id: str, content: str
+    ) -> Iterator[dict[str, Any]]: ...
 
     def bind_work_order(
         self, conversation_id: str, work_order_id: str
@@ -70,13 +74,28 @@ class TuiSession:
     def chat(self, content: str) -> dict[str, Any]:
         self.ensure_conversation()
         response = self.client.send_message(self.conversation_id, content)
+        self._accept_chat_response(response)
+        return response
+
+    def chat_stream(self, content: str) -> Iterator[dict[str, Any]]:
+        self.ensure_conversation()
+        stream_message = getattr(self.client, "stream_message", None)
+        if not callable(stream_message):
+            yield {"type": "final", "response": self.chat(content)}
+            return
+        for event in stream_message(self.conversation_id, content):
+            if event.get("type") == "final":
+                response = event["response"]
+                self._accept_chat_response(response)
+            yield event
+
+    def _accept_chat_response(self, response: dict[str, Any]) -> None:
         self.work_order_id = response.get("work_order_id") or self.work_order_id
         if response.get("turn"):
             self.turn = response["turn"]
             self.work_order_id = self.turn["work_order_id"]
         if response.get("run"):
             self.active_run_id = response["run"]["id"]
-        return response
 
     def start(self, *, requirement: str, source: str) -> dict[str, Any]:
         response = self.chat(

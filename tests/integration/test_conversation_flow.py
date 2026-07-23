@@ -482,10 +482,12 @@ def test_confirmed_task_runs_governed_planning_tools_and_persists_trace(
     )
     assert created["turn"]["state"]["task_spec"]["ambiguities"] == []
 
+    streamed_actions = []
     approved = service.send(
         thread_id=conversation["id"],
         owner_id="user_1",
         content="确认",
+        action_sink=streamed_actions.append,
     )
 
     tools = [item["tool"] for item in approved["action_trace"]]
@@ -498,6 +500,7 @@ def test_confirmed_task_runs_governed_planning_tools_and_persists_trace(
     ]
     assert approved["action_trace"][2]["evidence_ids"]
     assert all("thought" not in item for item in approved["action_trace"])
+    assert streamed_actions == approved["action_trace"]
     stored = service.get(conversation["id"], "user_1")
     assert stored["action_trace_history"][-1]["actions"] == approved["action_trace"]
 

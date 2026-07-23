@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Iterator
 
 import httpx
 
@@ -39,6 +40,38 @@ class ControlPlaneClient:
             f"/api/conversations/{conversation_id}/messages",
             json={"content": content},
         )
+
+    def stream_message(
+        self, conversation_id: str, content: str
+    ) -> Iterator[dict[str, Any]]:
+        try:
+            with self._client.stream(
+                "POST",
+                f"/api/conversations/{conversation_id}/messages/stream",
+                json={"content": content},
+            ) as response:
+                if response.is_error:
+                    response.read()
+                    try:
+                        detail = response.json().get("detail", response.text)
+                    except ValueError:
+                        detail = response.text
+                    raise ControlPlaneError(
+                        f"控制平面对话流请求失败：{detail}"
+                    )
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == "error":
+                        raise ControlPlaneError(
+                            f"控制平面对话流中断：{event.get('message', '-')}"
+                        )
+                    yield event
+        except httpx.HTTPError as exc:
+            raise ControlPlaneError(
+                f"Control plane stream failed: {exc}"
+            ) from exc
 
     def bind_work_order(self, conversation_id: str, work_order_id: str) -> dict[str, Any]:
         return self._request(

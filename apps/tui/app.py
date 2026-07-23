@@ -122,12 +122,32 @@ class TuiApp:
         return True
 
     def _chat(self, content: str) -> None:
-        with self.console.status("[dim]DataAgent 正在思考...[/dim]"):
-            response = self.session.chat(content)
-        self._render_conversation(response)
+        self.console.print("[dim]DataAgent 正在处理...[/dim]")
+        response: dict[str, Any] | None = None
+        streamed_actions = False
+        for event in self.session.chat_stream(content):
+            if event.get("type") == "action":
+                self._render_action_trace(
+                    [event["action"]],
+                    show_heading=not streamed_actions,
+                )
+                streamed_actions = True
+            elif event.get("type") == "final":
+                response = event["response"]
+        if response is None:
+            raise ControlPlaneError("控制面对话流没有返回最终结果")
+        self._render_conversation(
+            response,
+            render_actions=not streamed_actions,
+        )
 
-    def _render_conversation(self, response: dict[str, Any]) -> None:
-        if response.get("action_trace"):
+    def _render_conversation(
+        self,
+        response: dict[str, Any],
+        *,
+        render_actions: bool = True,
+    ) -> None:
+        if render_actions and response.get("action_trace"):
             self._render_action_trace(response["action_trace"])
         self.console.print("[green]DataAgent>[/green]")
         self.console.print(Markdown(response["reply"]))
@@ -138,8 +158,14 @@ class TuiApp:
             self._render_run(run)
             self._start_run_monitor(run)
 
-    def _render_action_trace(self, actions: list[dict[str, Any]]) -> None:
-        self.console.print("[bold]行动摘要[/bold]")
+    def _render_action_trace(
+        self,
+        actions: list[dict[str, Any]],
+        *,
+        show_heading: bool = True,
+    ) -> None:
+        if show_heading:
+            self.console.print("[bold]行动摘要[/bold]")
         for action in actions:
             status = str(action.get("status") or "unknown")
             marker = "✓" if status == "succeeded" else "!"

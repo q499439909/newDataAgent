@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import queue
+import threading
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.responses import StreamingResponse
 
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.local_stack import health_payload
@@ -179,6 +183,58 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/conversations/{conversation_id}/messages/stream")
+    def stream_conversation_message(
+        conversation_id: str,
+        request: ConversationMessageRequest,
+        owner_id: str = Depends(require_owner),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> StreamingResponse:
+        try:
+            service.get(conversation_id, owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        def events():
+            event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+            def send() -> None:
+                try:
+                    response = service.send(
+                        thread_id=conversation_id,
+                        owner_id=owner_id,
+                        content=request.content,
+                        action_sink=lambda action: event_queue.put(
+                            {"type": "action", "action": action}
+                        ),
+                    )
+                    event_queue.put({"type": "final", "response": response})
+                except Exception as exc:
+                    event_queue.put(
+                        {
+                            "type": "error",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
+                finally:
+                    event_queue.put(None)
+
+            threading.Thread(
+                target=send,
+                name=f"conversation-stream-{conversation_id}",
+                daemon=True,
+            ).start()
+            while True:
+                event = event_queue.get()
+                if event is None:
+                    break
+                yield json.dumps(event, ensure_ascii=False, default=str) + "\n"
+
+        return StreamingResponse(events(), media_type="application/x-ndjson")
 
     @app.post("/api/conversations/{conversation_id}/work-order")
     def bind_conversation_work_order(
