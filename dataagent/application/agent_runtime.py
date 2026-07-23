@@ -31,6 +31,7 @@ from ..operators import build_operator_library
 from ..operators.protocol import OperatorContext, OperatorInput
 from ..operators.providers import ProviderExecuteRequest
 from ..operators.validation import ParameterValidationError, validate_parameters
+from .dataset_exports import export_deliverable_dataset as materialize_dataset_export
 
 
 @dataclass(frozen=True)
@@ -827,6 +828,40 @@ class AgentRuntime:
             kind="dataset", entity_id=dataset_version_id, owner_id=owner_id
         )
         return DatasetVersion.model_validate(payload).model_dump(mode="json")
+
+    def export_deliverable_dataset(
+        self,
+        *,
+        dataset_version_id: str,
+        owner_id: str,
+        destination: Path,
+    ) -> dict[str, Any]:
+        if self.version_store is None or self.run_store is None:
+            raise RuntimeError("Persistent runtime is required for dataset exports")
+        dataset = DatasetVersion.model_validate(
+            self.version_store.get(
+                kind="dataset",
+                entity_id=dataset_version_id,
+                owner_id=owner_id,
+            )
+        )
+        run = self.run_store.get(dataset.run_id, owner_id)
+        exported = materialize_dataset_export(
+            dataset=dataset,
+            run_status=run["status"],
+            destination=destination,
+        )
+        self.run_store.add_event(
+            dataset.run_id,
+            "dataset_exported",
+            {
+                "dataset_version_id": dataset.id,
+                "export_id": exported.id,
+                "destination": exported.root_uri,
+                "file_count": exported.file_count,
+            },
+        )
+        return exported.model_dump(mode="json")
 
     def get_qc_report(self, *, qc_report_id: str, owner_id: str) -> dict[str, Any]:
         if self.version_store is None:

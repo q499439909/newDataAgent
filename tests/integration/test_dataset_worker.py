@@ -89,7 +89,8 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     source_hashes = {path.name: _sha256(path) for path in (first, duplicate)}
 
     home = tmp_path / "runtime"
-    client = TestClient(create_app(AgentRuntime(home)))
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
     final = _ready_work_order(client, source)
     approved = final["state"]["approved_pipeline"]
     assert approved["approved"] is True
@@ -177,6 +178,18 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
         for item in duplicate_results[duplicate_results.index(rejected) + 1 :]
     )
     assert {path.name: _sha256(path) for path in (first, duplicate)} == source_hashes
+    exported = runtime.export_deliverable_dataset(
+        dataset_version_id=dataset["id"],
+        owner_id="user_1",
+        destination=tmp_path / "deliverable",
+    )
+    assert exported["file_count"] == 1
+    assert Path(exported["manifest_uri"]).is_file()
+    assert len(list((tmp_path / "deliverable" / "files").rglob("*.png"))) == 1
+    assert runtime.run_store is not None
+    assert runtime.run_store.events(completed["id"], "user_1")[-1][
+        "event_type"
+    ] == "dataset_exported"
 
 
 def test_queued_run_can_pause_resume_cancel_and_is_owner_isolated(tmp_path) -> None:
