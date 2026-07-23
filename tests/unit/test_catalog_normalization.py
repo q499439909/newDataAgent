@@ -589,9 +589,8 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         == [
             "ingest",
             "quality_filter",
-            "authenticity_tagging",
+            "visual_tagging",
             "authenticity_decision",
-            "image_classification",
             "class_resolution",
             "dataset_partition",
             "manifest",
@@ -626,7 +625,7 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         if node.operator_version_id
         == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
     ]
-    assert len(remote_nodes) == 2
+    assert len(remote_nodes) == 1
     assert all(node.parameters["is_api_model"] is True for node in remote_nodes)
     assert all(node.parameters["api_or_hf_model"] == "qwen3.7-plus" for node in remote_nodes)
     assert all(node.parameters["api_endpoint"] == "/chat/completions" for node in remote_nodes)
@@ -646,10 +645,10 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         and "strict JSON only" in node.parameters["system_prompt"]
         for node in remote_nodes
     )
-    assert {node.prompt_binding.template_id for node in remote_nodes} == {
-        "image-authenticity",
-        "closed-set-image-classification",
-    }
+    assert remote_nodes[0].parameters["tag_field_name"] == "visual_tags"
+    assert remote_nodes[0].prompt_binding.template_id == "image-task-visual-tagging"
+    assert "authenticity" in remote_nodes[0].parameters["system_prompt"]
+    assert "cat, dog, mixed, unknown" in remote_nodes[0].parameters["system_prompt"]
     assert all(node.prompt_binding.template_sha256 for node in remote_nodes)
     assert all(node.prompt_binding.resolved_sha256 for node in remote_nodes)
 

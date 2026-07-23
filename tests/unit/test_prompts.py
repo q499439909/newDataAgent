@@ -23,6 +23,22 @@ def test_builtin_prompt_registry_resolves_versioned_classification_prompt() -> N
     assert resolved.output_contract["type"] == "tag_enum"
 
 
+def test_builtin_prompt_registry_resolves_shared_visual_tagging_prompt() -> None:
+    resolved = builtin_prompt_registry().resolve(
+        "image-task-visual-tagging",
+        1,
+        variables={
+            "task_scope_instruction": "Exclude screenshots.",
+            "allowed_labels": "pig, dog, mixed, unknown",
+        },
+    )
+
+    assert "Exclude screenshots." in resolved.text
+    assert "pig, dog, mixed, unknown" in resolved.text
+    assert resolved.binding.template_id == "image-task-visual-tagging"
+    assert resolved.output_contract["type"] == "tag_set"
+
+
 def test_prompt_registry_rejects_missing_or_extra_variables() -> None:
     registry = builtin_prompt_registry()
 

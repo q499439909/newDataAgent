@@ -156,9 +156,11 @@ def _vlm_configuration(
     parameters = dict(candidates.get(operator_id).parameters if operator_id in candidates else {})
     properties = library.registry.get(operator_id).parameter_schema.get("properties", {})
     if "tag_field_name" in properties:
-        parameters["tag_field_name"] = (
-            "authenticity_tags" if purpose == "authenticity" else "image_tags"
-        )
+        parameters["tag_field_name"] = {
+            "authenticity": "authenticity_tags",
+            "classification": "image_tags",
+            "shared_visual_tagging": "visual_tags",
+        }[purpose]
     if "system_prompt" in properties:
         if purpose == "authenticity":
             scope = task_spec.hard_constraints.get("authenticity_scope")
@@ -175,7 +177,7 @@ def _vlm_configuration(
                     )
                 },
             )
-        else:
+        elif purpose == "classification":
             contract = _classification_contract(task_spec)
             allowed = [
                 *(item["id"] for item in contract["labels"]),
@@ -186,6 +188,24 @@ def _vlm_configuration(
                 "closed-set-image-classification",
                 1,
                 variables={"allowed_labels": ", ".join(allowed)},
+            )
+        else:
+            scope = task_spec.hard_constraints.get("authenticity_scope")
+            exclusions = "; ".join(task_spec.exclusion_requirements)
+            task_scope = "; ".join(str(item) for item in (scope, exclusions) if item)
+            contract = _classification_contract(task_spec)
+            allowed = [
+                *(item["id"] for item in contract["labels"]),
+                contract["mixed_label"],
+                contract["unknown_label"],
+            ]
+            resolved = builtin_prompt_registry().resolve(
+                "image-task-visual-tagging",
+                1,
+                variables={
+                    "task_scope_instruction": task_scope or "No additional exclusions.",
+                    "allowed_labels": ", ".join(allowed),
+                },
             )
         parameters["system_prompt"] = resolved.text
         return parameters, resolved.binding
@@ -279,13 +299,62 @@ def _compile_nodes(
     selection = _coverage_selection(state)
     nodes: list[PipelineNode] = []
     used_node_ids: dict[str, int] = {}
+    selected = dict(selection)
+    shared_visual_operator_id: str | None = None
+    authenticity_operator_id = selected.get("authenticity_assessment")
+    classification_operator_id = selected.get("image_classification")
+    if authenticity_operator_id and classification_operator_id:
+        authenticity_operator = library.registry.get(authenticity_operator_id)
+        authenticity_upstream = tuple(
+            authenticity_operator.resource_requirements.get(
+                "upstream_capability_tags", ()
+            )
+        )
+        classification_operator = library.registry.get(classification_operator_id)
+        if (
+            "visual_understanding" in authenticity_upstream
+            and "visual_understanding" in classification_operator.capability_tags
+            and _remote_visual_operator(
+                library=library,
+                candidates=candidates,
+            )
+            == classification_operator_id
+        ):
+            shared_visual_operator_id = classification_operator_id
+    shared_visual_emitted = False
 
     for capability, operator_id in selection:
         operator = library.registry.get(operator_id)
         upstream_tags = tuple(
             operator.resource_requirements.get("upstream_capability_tags", ())
         )
-        if capability == "authenticity_assessment" and "visual_understanding" in upstream_tags:
+        if (
+            shared_visual_operator_id
+            and capability in {"authenticity_assessment", "image_classification"}
+            and not shared_visual_emitted
+        ):
+            vlm_parameters, prompt_binding = _vlm_configuration(
+                shared_visual_operator_id,
+                purpose="shared_visual_tagging",
+                task_spec=task_spec,
+                library=library,
+                candidates=candidates,
+            )
+            nodes.append(
+                _node(
+                    node_id="visual_tagging",
+                    operator_id=shared_visual_operator_id,
+                    parameters=vlm_parameters,
+                    library=library,
+                    candidates=candidates,
+                    prompt_binding=prompt_binding,
+                )
+            )
+            shared_visual_emitted = True
+        elif (
+            capability == "authenticity_assessment"
+            and "visual_understanding" in upstream_tags
+        ):
             vlm_id = _remote_visual_operator(library=library, candidates=candidates)
             vlm_parameters, prompt_binding = _vlm_configuration(
                 vlm_id,
@@ -304,6 +373,11 @@ def _compile_nodes(
                     prompt_binding=prompt_binding,
                 )
             )
+        if (
+            capability == "image_classification"
+            and operator_id == shared_visual_operator_id
+        ):
+            continue
 
         base_node_id = _NODE_IDS.get(capability, f"capability_{capability}")
         used_node_ids[base_node_id] = used_node_ids.get(base_node_id, 0) + 1

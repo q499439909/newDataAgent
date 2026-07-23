@@ -79,7 +79,13 @@ def _preferred_provider_values(input_data: OperatorInput) -> list[Any]:
     provider_output = input_data.labels.get("datajuicer_output", {})
     preferred: list[Any] = []
     if isinstance(provider_output, dict):
-        for key in ("authenticity_tags", "image_tags", "tags", "caption"):
+        for key in (
+            "visual_tags",
+            "authenticity_tags",
+            "image_tags",
+            "tags",
+            "caption",
+        ):
             if key in provider_output:
                 preferred.append(provider_output[key])
     return preferred or [provider_output]
