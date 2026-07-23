@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataagent.application.conversation_actions import ConversationIntent
-from dataagent.operators import build_operator_library
+from dataagent.domain.operators import OperatorStatus
+from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
+from dataagent.operators import OperatorRegistry, build_operator_library
 from dataagent.tools import (
     ToolContext,
     ToolRegistry,
@@ -20,6 +22,32 @@ def _context(**updates) -> ToolContext:
     }
     values.update(updates)
     return ToolContext(**values)
+
+
+def _pipeline(
+    *,
+    operator_version_id: str = "builtin.quality_filter:1",
+    parameters: dict | None = None,
+) -> PipelineVersion:
+    return PipelineVersion(
+        id="pipeline_1",
+        family_id="pipeline_balanced",
+        version=1,
+        created_by="user_1",
+        change_reason="tool test",
+        strategy=PipelineStrategy.BALANCED,
+        task_spec_version_id="spec_1",
+        nodes=(
+            PipelineNode(
+                id="quality",
+                operator_version_id=operator_version_id,
+                name="Quality",
+                category="FILTERING",
+                parameters=parameters or {"confidence_threshold": 0.55},
+            ),
+        ),
+        created_from="processing_agent",
+    )
 
 
 def test_tool_input_validation_returns_complete_observation() -> None:
@@ -140,3 +168,125 @@ def test_propose_control_action_returns_policy_violation_without_execution() -> 
     assert result.error_type == "ACTION_NOT_ALLOWED_IN_CURRENT_STATE"
     assert result.data["executed"] is False
     assert "SELECT_PIPELINE" in result.next_actions
+
+
+def test_pipeline_artifact_tools_compile_and_validate_released_pipeline() -> None:
+    registry = build_p0_tool_registry()
+    compiled = registry.execute(
+        "compile_pipeline_artifact",
+        _context(),
+        {"pipeline": _pipeline().model_dump(mode="json")},
+    )
+
+    validated = registry.execute(
+        "validate_pipeline_artifact",
+        _context(),
+        {"content": compiled.data["content"]},
+    )
+
+    assert compiled.ok is True
+    assert compiled.data["approved"] is False
+    assert validated.ok is True
+    assert validated.data["schema_ok"] is True
+    assert validated.data["checksum_ok"] is True
+    assert validated.data["operators_ok"] is True
+    assert validated.data["parameters_ok"] is True
+    assert validated.data["production_eligible"] is True
+    assert validated.data["blockers"] == []
+
+
+def test_pipeline_artifact_validation_reports_checksum_mismatch() -> None:
+    registry = build_p0_tool_registry()
+    compiled = registry.execute(
+        "compile_pipeline_artifact",
+        _context(),
+        {"pipeline": _pipeline().model_dump(mode="json")},
+    )
+    tampered = compiled.data["content"].replace(
+        "confidence_threshold: 0.55",
+        "confidence_threshold: 0.75",
+    )
+
+    result = registry.execute(
+        "validate_pipeline_artifact",
+        _context(),
+        {"content": tampered},
+    )
+
+    assert result.ok is False
+    assert result.error_type == "pipeline_artifact_checksum_mismatch"
+    assert result.data["schema_ok"] is True
+    assert result.data["checksum_ok"] is False
+    assert result.data["blockers"][0]["code"] == "CHECKSUM_MISMATCH"
+
+
+def test_pipeline_artifact_validation_reports_operator_and_parameter_blockers() -> None:
+    tools = build_p0_tool_registry()
+    context = _context()
+    missing = tools.execute(
+        "compile_pipeline_artifact",
+        context,
+        {
+            "pipeline": _pipeline(
+                operator_version_id="missing.operator:1"
+            ).model_dump(mode="json")
+        },
+    )
+    invalid = tools.execute(
+        "compile_pipeline_artifact",
+        context,
+        {
+            "pipeline": _pipeline(
+                parameters={"confidence_threshold": 2.0}
+            ).model_dump(mode="json")
+        },
+    )
+
+    missing_result = tools.execute(
+        "validate_pipeline_artifact",
+        context,
+        {"content": missing.data["content"]},
+    )
+    invalid_result = tools.execute(
+        "validate_pipeline_artifact",
+        context,
+        {"content": invalid.data["content"]},
+    )
+
+    assert missing_result.data["operators_ok"] is False
+    assert missing_result.data["blockers"][0]["code"] == "OPERATOR_UNAVAILABLE"
+    assert invalid_result.data["parameters_ok"] is False
+    assert invalid_result.data["blockers"][0]["code"] == "PARAMETER_SCHEMA_VIOLATION"
+
+
+def test_pipeline_artifact_validation_never_promotes_draft_operator() -> None:
+    library = build_operator_library(include_datajuicer=False)
+    draft = library.registry.get("builtin.quality_filter:1").model_copy(
+        update={
+            "id": "datajuicer.image_quality_filter.remote_api:1",
+            "family_id": "datajuicer.image_quality_filter.remote_api",
+            "status": OperatorStatus.DRAFT,
+        }
+    )
+    context = _context(operator_registry=OperatorRegistry((draft,)))
+    tools = build_p0_tool_registry()
+    compiled = tools.execute(
+        "compile_pipeline_artifact",
+        context,
+        {
+            "pipeline": _pipeline(
+                operator_version_id=draft.id
+            ).model_dump(mode="json")
+        },
+    )
+
+    result = tools.execute(
+        "validate_pipeline_artifact",
+        context,
+        {"content": compiled.data["content"]},
+    )
+
+    assert result.ok is False
+    assert result.data["production_eligible"] is False
+    assert result.data["operators"][0]["status"] == "DRAFT"
+    assert result.data["blockers"][0]["code"] == "OPERATOR_NOT_RELEASED"

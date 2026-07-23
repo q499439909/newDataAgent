@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from ..application.pipeline_artifacts import (
-    parse_pipeline_yaml,
+    PipelineArtifact,
     pipeline_sha256,
     serialize_pipeline_yaml,
 )
+from ..domain.operators import OperatorStatus
 from ..domain.pipelines import PipelineVersion
+from ..operators.validation import ParameterValidationError, validate_parameters
 from .observations import ToolEvidence, ToolResult
 from .spec import ToolConfirmation, ToolContext, ToolEffect, ToolSpec
 
@@ -77,25 +80,154 @@ def _compile_pipeline_artifact(
 def _validate_pipeline_artifact(
     context: ToolContext, request: ValidatePipelineArtifactInput
 ) -> ToolResult:
-    del context
-    pipeline = parse_pipeline_yaml(request.content)
+    try:
+        artifact = PipelineArtifact.model_validate(yaml.safe_load(request.content))
+    except Exception as exc:
+        return ToolResult(
+            ok=False,
+            tool="validate_pipeline_artifact",
+            status="failed",
+            summary="PipelineArtifact schema validation failed.",
+            data={
+                "schema_ok": False,
+                "checksum_ok": False,
+                "operators_ok": False,
+                "parameters_ok": False,
+                "production_eligible": False,
+                "operators": [],
+                "blockers": [
+                    {
+                        "code": "SCHEMA_INVALID",
+                        "message": str(exc),
+                    }
+                ],
+            },
+            error_type="pipeline_artifact_schema_invalid",
+        )
+    pipeline = artifact.pipeline
     checksum = pipeline_sha256(pipeline)
     artifact_id = f"pipeline_artifact_{checksum[:16]}"
+    if checksum != artifact.canonical_sha256:
+        return ToolResult(
+            ok=False,
+            tool="validate_pipeline_artifact",
+            status="failed",
+            summary="PipelineArtifact checksum validation failed.",
+            data={
+                "pipeline_artifact_id": artifact_id,
+                "pipeline_version_id": pipeline.id,
+                "schema_ok": True,
+                "checksum_ok": False,
+                "operators_ok": False,
+                "parameters_ok": False,
+                "production_eligible": False,
+                "operators": [],
+                "blockers": [
+                    {
+                        "code": "CHECKSUM_MISMATCH",
+                        "message": (
+                            f"Expected {artifact.canonical_sha256}, got {checksum}"
+                        ),
+                    }
+                ],
+            },
+            evidence=(
+                ToolEvidence(kind="pipeline_artifact", id=artifact_id),
+                ToolEvidence(kind="pipeline_version", id=pipeline.id),
+            ),
+            error_type="pipeline_artifact_checksum_mismatch",
+        )
+
+    blockers: list[dict[str, Any]] = []
+    operators: list[dict[str, Any]] = []
+    operators_ok = True
+    parameters_ok = True
+    released = {
+        OperatorStatus.PERSONAL_RELEASE,
+        OperatorStatus.PUBLIC_RELEASE,
+    }
+    if context.operator_registry is None:
+        operators_ok = False
+        blockers.append(
+            {
+                "code": "OPERATOR_REGISTRY_UNAVAILABLE",
+                "message": "OperatorRegistry is required for artifact validation.",
+            }
+        )
+    else:
+        for node in pipeline.nodes:
+            try:
+                operator = context.operator_registry.get(node.operator_version_id)
+            except KeyError:
+                operators_ok = False
+                blockers.append(
+                    {
+                        "code": "OPERATOR_UNAVAILABLE",
+                        "node_id": node.id,
+                        "operator_version_id": node.operator_version_id,
+                        "message": "Operator version is not present in the current Catalog.",
+                    }
+                )
+                continue
+            operators.append(
+                {
+                    "node_id": node.id,
+                    "operator_version_id": operator.id,
+                    "status": operator.status.value,
+                    "provider_id": operator.provider.provider_id,
+                }
+            )
+            if operator.status not in released:
+                blockers.append(
+                    {
+                        "code": "OPERATOR_NOT_RELEASED",
+                        "node_id": node.id,
+                        "operator_version_id": operator.id,
+                        "status": operator.status.value,
+                        "message": "Operator is not released for production execution.",
+                    }
+                )
+            try:
+                validate_parameters(operator.parameter_schema, node.parameters)
+            except ParameterValidationError as exc:
+                parameters_ok = False
+                blockers.append(
+                    {
+                        "code": "PARAMETER_SCHEMA_VIOLATION",
+                        "node_id": node.id,
+                        "operator_version_id": operator.id,
+                        "message": str(exc),
+                    }
+                )
+
+    production_eligible = operators_ok and parameters_ok and not blockers
+    ok = production_eligible
     return ToolResult(
-        ok=True,
+        ok=ok,
         tool="validate_pipeline_artifact",
-        status="succeeded",
-        summary="PipelineArtifact schema and checksum are valid.",
+        status="succeeded" if ok else "failed",
+        summary=(
+            "PipelineArtifact is valid and production eligible."
+            if ok
+            else f"PipelineArtifact validation found {len(blockers)} blocker(s)."
+        ),
         data={
             "pipeline_artifact_id": artifact_id,
             "pipeline_version_id": pipeline.id,
             "schema_ok": True,
             "checksum_ok": True,
+            "operators_ok": operators_ok,
+            "parameters_ok": parameters_ok,
+            "production_eligible": production_eligible,
+            "operators": operators,
+            "blockers": blockers,
         },
         evidence=(
             ToolEvidence(kind="pipeline_artifact", id=artifact_id),
             ToolEvidence(kind="pipeline_version", id=pipeline.id),
         ),
+        next_actions=("retrieve_operators",) if blockers else (),
+        error_type=None if ok else "pipeline_artifact_blocked",
     )
 
 
