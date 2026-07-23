@@ -6,6 +6,11 @@ from .dataset import (
     load_acceptance_manifest,
     validate_acceptance_dataset,
 )
+from .provider_smoke import (
+    ProviderSmokeRecord,
+    run_remote_vlm_smoke,
+    write_provider_smoke_record,
+)
 
 __all__ = [
     "AcceptanceCase",
@@ -14,4 +19,7 @@ __all__ = [
     "build_p0_acceptance_dataset",
     "load_acceptance_manifest",
     "validate_acceptance_dataset",
+    "ProviderSmokeRecord",
+    "run_remote_vlm_smoke",
+    "write_provider_smoke_record",
 ]
