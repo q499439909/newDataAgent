@@ -48,6 +48,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_provider_execution_evidence(artifact: AssetRef) -> bool:
+    return (
+        artifact.media_type == "application/x-ndjson"
+        and Path(artifact.uri).name in {"output.jsonl", "output_stats.jsonl"}
+    )
+
+
 def _ordered_nodes(pipeline: PipelineVersion):
     by_id = {node.id: node for node in pipeline.nodes}
     indegree = {node.id: 0 for node in pipeline.nodes}
@@ -646,9 +653,17 @@ class DatasetRunExecutor:
             return artifact
 
         assets: list[DatasetAsset] = []
+        execution_evidence: dict[tuple[str, str | None], AssetRef] = {}
         for sequence, item in enumerate(items):
             labels = dict(item["labels"])
             operator_outputs = labels.pop(_OPERATOR_OUTPUTS_KEY, {})
+            delivery_artifacts: list[AssetRef] = []
+            for value in operator_outputs.get("artifacts", ()):
+                artifact = published_artifact(value)
+                if _is_provider_execution_evidence(artifact):
+                    execution_evidence[(artifact.uri, artifact.sha256)] = artifact
+                else:
+                    delivery_artifacts.append(artifact)
             assets.append(DatasetAsset(
                 source_uri=item["source_uri"],
                 source_sha256=item["source_sha256"],
@@ -662,10 +677,7 @@ class DatasetRunExecutor:
                 reason_codes=tuple(item["reason_codes"]),
                 metrics=item["metrics"],
                 labels=labels,
-                artifacts=tuple(
-                    published_artifact(value)
-                    for value in operator_outputs.get("artifacts", ())
-                ),
+                artifacts=tuple(delivery_artifacts),
                 annotations=tuple(
                     AnnotationRef.model_validate(value)
                     for value in operator_outputs.get("annotations", ())
@@ -689,6 +701,18 @@ class DatasetRunExecutor:
             assets=assets,
         )
         write_dataset_manifest(dataset)
+        if execution_evidence:
+            self.run_store.add_event(
+                run["id"],
+                "provider_execution_evidence_published",
+                {
+                    "dataset_version_id": dataset.id,
+                    "artifacts": [
+                        artifact.model_dump(mode="json")
+                        for artifact in execution_evidence.values()
+                    ],
+                },
+            )
         self.version_store.save_if_absent(
             kind="dataset", owner_id=run["owner_id"], payload=dataset.model_dump(mode="json")
         )

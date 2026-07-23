@@ -15,6 +15,7 @@ from dataagent.domain.runs import (
     AssetMaterialization,
     AssetOrigin,
     DatasetAsset,
+    DatasetVersion,
     DatasetVersionKind,
     RepairedDatasetVersion,
 )
@@ -180,7 +181,14 @@ def test_manifest_write_is_atomic_and_round_trips(tmp_path: Path) -> None:
     written = write_dataset_manifest(dataset)
 
     assert written == manifest.resolve()
-    assert json.loads(manifest.read_text(encoding="utf-8"))["id"] == "dataset_1"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["id"] == "dataset_1"
+    assert "parent_version_id" not in payload
+    assert "repair_run_ids" not in payload
+    assert "artifacts" not in payload["assets"][0]
+    assert "annotations" not in payload["assets"][0]
+    assert "embeddings" not in payload["assets"][0]
+    assert DatasetVersion.model_validate(payload) == dataset
     assert not list(manifest.parent.glob("*.tmp"))
 
 

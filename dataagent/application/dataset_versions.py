@@ -389,9 +389,44 @@ def write_dataset_manifest(dataset: DatasetVersion) -> Path:
     manifest = Path(dataset.manifest_uri).resolve()
     manifest.parent.mkdir(parents=True, exist_ok=True)
     temporary = manifest.with_name(f".{manifest.name}.{uuid.uuid4().hex}.tmp")
+    payload = dataset.model_dump(mode="json")
+    for key in (
+        "parent_version_id",
+        "parent_dataset_version_id",
+    ):
+        if payload.get(key) is None:
+            payload.pop(key, None)
+    for key in (
+        "repair_run_ids",
+        "still_failed",
+        "abandoned_assets",
+        "excluded_assets",
+    ):
+        if not payload.get(key):
+            payload.pop(key, None)
+    for asset in payload.get("assets", []):
+        for key in (
+            "output_uri",
+            "output_sha256",
+            "origin_dataset_version_id",
+            "origin_run_id",
+        ):
+            if asset.get(key) is None:
+                asset.pop(key, None)
+        for key in (
+            "reason_codes",
+            "metrics",
+            "labels",
+            "artifacts",
+            "annotations",
+            "embeddings",
+            "audit_refs",
+        ):
+            if not asset.get(key):
+                asset.pop(key, None)
     try:
         temporary.write_text(
-            json.dumps(dataset.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         os.replace(temporary, manifest)

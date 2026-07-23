@@ -18,9 +18,13 @@ from dataagent.application.dataset_versions import (
 )
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.domain.runs import AssetOrigin, DatasetAsset
+from dataagent.domain.operators import AssetRef
 from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
 from dataagent.imaging import analyze_image
-from dataagent.execution.dataset_runner import _redact_parameters
+from dataagent.execution.dataset_runner import (
+    _is_provider_execution_evidence,
+    _redact_parameters,
+)
 from dataagent.execution.dataset_runner import DatasetRunExecutor
 
 
@@ -38,6 +42,23 @@ def test_run_audit_parameter_redaction_keeps_prompts_but_hides_credentials() -> 
         "system_prompt": "return JSON",
         "model_params": {"api_key": "***", "base_url": "https://example.test"},
     }
+
+
+def test_provider_process_files_are_audit_evidence_not_delivery_artifacts() -> None:
+    assert _is_provider_execution_evidence(
+        AssetRef(
+            uri="D:/runtime/output.jsonl",
+            media_type="application/x-ndjson",
+            sha256="a" * 64,
+        )
+    )
+    assert not _is_provider_execution_evidence(
+        AssetRef(
+            uri="D:/runtime/labels.jsonl",
+            media_type="application/x-ndjson",
+            sha256="b" * 64,
+        )
+    )
 
 
 def test_only_retryable_execution_failures_are_partial_completions() -> None:
@@ -179,7 +200,9 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     manifest = Path(dataset["manifest_uri"])
     manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert manifest_payload["id"] == dataset["id"]
-    assert manifest_payload["assets"] == dataset["assets"]
+    assert manifest_payload["assets"][0]["source_uri"] == dataset["assets"][0]["source_uri"]
+    assert "artifacts" not in manifest_payload["assets"][0]
+    assert "annotations" not in manifest_payload["assets"][0]
     report = client.get(
         f"/api/qc-reports/{run['qc_report_id']}",
         headers={"X-Owner-ID": "user_1"},
