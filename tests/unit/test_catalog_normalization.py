@@ -11,12 +11,15 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.domain.plans import CapabilityCoverageStatus
-from dataagent.agents.processing.nodes import generate_pipeline_variants
+from dataagent.agents.processing.nodes import (
+    _classification_contract,
+    generate_pipeline_variants,
+)
 from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.domain.pipelines import PipelineVersion
-from dataagent.domain.specs import TaskSpecVersion
+from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
 from dataagent.graph.interrupts import revise_task_spec_version
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
@@ -530,11 +533,31 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
             "trace": [],
         }
     )
+    task_spec = {
+        **task_result["task_spec"],
+        "classification": {
+            "mode": "closed_set",
+            "labels": [
+                {
+                    "id": "cat",
+                    "display_name": "猫",
+                    "aliases": ["猫咪", "小猫"],
+                },
+                {
+                    "id": "dog",
+                    "display_name": "狗",
+                    "aliases": ["狗狗", "小狗"],
+                },
+            ],
+            "mixed_label": "mixed",
+            "unknown_label": "unknown",
+        },
+    }
 
     retrieval = generate_retrieval_plan(
         {
             "owner_id": "user_1",
-            "task_spec": task_result["task_spec"],
+            "task_spec": task_spec,
             "trace": [],
         },
         operator_registry=registry,
@@ -568,7 +591,7 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
 
     state = {
         "owner_id": "user_1",
-        "task_spec": task_result["task_spec"],
+        "task_spec": task_spec,
         "trace": [],
         **retrieval,
     }
@@ -807,3 +830,22 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
 
     assert eligibility["eligible"] is False
     assert "retained for audit only" in eligibility["violations"][0]
+
+
+def test_missing_classification_spec_does_not_invent_task_labels() -> None:
+    spec = TaskSpecVersion(
+        id="spec_visual_filter",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_order_visual_filter",
+        objective="Select images containing people wearing black clothing.",
+        data_sources=(DataSourceSpec(type="local_directory", uri="D:/images"),),
+        confirmed=True,
+    )
+
+    assert _classification_contract(spec) == {
+        "labels": [],
+        "mixed_label": None,
+        "unknown_label": None,
+    }

@@ -69,12 +69,9 @@ def _classification_contract(task_spec: TaskSpecVersion) -> dict[str, Any]:
     classification = task_spec.classification
     if classification is None:
         return {
-            "labels": [
-                {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
-                {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
-            ],
-            "mixed_label": "mixed",
-            "unknown_label": "unknown",
+            "labels": [],
+            "mixed_label": None,
+            "unknown_label": None,
         }
     return {
         "labels": [
@@ -87,6 +84,32 @@ def _classification_contract(task_spec: TaskSpecVersion) -> dict[str, Any]:
         "mixed_label": classification.mixed_label,
         "unknown_label": classification.unknown_label,
     }
+
+
+def _require_classification_contract(
+    task_spec: TaskSpecVersion,
+    *,
+    capability: str,
+) -> dict[str, Any]:
+    contract = _classification_contract(task_spec)
+    if not contract["labels"]:
+        raise ValueError(
+            f"Capability {capability} requires TaskSpec.classification; "
+            "task labels must not be inferred by the pipeline compiler"
+        )
+    return contract
+
+
+def _classification_label_ids(contract: dict[str, Any]) -> list[str]:
+    return [
+        value
+        for value in (
+            *(item["id"] for item in contract["labels"]),
+            contract["mixed_label"],
+            contract["unknown_label"],
+        )
+        if isinstance(value, str) and value
+    ]
 
 
 def _classification_prompt_context(task_spec: TaskSpecVersion) -> list[dict[str, Any]]:
@@ -207,12 +230,11 @@ def _vlm_configuration(
                 },
             )
         elif purpose == "classification":
-            contract = _classification_contract(task_spec)
-            allowed = [
-                *(item["id"] for item in contract["labels"]),
-                contract["mixed_label"],
-                contract["unknown_label"],
-            ]
+            contract = _require_classification_contract(
+                task_spec,
+                capability="image_classification",
+            )
+            allowed = _classification_label_ids(contract)
             resolved = builtin_prompt_registry().resolve(
                 "closed-set-image-classification",
                 1,
@@ -229,17 +251,13 @@ def _vlm_configuration(
             exclusions = "; ".join(task_spec.exclusion_requirements)
             task_scope = "; ".join(str(item) for item in (scope, exclusions) if item)
             contract = _classification_contract(task_spec)
-            allowed = [
-                *(item["id"] for item in contract["labels"]),
-                contract["mixed_label"],
-                contract["unknown_label"],
-            ]
+            allowed = _classification_label_ids(contract)
             resolved = builtin_prompt_registry().resolve(
                 "image-task-visual-tagging",
                 2,
                 variables={
                     "task_scope_instruction": task_scope or "No additional exclusions.",
-                    "allowed_labels": ", ".join(allowed),
+                    "allowed_labels": ", ".join(allowed) or "none",
                     **_semantic_selection_variables(task_spec),
                 },
             )
@@ -307,15 +325,22 @@ def _parameters_for_capability(
     if capability == "visual_semantic_selection":
         return {"uncertain_policy": policy["uncertain_policy"]}
     if capability == "class_resolution":
+        contract = _require_classification_contract(
+            task_spec,
+            capability=capability,
+        )
         return {
             "mixed_policy": policy["mixed_policy"],
             "unknown_policy": policy["unknown_policy"],
-            **_classification_contract(task_spec),
+            **contract,
         }
     if capability == "perceptual_deduplication":
         return {"distance_threshold": policy["dedup_distance"]}
     if capability == "dataset_partition":
-        contract = _classification_contract(task_spec)
+        contract = _require_classification_contract(
+            task_spec,
+            capability=capability,
+        )
         return {
             "directory_prefix": "classes",
             "allowed_labels": [item["id"] for item in contract["labels"]],
