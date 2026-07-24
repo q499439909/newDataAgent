@@ -60,6 +60,30 @@ class FailingConversationGateway:
         raise ModelGatewayError("structured response unavailable")
 
 
+class MalformedAfterStartGateway:
+    configured = True
+
+    def __init__(self, source) -> None:
+        self.source = source
+        self.calls = 0
+
+    def conversation_turn(self, *, history, context):
+        del history, context
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "intent": "START_WORK_ORDER",
+                "source": str(self.source),
+                "requirement": "筛选清晰图片",
+                "reply": "",
+            }, None
+        raise json.JSONDecodeError(
+            "Expecting ',' delimiter",
+            '{"intent":"QUERY_CONTROL_FACTS" "facets":["task_spec"]}',
+            38,
+        )
+
+
 def _decision(**payload):
     return parse_conversation_action(payload)
 
@@ -1627,6 +1651,40 @@ def test_model_failure_is_visible_non_mutating_and_auditable(tmp_path) -> None:
     assert "ModelGatewayError" in stored["context"]["conversation_runtime"][
         "last_fallback_reason"
     ]
+
+
+def test_malformed_model_json_uses_grounded_task_spec_fallback(tmp_path) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(tmp_path / "runtime")
+    assert runtime.conversation_store is not None
+    gateway = MalformedAfterStartGateway(source)
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=gateway,
+    )
+    conversation = service.create("user_1")
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f"{source} 筛选清晰图片",
+    )
+
+    response = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content="草案内容",
+    )
+
+    assert created["work_order_id"]
+    assert "当前 TaskSpec" in response["reply"]
+    assert "筛选清晰图片" in response["reply"]
+    assert "请重试刚才的问题" not in response["reply"]
+    assert response["diagnostics"]["fallback_used"] is True
+    assert response["messages"][-1]["model"] == "state-grounded-fallback"
+    assert response["turn"] is None
 
 
 def test_ineligible_pipeline_selection_does_not_redraw_approval_tables(tmp_path) -> None:

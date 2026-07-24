@@ -19,6 +19,7 @@ from .conversation_actions import (
     ConversationAction,
     ConversationActionError,
     ConversationIntent,
+    QueryControlFactsAction,
     parse_conversation_action,
     task_spec_patch_payload,
 )
@@ -548,18 +549,10 @@ class ConversationService:
         except (ModelGatewayError, ValueError, TypeError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:500]
             logger.warning(
-                "Conversation model failed; returning a non-mutating fallback: %s",
+                "Conversation model failed; returning a grounded read-only fallback: %s",
                 reason,
             )
-            return ChatAction(
-                reply=(
-                    "模型服务本轮未返回有效结果，控制平面没有执行任何操作。"
-                    "请重试刚才的问题。"
-                )
-            ).with_resolution(
-                resolved_by="local-fallback",
-                fallback_reason=reason,
-            )
+            return self._state_grounded_fallback(context, reason)
         ungrounded_ids = self._ungrounded_control_identifiers(decision.reply, context)
         if decision.intent == ConversationIntent.CHAT and ungrounded_ids:
             reason = "ungrounded_control_identifiers:" + ",".join(ungrounded_ids)
@@ -574,6 +567,55 @@ class ConversationService:
                 fallback_reason=reason,
             )
         return decision
+
+    @staticmethod
+    def _state_grounded_fallback(
+        context: dict[str, Any],
+        reason: str,
+    ) -> ConversationAction:
+        """Expose safe persisted facts when model intent parsing is unavailable."""
+        state = context.get("agent_state") or {}
+        waiting = state.get("waiting")
+        if waiting == "task_spec_confirmation" and context.get("task_spec"):
+            action: ConversationAction = QueryControlFactsAction(
+                intent=ConversationIntent.QUERY_CONTROL_FACTS,
+                facets=("task_spec",),
+            )
+        elif waiting == "pipeline_approval" and context.get("approved_pipeline"):
+            action = QueryControlFactsAction(
+                intent=ConversationIntent.QUERY_CONTROL_FACTS,
+                facets=("pipeline", "operators"),
+            )
+        elif context.get("latest_run"):
+            action = QueryControlFactsAction(
+                intent=ConversationIntent.QUERY_CONTROL_FACTS,
+                facets=("run", "outcome"),
+            )
+        elif context.get("latest_dataset"):
+            action = QueryControlFactsAction(
+                intent=ConversationIntent.QUERY_CONTROL_FACTS,
+                facets=("dataset", "outcome"),
+            )
+        elif context.get("work_order_id"):
+            action = QueryControlFactsAction(
+                intent=ConversationIntent.QUERY_CONTROL_FACTS,
+                facets=("work_order",),
+            )
+        else:
+            action = ChatAction(
+                reply=(
+                    "模型服务本轮未返回有效结果，控制平面没有执行任何操作。"
+                    "请重试刚才的问题。"
+                )
+            )
+        return action.with_resolution(
+            resolved_by=(
+                "state-grounded-fallback"
+                if action.intent == ConversationIntent.QUERY_CONTROL_FACTS
+                else "local-fallback"
+            ),
+            fallback_reason=reason,
+        )
 
     def _apply(
         self,

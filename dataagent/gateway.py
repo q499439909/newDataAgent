@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from json_repair import repair_json
 
 from .config import Settings
 from .application.conversation_actions import conversation_action_json_schema
@@ -26,12 +27,21 @@ def _extract_json(text: str) -> dict[str, Any]:
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-        if not match:
-            raise ModelGatewayError("Model response did not contain a JSON object")
-        return json.loads(match.group(0))
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as strict_error:
+        try:
+            payload = repair_json(
+                cleaned,
+                return_objects=True,
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError) as repair_error:
+            raise ModelGatewayError(
+                f"Model response JSON could not be repaired: {repair_error}"
+            ) from strict_error
+    if not isinstance(payload, dict) or not payload:
+        raise ModelGatewayError("Model response did not contain a JSON object")
+    return payload
 
 
 class ModelGateway:
