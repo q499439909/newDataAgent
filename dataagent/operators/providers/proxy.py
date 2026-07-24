@@ -464,14 +464,14 @@ def build_datajuicer_proxy_operators(
                 change_reason=(
                     "admitted Data-Juicer provider proxy"
                     if is_admitted
-                    else "auto-generated Data-Juicer candidate proxy"
+                    else "auto-generated callable Data-Juicer provider proxy"
                 ),
                 display_name=display_name,
                 summary=summary,
                 description=(
                     f"Versioned DataAgent proxy for Data-Juicer "
                     f"{descriptor.provider_operator_ref} ({descriptor.provider_operator_type}); "
-                    "candidate proxies require admission evidence before production use."
+                    "execution depends on the declared Provider runtime and current Worker."
                 ),
                 primary_category=category,
                 secondary_category=secondary,
@@ -511,7 +511,7 @@ def build_datajuicer_proxy_operators(
                 },
                 limitations=(
                     "Requires the isolated Data-Juicer provider environment.",
-                    "Candidate status does not imply production admission."
+                    "Provider availability does not imply DataAgent evaluation evidence."
                     if not is_admitted
                     else "Released only for the verified provider version.",
                 ),
