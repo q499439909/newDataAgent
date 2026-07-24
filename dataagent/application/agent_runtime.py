@@ -4,7 +4,7 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -64,6 +64,7 @@ class AgentRuntime:
         remote_operator_available: bool = False,
         vision_model: str = "qwen3.7-plus",
         vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        vlm_gateway: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -104,6 +105,7 @@ class AgentRuntime:
             remote_asset_timeout_seconds=remote_asset_timeout_seconds,
             vision_model=vision_model,
             vision_api_base_url=vision_api_base_url,
+            vlm_gateway=vlm_gateway,
         )
         self.builtin_operators = self.operator_library.operators
         self.operator_registry = self.operator_library.registry

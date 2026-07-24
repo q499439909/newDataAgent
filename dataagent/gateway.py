@@ -313,6 +313,97 @@ class ModelGateway:
             "tags": [str(tag) for tag in data.get("tags", [])],
         }, result.usage
 
+    def call_vision_model_json(
+        self,
+        *,
+        prompt: str,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+        model: str | None = None,
+        max_tokens: int = 1024,
+    ) -> dict[str, Any]:
+        """Call an OpenAI-compatible VLM (DashScope qwen) with one image.
+
+        Distinct from evaluate_image: this speaks the OpenAI chat-completions
+        protocol against settings.vision_api_base_url (not the Anthropic base_url),
+        so native VLM operators can call the vision model directly without going
+        through the Data-Juicer dj-process subprocess.
+        """
+        if not self.settings.api_key:
+            raise ModelGatewayError("BAILIAN_API_KEY is not configured")
+        route = self.routing.route(ModelTaskKind.VISION_EVALUATION)
+        model_id = model or route.model_id
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        url = (
+            f"{self.settings.vision_api_base_url.rstrip('/')}/chat/completions"
+        )
+        headers = {
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": prompt,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{encoded}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "max_tokens": max_tokens,
+        }
+        response = None
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(url, headers=headers, json=payload)
+                    response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if exc.response.status_code != 429 and exc.response.status_code < 500:
+                    detail = exc.response.text[:500]
+                    raise ModelGatewayError(
+                        f"VLM API returned HTTP {exc.response.status_code}: {detail}"
+                    ) from exc
+            except httpx.HTTPError as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(1.5 * (2**attempt))
+        if response is None or response.is_error:
+            if isinstance(last_error, httpx.HTTPStatusError):
+                detail = last_error.response.text[:500]
+                raise ModelGatewayError(
+                    f"VLM API returned HTTP {last_error.response.status_code} after retries: {detail}"
+                ) from last_error
+            raise ModelGatewayError(f"VLM API request failed after retries: {last_error}")
+        data = response.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        parsed = _extract_json(text)
+        parsed["_dataagent_gateway"] = {
+            "model": str(data.get("model") or model_id),
+            "request_id": (
+                data.get("id")
+                or response.headers.get("request-id")
+                or response.headers.get("x-request-id")
+            ),
+            "usage": data.get("usage", {}),
+        }
+        return parsed
+
 
 def fallback_task_spec(requirement: str, source_path: str) -> TaskSpec:
     lower = requirement.lower()

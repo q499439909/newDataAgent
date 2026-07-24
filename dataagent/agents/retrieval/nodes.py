@@ -9,7 +9,7 @@ from ...domain.plans import (
     RetrievalPlanVersion,
 )
 from ...domain.specs import TaskSpecVersion
-from ...operators.catalog_matching import DataJuicerCatalogMatcher
+from ...operators.catalog_matching import HybridOperatorCatalogMatcher
 from ...operators.catalog_ranking import OperatorCandidateRanker, OperatorRankingPolicy
 from ...operators.registry import OperatorRegistry
 from ..shared import WorkOrderGraphState, append_trace
@@ -79,20 +79,31 @@ def _capability_coverage(
             capability = requested_item.capability
             description = requested_item.description
             required = requested_item.required
-        evidence = [
-            CapabilityCandidateEvidence(
-                operator_version_id=item.operator_version_id,
-                provider_id=item.provider_id,
-                runtime_backend=item.runtime_backend.value,
-                lifecycle_status=item.status.value,
-                executable=item.executable,
-                score=item.score,
-                blocked_reason=item.blocked_reason,
-            )
-            for item in operator_candidates
-            if (item.capability or item.intent) == capability
-        ]
         native_tags = _NATIVE_CAPABILITY_TAGS.get(capability, frozenset())
+        evidence = []
+        for item in operator_candidates:
+            if (item.capability or item.intent) != capability:
+                continue
+            operator = operator_registry.get(item.operator_version_id)
+            if (
+                operator.provider.provider_id == "native"
+                and native_tags
+                and native_tags.issubset(operator.capability_tags)
+            ):
+                # Native policy operators are evaluated below together with their
+                # governed upstream capability requirements.
+                continue
+            evidence.append(
+                CapabilityCandidateEvidence(
+                    operator_version_id=item.operator_version_id,
+                    provider_id=item.provider_id,
+                    runtime_backend=item.runtime_backend.value,
+                    lifecycle_status=item.status.value,
+                    executable=item.executable,
+                    score=item.score,
+                    blocked_reason=item.blocked_reason,
+                )
+            )
         for operator in all_operators:
             if operator.provider.provider_id != "native" or not native_tags:
                 continue
@@ -179,7 +190,7 @@ def generate_retrieval_plan(
         }
     )
     recalled_candidates = (
-        DataJuicerCatalogMatcher(operator_registry).match(
+        HybridOperatorCatalogMatcher(operator_registry).match(
             spec.objective,
             required_capabilities=spec.required_capabilities,
             capability_requirements=spec.capability_requirements,

@@ -15,6 +15,7 @@ from dataagent.local_stack import health_payload
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
 from dataagent.domain.operators import OperatorCategory, RuntimeBackend
+from dataagent.gateway import ModelGateway
 
 
 class StartAgentRequest(BaseModel):
@@ -103,6 +104,8 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="DataAgent Control Plane", version="0.3.0")
     settings = Settings.load()
+    gateway = ModelGateway(settings)
+    vlm_gateway = gateway.call_vision_model_json if settings.api_key else None
     app.state.agent_runtime = runtime or AgentRuntime(
         settings.home / "platform",
         include_datajuicer=settings.datajuicer_enabled,
@@ -117,6 +120,7 @@ def create_app(
         remote_operator_available=bool(settings.api_key),
         vision_model=settings.vision_model,
         vision_api_base_url=settings.vision_api_base_url,
+        vlm_gateway=vlm_gateway,
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service

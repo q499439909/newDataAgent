@@ -196,6 +196,68 @@ def _runtime_for(
     return RuntimeBackend.CPU if RuntimeBackend.CPU in supported else next(iter(supported))
 
 
+def _vlm_tag_groups(
+    purpose: str,
+    task_spec: TaskSpecVersion,
+) -> list[list[str]]:
+    if purpose == "authenticity":
+        return [["authentic", "synthetic", "uncertain"]]
+    if purpose == "classification":
+        return [
+            _classification_label_ids(
+                _require_classification_contract(
+                    task_spec,
+                    capability="image_classification",
+                )
+            )
+        ]
+    if purpose == "semantic_selection":
+        return [
+            [
+                "semantic_match",
+                "semantic_mismatch",
+                "semantic_uncertain",
+            ]
+        ]
+
+    requested = {
+        item.capability for item in task_spec.capability_requirements
+    }.union(task_spec.required_capabilities)
+    groups: list[list[str]] = []
+    if "authenticity_assessment" in requested:
+        groups.extend(
+            [
+                ["authentic", "synthetic", "uncertain"],
+                [
+                    "direct_photo",
+                    "edited_photo",
+                    "screenshot",
+                    "illustration",
+                    "composite",
+                    "uncertain_capture",
+                ],
+            ]
+        )
+    if "visual_semantic_selection" in requested:
+        groups.append(
+            [
+                "semantic_match",
+                "semantic_mismatch",
+                "semantic_uncertain",
+            ]
+        )
+    if "image_classification" in requested:
+        groups.append(
+            _classification_label_ids(
+                _require_classification_contract(
+                    task_spec,
+                    capability="image_classification",
+                )
+            )
+        )
+    return groups
+
+
 def _vlm_configuration(
     operator_id: str,
     *,
@@ -206,6 +268,7 @@ def _vlm_configuration(
 ) -> tuple[dict[str, Any], PromptBinding | None]:
     parameters = dict(candidates.get(operator_id).parameters if operator_id in candidates else {})
     properties = library.registry.get(operator_id).parameter_schema.get("properties", {})
+    groups = _vlm_tag_groups(purpose, task_spec)
     if "tag_field_name" in properties:
         parameters["tag_field_name"] = {
             "authenticity": "authenticity_tags",
@@ -250,18 +313,24 @@ def _vlm_configuration(
             scope = task_spec.hard_constraints.get("authenticity_scope")
             exclusions = "; ".join(task_spec.exclusion_requirements)
             task_scope = "; ".join(str(item) for item in (scope, exclusions) if item)
-            contract = _classification_contract(task_spec)
-            allowed = _classification_label_ids(contract)
             resolved = builtin_prompt_registry().resolve(
                 "image-task-visual-tagging",
-                2,
+                3,
                 variables={
                     "task_scope_instruction": task_scope or "No additional exclusions.",
-                    "allowed_labels": ", ".join(allowed) or "none",
+                    "tag_contract_instruction": " ".join(
+                        f"Group {index}: exactly one of {', '.join(group)}."
+                        for index, group in enumerate(groups, start=1)
+                    ),
                     **_semantic_selection_variables(task_spec),
                 },
             )
         parameters["system_prompt"] = resolved.text
+        if "allowed_tags" in properties:
+            parameters["required_tag_groups"] = groups
+            parameters["allowed_tags"] = list(
+                dict.fromkeys(tag for group in groups for tag in group)
+            )
         return parameters, resolved.binding
     return parameters, None
 
@@ -300,7 +369,7 @@ def _remote_visual_operator(
     candidates: dict[str, OperatorCatalogMatch],
 ) -> str:
     eligible = [
-        operator_id
+        (operator_id, candidate)
         for operator_id, candidate in candidates.items()
         if candidate.runtime_backend == RuntimeBackend.REMOTE
         and "visual_understanding"
@@ -310,7 +379,14 @@ def _remote_visual_operator(
         raise ValueError(
             "Authenticity assessment requires an executable remote visual operator"
         )
-    return sorted(eligible)[0]
+    return sorted(
+        eligible,
+        key=lambda item: (
+            library.registry.get(item[0]).provider.provider_id != "native",
+            -item[1].score,
+            item[0],
+        ),
+    )[0][0]
 
 
 def _parameters_for_capability(
@@ -377,22 +453,33 @@ def _compile_nodes(
         if operator_id
     }
     if visual_capabilities:
-        remote_visual_operator_id = _remote_visual_operator(
-            library=library,
-            candidates=candidates,
-        )
-        if classification_operator_id:
-            classification_operator = library.registry.get(
-                classification_operator_id
+        selected_visual_providers = [
+            operator_id
+            for operator_id in (
+                authenticity_operator_id,
+                semantic_selection_operator_id,
+                classification_operator_id,
             )
-            if (
-                "visual_understanding"
-                in classification_operator.capability_tags
-                and classification_operator_id == remote_visual_operator_id
-            ):
-                shared_visual_operator_id = classification_operator_id
-        if shared_visual_operator_id is None:
-            shared_visual_operator_id = remote_visual_operator_id
+            if operator_id
+            and "visual_understanding"
+            in library.registry.get(operator_id).capability_tags
+        ]
+        if selected_visual_providers:
+            shared_visual_operator_id = sorted(
+                set(selected_visual_providers),
+                key=lambda operator_id: (
+                    library.registry.get(
+                        operator_id
+                    ).provider.provider_id
+                    != "native",
+                    operator_id,
+                ),
+            )[0]
+        else:
+            shared_visual_operator_id = _remote_visual_operator(
+                library=library,
+                candidates=candidates,
+            )
     shared_visual_emitted = False
 
     for capability, operator_id in selection:
@@ -444,7 +531,10 @@ def _compile_nodes(
         )
         parameters = _parameters_for_capability(capability, policy, task_spec)
         if operator_id in candidates:
-            parameters = dict(candidates[operator_id].parameters)
+            parameters = {
+                **candidates[operator_id].parameters,
+                **parameters,
+            }
         prompt_binding = None
         if capability == "image_classification" and "visual_understanding" in operator.capability_tags:
             parameters, prompt_binding = _vlm_configuration(

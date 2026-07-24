@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..execution import DatasetRunExecutor
 from ..evaluation import QualityEvaluator
@@ -26,6 +26,7 @@ class LocalRunWorker:
         remote_asset_timeout_seconds: int = 90,
         vision_model: str = "qwen3.7-plus",
         vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        vlm_gateway: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
@@ -47,6 +48,7 @@ class LocalRunWorker:
                 remote_asset_timeout_seconds=remote_asset_timeout_seconds,
                 vision_model=vision_model,
                 vision_api_base_url=vision_api_base_url,
+                vlm_gateway=vlm_gateway,
             ).runtime,
             quality_evaluator=QualityEvaluator(self.version_store),
         )

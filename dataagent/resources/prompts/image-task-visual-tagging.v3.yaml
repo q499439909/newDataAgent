@@ -1,0 +1,26 @@
+id: image-task-visual-tagging
+version: 3
+purpose: shared_visual_evidence
+template: |-
+  Inspect the image once and return all visual evidence required by the current task.
+  Task objective: $task_objective
+  Required visual conditions: $semantic_requirements
+  Rejecting visual conditions: $exclusion_requirements
+  Structured label context: $classification_contract
+  Task-specific authenticity and exclusion scope: $task_scope_instruction
+  Resolve references such as "the categories above" from the task objective and structured label context.
+  Judge only visible image evidence. Do not treat an absent or unclear condition as a match.
+  Return strict JSON only, without markdown or explanation, using exactly this schema: {"tags":["<governed_tag>"],"confidence":0.0,"reason":"short explanation"}.
+  $tag_contract_instruction
+  Do not return any tag that is not listed in those groups.
+required_variables:
+  - task_objective
+  - semantic_requirements
+  - exclusion_requirements
+  - classification_contract
+  - task_scope_instruction
+  - tag_contract_instruction
+output_contract:
+  type: tag_set
+  field: tags
+  governed_by: resolved_operator_parameters

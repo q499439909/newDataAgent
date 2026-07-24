@@ -4,6 +4,7 @@ import argparse
 
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.config import Settings
+from dataagent.gateway import ModelGateway
 from dataagent.worker_lease import WorkerProcessLease
 
 
@@ -13,6 +14,8 @@ def main() -> None:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     args = parser.parse_args()
     settings = Settings.load()
+    gateway = ModelGateway(settings)
+    vlm_gateway = gateway.call_vision_model_json if settings.api_key else None
     platform_home = settings.home / "platform"
     with WorkerProcessLease(platform_home / "worker.lock.json"):
         worker = LocalRunWorker(
@@ -25,6 +28,7 @@ def main() -> None:
             remote_asset_timeout_seconds=settings.remote_asset_timeout_seconds,
             vision_model=settings.vision_model,
             vision_api_base_url=settings.vision_api_base_url,
+            vlm_gateway=vlm_gateway,
         )
         if args.once:
             worker.process_next()

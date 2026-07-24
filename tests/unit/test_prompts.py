@@ -41,6 +41,29 @@ def test_builtin_prompt_registry_resolves_shared_visual_tagging_prompt() -> None
     assert resolved.output_contract["type"] == "tag_set"
 
 
+def test_shared_visual_tagging_v3_uses_task_specific_tag_groups() -> None:
+    resolved = builtin_prompt_registry().resolve(
+        "image-task-visual-tagging",
+        3,
+        variables={
+            "task_objective": "Keep authentic black-clothing photos.",
+            "semantic_requirements": "The person wears black clothing.",
+            "exclusion_requirements": "Exclude synthetic images.",
+            "classification_contract": [],
+            "task_scope_instruction": "Exclude edited photos.",
+            "tag_contract_instruction": (
+                "Group 1: exactly one of authentic, synthetic, uncertain. "
+                "Group 2: exactly one of semantic_match, semantic_mismatch, "
+                "semantic_uncertain."
+            ),
+        },
+    )
+
+    assert "Group 1: exactly one of authentic" in resolved.text
+    assert "semantic_match" in resolved.text
+    assert resolved.binding.template_version == 3
+
+
 def test_semantic_selection_v2_keeps_objective_and_label_context() -> None:
     resolved = builtin_prompt_registry().resolve(
         "image-semantic-selection",

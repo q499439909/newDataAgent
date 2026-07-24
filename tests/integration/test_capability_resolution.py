@@ -76,6 +76,29 @@ def test_resolution_retry_enables_remote_and_reenters_retrieval() -> None:
     )
     config = {"configurable": {"thread_id": "thread_retry"}}
     graph.invoke(_state("把猫和狗的图片分类"), config)
+    graph.invoke(
+        Command(
+            resume={
+                "action": "edit_spec",
+                "task_spec_patch": {
+                    "classification": {
+                        "mode": "closed_set",
+                        "labels": [
+                            {"id": "cat", "display_name": "猫"},
+                            {"id": "dog", "display_name": "狗"},
+                        ],
+                        "mixed_label": "mixed",
+                        "unknown_label": "unknown",
+                    },
+                    "preferences": {
+                        "mixed_policy": "review",
+                        "unknown_policy": "review",
+                    },
+                },
+            }
+        ),
+        config,
+    )
 
     blocked = graph.invoke(Command(resume={"approved": True}), config)
 
@@ -103,7 +126,7 @@ def test_resolution_retry_enables_remote_and_reenters_retrieval() -> None:
         item["capability"]: item for item in recovered["capability_coverage"]
     }
     assert selected["image_classification"]["selected_operator_version_id"] == (
-        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
+        "native.remote_vlm:1"
     )
 
 

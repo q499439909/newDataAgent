@@ -22,8 +22,9 @@ _EXPECTED_OUTPUTS: dict[str, frozenset[str]] = {
     "perceptual_deduplication": frozenset({"ProviderDecision"}),
     "image_quality": frozenset({"ProviderDecision", "EnrichedImageAsset"}),
     "authenticity_assessment": frozenset(
-        {"ImageAuthenticityAssessment", "ProviderDecision"}
+        {"ImageAuthenticityAssessment", "ImageTagSet", "ProviderDecision"}
     ),
+    "visual_semantic_selection": frozenset({"ImageTagSet", "ProviderDecision"}),
     "segmentation": frozenset({"ImageSegmentation", "ProviderDecision"}),
     "watermark_detection": frozenset(
         {"WatermarkAssessment", "ProviderDecision"}
@@ -92,6 +93,8 @@ class OperatorCandidateRanker:
             blocked_reason = "Deprecated operators cannot be selected"
         elif operator.status == OperatorStatus.DRAFT and not policy.allow_draft_candidates:
             blocked_reason = "Draft candidate execution is disabled"
+        elif io_score < 0:
+            blocked_reason = io_reason
         reasons = (
             f"runtime:{backend.value}:{'available' if runtime_available else 'unavailable'}",
             f"lifecycle:{operator.status.value}",

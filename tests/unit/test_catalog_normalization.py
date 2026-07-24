@@ -576,7 +576,14 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
         CapabilityCoverageStatus.COVERED
     )
     assert coverage["image_classification"]["selected_operator_version_id"] == (
-        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
+        "native.remote_vlm:1"
+    )
+    classification_candidates = {
+        item["operator_version_id"]
+        for item in coverage["image_classification"]["candidates"]
+    }
+    assert "datajuicer.image_tagging_vlm_mapper.remote_api:2" in (
+        classification_candidates
     )
     assert coverage["authenticity_assessment"]["status"] == (
         CapabilityCoverageStatus.COVERED
@@ -647,31 +654,19 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
     remote_nodes = [
         node
         for node in balanced.nodes
-        if node.operator_version_id
-        == "datajuicer.image_tagging_vlm_mapper.remote_api:2"
+        if node.operator_version_id == "native.remote_vlm:1"
     ]
     assert len(remote_nodes) == 1
-    assert all(node.parameters["is_api_model"] is True for node in remote_nodes)
-    assert all(node.parameters["api_or_hf_model"] == "qwen3.7-plus" for node in remote_nodes)
-    assert all(node.parameters["api_endpoint"] == "/chat/completions" for node in remote_nodes)
-    assert all(
-        node.parameters["model_params"]["base_url"]
-        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        for node in remote_nodes
-    )
-    assert all(node.parameters["accelerator"] == "cpu" for node in remote_nodes)
-    assert all(
-        node.parameters["sampling_params"]
-        == {"temperature": 0, "response_format": {"type": "json_object"}}
-        for node in remote_nodes
-    )
     assert all(
         '{"tags":[' in node.parameters["system_prompt"]
         and "strict JSON only" in node.parameters["system_prompt"]
         for node in remote_nodes
     )
     assert remote_nodes[0].parameters["tag_field_name"] == "visual_tags"
+    assert "authentic" in remote_nodes[0].parameters["allowed_tags"]
+    assert "cat" in remote_nodes[0].parameters["allowed_tags"]
     assert remote_nodes[0].prompt_binding.template_id == "image-task-visual-tagging"
+    assert remote_nodes[0].prompt_binding.template_version == 3
     assert "authenticity" in remote_nodes[0].parameters["system_prompt"]
     assert "cat, dog, mixed, unknown" in remote_nodes[0].parameters["system_prompt"]
     assert all(node.prompt_binding.template_sha256 for node in remote_nodes)
@@ -790,9 +785,7 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
         for pipeline in pipelines
     )
     visual_node = pipelines[0].nodes[1]
-    assert visual_node.operator_version_id == (
-        "datajuicer.image_tagging_vlm_mapper.remote_api:2"
-    )
+    assert visual_node.operator_version_id == "native.remote_vlm:1"
     assert visual_node.prompt_binding is not None
     assert visual_node.prompt_binding.template_id == "image-semantic-selection"
     assert visual_node.prompt_binding.template_version == 2

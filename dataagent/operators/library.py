@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 from .builtin import (
     builtin_image_operators,
     builtin_model_operators,
     builtin_semantic_operators,
     builtin_utility_operators,
+    builtin_vlm_operators,
 )
 from .models import MockModelBackend, ModelManager
 from .providers import (
@@ -41,6 +43,7 @@ def build_operator_library(
     remote_asset_timeout_seconds: int = 90,
     vision_model: str = "qwen3.7-plus",
     vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    vlm_gateway: Any = None,
 ) -> OperatorLibrary:
     model_manager = ModelManager(
         (MockModelBackend(),), allow_download=allow_model_download
@@ -50,6 +53,7 @@ def build_operator_library(
         *builtin_semantic_operators(),
         *builtin_utility_operators(),
         *builtin_model_operators(model_manager),
+        *builtin_vlm_operators(vlm_gateway),
     )
     operators = list(native_operators)
     providers = ProviderRegistry((NativeOperatorProvider(native_operators),))
