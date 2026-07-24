@@ -539,7 +539,9 @@ def test_prepared_provider_result_preserves_upstream_asset_state() -> None:
     assert result.labels == {"decoded": True, "provider_called": True}
 
 
-def test_datajuicer_executor_runs_isolated_jsonl_process(tmp_path) -> None:
+def test_provider_available_datajuicer_proxy_runs_isolated_jsonl_process(
+    tmp_path,
+) -> None:
     fake_process = tmp_path / "fake_dj_process.py"
     fake_process.write_text(
         """
@@ -614,6 +616,25 @@ else:
     assert rejected.result is not None
     assert rejected.result.decision == "reject"
     assert rejected.result.reason_codes == ["DATAJUICER_FILTERED_OUT"]
+
+    proxies = build_datajuicer_proxy_operators(provider, provider.discover())
+    proxy = next(
+        item
+        for item in proxies
+        if item.spec.id == "datajuicer.image_aesthetic_filter:1"
+    )
+    assert proxy.spec.status == OperatorStatus.PROVIDER_AVAILABLE
+
+    proxy_result = OperatorRuntime((proxy,)).execute(
+        operator_version_id=proxy.spec.id,
+        context=request.context,
+        input_data=request.input_data,
+        parameters={"threshold": 0.8},
+        runtime_backend=RuntimeBackend.CPU,
+    )
+
+    assert proxy_result.decision == "continue"
+    assert proxy_result.labels["datajuicer_output"]["fake_score"] == 0.8
 
 
 def test_datajuicer_executor_batches_multiple_images_in_one_process(tmp_path) -> None:
