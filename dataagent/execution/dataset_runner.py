@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +278,307 @@ class DatasetRunExecutor:
                 f"{issue.output_uri or issue.source_uri}"
             )
 
+    def _parallel_worker_limit(self, ordered_nodes: list[Any]) -> int:
+        if self.worker_concurrency < 2:
+            return 1
+        remote_limits: list[int] = []
+        for node in ordered_nodes:
+            operator = self.operator_runtime.get(node.operator_version_id)
+            if (
+                operator.spec.execution_scope != ExecutionScope.ASSET
+                or not bool(getattr(operator, "parallel_safe", False))
+                or bool(getattr(operator, "supports_dataset_batch", False))
+            ):
+                return 1
+            if node.runtime_backend.value == "remote":
+                remote_limits.extend(
+                    profile.concurrency
+                    for profile in operator.spec.supported_runtime_profiles
+                    if profile.backend == node.runtime_backend
+                )
+        return max(
+            1,
+            min(
+                self.worker_concurrency,
+                *(remote_limits or [self.worker_concurrency]),
+            ),
+        )
+
+    def _execute_asset(
+        self,
+        *,
+        run: dict[str, Any],
+        sequence: int,
+        planned_source: dict[str, Any],
+        ordered_nodes: list[Any],
+        staging_files: Path,
+        context: OperatorContext,
+    ) -> str:
+        run_id = run["id"]
+        source = Path(planned_source["source_uri"])
+        relative_path = Path(planned_source["output_relative_path"])
+        source_hash = _sha256(source)
+        if source_hash != planned_source["source_sha256"]:
+            raise RuntimeError("Source image changed after the run plan was frozen")
+        current = OperatorInput(source_path=str(source), current_path=str(source))
+        decision = "keep"
+        reason_codes: list[str] = []
+        stopped_at: int | None = None
+        for node_index, node in enumerate(ordered_nodes):
+            status = self.run_store.get(run_id)["status"]
+            if status in {"PAUSING", "CANCELLING"}:
+                return status
+            started_at = time.perf_counter()
+            node_error: str | None = None
+            node_status = "completed"
+            node_decision = "continue"
+            node_reason_codes: list[str] = []
+            operator_provider_id = self.operator_runtime.get(
+                node.operator_version_id
+            ).spec.provider.provider_id
+            self.run_store.add_event(
+                run_id,
+                "asset_node_started",
+                {
+                    "asset_sequence": sequence,
+                    "source_uri": str(source),
+                    "operator_version_id": node.operator_version_id,
+                    "runtime_backend": str(node.runtime_backend),
+                    "parameters": _redact_parameters(node.parameters),
+                },
+                node_id=node.id,
+                provider_id=operator_provider_id,
+            )
+            try:
+                context.shared["active_node_id"] = node.id
+                result = self.operator_runtime.execute(
+                    operator_version_id=node.operator_version_id,
+                    context=context,
+                    input_data=current,
+                    parameters=node.parameters,
+                    runtime_backend=node.runtime_backend,
+                )
+                node_decision = result.decision
+                node_reason_codes = list(result.reason_codes)
+                current = OperatorInput(
+                    source_path=current.source_path,
+                    current_path=result.output_path or current.current_path,
+                    metrics=result.metrics,
+                    labels=result.labels,
+                    artifacts=result.artifacts,
+                    annotations=result.annotations,
+                    embeddings=result.embeddings,
+                )
+                reason_codes.extend(result.reason_codes)
+                if result.decision == "reject":
+                    decision = "reject"
+                    stopped_at = node_index
+            except Exception as exc:
+                node_status = "failed"
+                node_decision = "failed"
+                node_error = str(exc)
+                node_reason_codes = [f"OPERATOR_ERROR:{type(exc).__name__}"]
+                decision = "failed"
+                reason_codes.extend(node_reason_codes)
+                current = current.model_copy(
+                    update={
+                        "labels": {
+                            **current.labels,
+                            "execution_error": str(exc),
+                        }
+                    }
+                )
+                stopped_at = node_index
+            duration_ms = round((time.perf_counter() - started_at) * 1000)
+            self.run_store.add_node_result(
+                run_id,
+                {
+                    "asset_sequence": sequence,
+                    "source_uri": str(source),
+                    "node_id": node.id,
+                    "operator_version_id": node.operator_version_id,
+                    "status": node_status,
+                    "decision": node_decision,
+                    "reason_codes": node_reason_codes,
+                    "metrics": current.metrics,
+                    "labels": current.labels,
+                    "error": node_error,
+                    "duration_ms": duration_ms,
+                },
+            )
+            self.run_store.add_event(
+                run_id,
+                "asset_node_completed",
+                {
+                    "asset_sequence": sequence,
+                    "source_uri": str(source),
+                    "operator_version_id": node.operator_version_id,
+                    "status": node_status,
+                    "decision": node_decision,
+                    "reason_codes": node_reason_codes,
+                    "error": node_error,
+                    "duration_ms": duration_ms,
+                },
+                node_id=node.id,
+                provider_id=operator_provider_id,
+            )
+            if stopped_at is not None:
+                break
+
+        if stopped_at is not None:
+            for node in ordered_nodes[stopped_at + 1 :]:
+                self.run_store.add_node_result(
+                    run_id,
+                    {
+                        "asset_sequence": sequence,
+                        "source_uri": str(source),
+                        "node_id": node.id,
+                        "operator_version_id": node.operator_version_id,
+                        "status": "skipped",
+                        "decision": "not_run",
+                        "reason_codes": ["UPSTREAM_REJECTED_OR_FAILED"],
+                        "metrics": {},
+                        "labels": {},
+                        "duration_ms": 0,
+                    },
+                )
+
+        output_relative_path: str | None = None
+        output_hash: str | None = None
+        if decision == "keep":
+            source_output = Path(current.current_path).resolve()
+            requested_relative_path = current.labels.get("output_relative_path")
+            if requested_relative_path:
+                requested = Path(str(requested_relative_path))
+                if requested.is_absolute() or ".." in requested.parts:
+                    raise ValueError(
+                        "Operator produced an unsafe output_relative_path"
+                    )
+                relative_path = requested
+            destination = staging_files / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_output, destination)
+            output_relative_path = relative_path.as_posix()
+            output_hash = _sha256(destination)
+        if _sha256(source) != source_hash:
+            raise RuntimeError(f"Source image changed during execution: {source}")
+        self.run_store.add_item(
+            run_id,
+            {
+                "sequence": sequence,
+                "source_uri": str(source),
+                "source_sha256": source_hash,
+                "output_relative_path": output_relative_path,
+                "output_sha256": output_hash,
+                "decision": decision,
+                "reason_codes": reason_codes,
+                "metrics": current.metrics,
+                "labels": self._checkpoint_labels(current),
+            },
+        )
+        progress = self.run_store.get(run_id)["progress"]
+        self.run_store.add_event(
+            run_id,
+            "asset_completed",
+            {
+                "sequence": sequence,
+                "decision": decision,
+                "source_uri": str(source),
+                "reason_codes": reason_codes,
+                "retryable": decision == "failed",
+            },
+            progress=progress,
+        )
+        return "completed"
+
+    def _parallel_asset_context(
+        self,
+        run: dict[str, Any],
+        artifact_root: Path,
+    ) -> OperatorContext:
+        context: OperatorContext
+
+        def cancel_check() -> bool:
+            return self.run_store.get(run["id"])["status"] in {
+                "CANCELLING",
+                "PAUSING",
+            }
+
+        def event_sink(event_type: str, details: dict[str, Any]) -> None:
+            payload = dict(details)
+            self.run_store.add_event(
+                run["id"],
+                event_type,
+                payload,
+                node_id=str(context.shared.get("active_node_id") or "") or None,
+                provider_id=payload.get("provider_id"),
+            )
+
+        context = OperatorContext(
+            run_id=run["id"],
+            work_order_id=run["work_order_id"],
+            owner_id=run["owner_id"],
+            shared={
+                "seen_dhash": set(),
+                "artifact_root": artifact_root,
+                "cancel_check": cancel_check,
+                "event_sink": event_sink,
+            },
+        )
+        return context
+
+    def _execute_assets_parallel(
+        self,
+        *,
+        run: dict[str, Any],
+        planned: list[dict[str, Any]],
+        existing: list[dict[str, Any]],
+        ordered_nodes: list[Any],
+        staging_files: Path,
+        artifact_root: Path,
+        worker_count: int,
+    ) -> str:
+        existing_by_sequence = {item["sequence"]: item for item in existing}
+        pending: list[tuple[int, dict[str, Any]]] = []
+        for sequence, planned_source in enumerate(planned):
+            checkpoint = existing_by_sequence.get(sequence)
+            if checkpoint is not None:
+                if (
+                    checkpoint["source_uri"] != planned_source["source_uri"]
+                    or checkpoint["source_sha256"]
+                    != planned_source["source_sha256"]
+                ):
+                    raise RuntimeError(
+                        "Source plan changed after the run was checkpointed"
+                    )
+                continue
+            pending.append((sequence, planned_source))
+        if not pending:
+            return "completed"
+
+        control_status = "completed"
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="dataagent-asset",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    self._execute_asset,
+                    run=run,
+                    sequence=sequence,
+                    planned_source=planned_source,
+                    ordered_nodes=ordered_nodes,
+                    staging_files=staging_files,
+                    context=self._parallel_asset_context(run, artifact_root),
+                ): sequence
+                for sequence, planned_source in pending
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result in {"PAUSING", "CANCELLING"}:
+                    control_status = result
+        return control_status
+
     def _execute(self, run: dict[str, Any]) -> DatasetVersion | None:
         owner_id = run["owner_id"]
         pipeline = PipelineVersion.model_validate(
@@ -425,9 +727,42 @@ class DatasetRunExecutor:
                 node_id=node.id,
                 provider_id=operator.spec.provider.provider_id,
             )
+        parallel_workers = min(
+            len(planned),
+            self._parallel_worker_limit(ordered_nodes),
+        )
+        if parallel_workers > 1:
+            self.run_store.add_event(
+                run["id"],
+                "asset_parallelism_selected",
+                {
+                    "requested_concurrency": self.worker_concurrency,
+                    "effective_concurrency": parallel_workers,
+                    "asset_count": len(planned),
+                },
+            )
+            control_status = self._execute_assets_parallel(
+                run=run,
+                planned=planned,
+                existing=existing,
+                ordered_nodes=ordered_nodes,
+                staging_files=staging_files,
+                artifact_root=self.home / "runs" / run["id"] / "artifacts",
+                worker_count=parallel_workers,
+            )
+            if control_status == "PAUSING":
+                self.run_store.mark_paused(run["id"])
+                self.run_store.add_event(run["id"], "run_paused")
+                return None
+            if control_status == "CANCELLING":
+                self.run_store.mark_cancelled(run["id"])
+                self.run_store.add_event(run["id"], "run_cancelled")
+                return None
+            completed = self.run_store.items(run["id"])
+            self._validate_publication_outcomes(run, completed)
+            return self._publish(run, spec, pipeline, roots, completed)
         for sequence, planned_source in enumerate(planned):
             source = Path(planned_source["source_uri"])
-            relative_path = Path(planned_source["output_relative_path"])
             source_hash = _sha256(source)
             if source_hash != planned_source["source_sha256"]:
                 raise RuntimeError("Source image changed after the run plan was frozen")
@@ -447,163 +782,22 @@ class DatasetRunExecutor:
                 self.run_store.add_event(run["id"], "run_cancelled")
                 return None
 
-            current = OperatorInput(source_path=str(source), current_path=str(source))
-            decision = "keep"
-            reason_codes: list[str] = []
-            stopped_at: int | None = None
-            for node_index, node in enumerate(ordered_nodes):
-                started_at = time.perf_counter()
-                node_error: str | None = None
-                node_status = "completed"
-                node_decision = "continue"
-                node_reason_codes: list[str] = []
-                operator_provider_id = self.operator_runtime.get(
-                    node.operator_version_id
-                ).spec.provider.provider_id
-                self.run_store.add_event(
-                    run["id"],
-                    "asset_node_started",
-                    {
-                        "asset_sequence": sequence,
-                        "source_uri": str(source),
-                        "operator_version_id": node.operator_version_id,
-                        "runtime_backend": str(node.runtime_backend),
-                        "parameters": _redact_parameters(node.parameters),
-                    },
-                    node_id=node.id,
-                    provider_id=operator_provider_id,
-                )
-                try:
-                    context.shared["active_node_id"] = node.id
-                    result = self.operator_runtime.execute(
-                        operator_version_id=node.operator_version_id,
-                        context=context,
-                        input_data=current,
-                        parameters=node.parameters,
-                        runtime_backend=node.runtime_backend,
-                    )
-                    node_decision = result.decision
-                    node_reason_codes = list(result.reason_codes)
-                    current = OperatorInput(
-                        source_path=current.source_path,
-                        current_path=result.output_path or current.current_path,
-                        metrics=result.metrics,
-                        labels=result.labels,
-                        artifacts=result.artifacts,
-                        annotations=result.annotations,
-                        embeddings=result.embeddings,
-                    )
-                    reason_codes.extend(result.reason_codes)
-                    if result.decision == "reject":
-                        decision = "reject"
-                        stopped_at = node_index
-                except Exception as exc:
-                    node_status = "failed"
-                    node_decision = "failed"
-                    node_error = str(exc)
-                    node_reason_codes = [f"OPERATOR_ERROR:{type(exc).__name__}"]
-                    decision = "failed"
-                    reason_codes.extend(node_reason_codes)
-                    current = current.model_copy(
-                        update={"labels": {**current.labels, "execution_error": str(exc)}}
-                    )
-                    stopped_at = node_index
-                self.run_store.add_node_result(
-                    run["id"],
-                    {
-                        "asset_sequence": sequence,
-                        "source_uri": str(source),
-                        "node_id": node.id,
-                        "operator_version_id": node.operator_version_id,
-                        "status": node_status,
-                        "decision": node_decision,
-                        "reason_codes": node_reason_codes,
-                        "metrics": current.metrics,
-                        "labels": current.labels,
-                        "error": node_error,
-                        "duration_ms": round((time.perf_counter() - started_at) * 1000),
-                    },
-                )
-                self.run_store.add_event(
-                    run["id"],
-                    "asset_node_completed",
-                    {
-                        "asset_sequence": sequence,
-                        "source_uri": str(source),
-                        "operator_version_id": node.operator_version_id,
-                        "status": node_status,
-                        "decision": node_decision,
-                        "reason_codes": node_reason_codes,
-                        "error": node_error,
-                        "duration_ms": round((time.perf_counter() - started_at) * 1000),
-                    },
-                    node_id=node.id,
-                    provider_id=operator_provider_id,
-                )
-                if stopped_at is not None:
-                    break
-
-            if stopped_at is not None:
-                for node in ordered_nodes[stopped_at + 1 :]:
-                    self.run_store.add_node_result(
-                        run["id"],
-                        {
-                            "asset_sequence": sequence,
-                            "source_uri": str(source),
-                            "node_id": node.id,
-                            "operator_version_id": node.operator_version_id,
-                            "status": "skipped",
-                            "decision": "not_run",
-                            "reason_codes": ["UPSTREAM_REJECTED_OR_FAILED"],
-                            "metrics": {},
-                            "labels": {},
-                            "duration_ms": 0,
-                        },
-                    )
-
-            output_relative_path: str | None = None
-            output_hash: str | None = None
-            if decision == "keep":
-                source_output = Path(current.current_path).resolve()
-                requested_relative_path = current.labels.get("output_relative_path")
-                if requested_relative_path:
-                    requested = Path(str(requested_relative_path))
-                    if requested.is_absolute() or ".." in requested.parts:
-                        raise ValueError("Operator produced an unsafe output_relative_path")
-                    relative_path = requested
-                destination = staging_files / relative_path
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_output, destination)
-                output_relative_path = relative_path.as_posix()
-                output_hash = _sha256(destination)
-            if _sha256(source) != source_hash:
-                raise RuntimeError(f"Source image changed during execution: {source}")
-            self.run_store.add_item(
-                run["id"],
-                {
-                    "sequence": sequence,
-                    "source_uri": str(source),
-                    "source_sha256": source_hash,
-                    "output_relative_path": output_relative_path,
-                    "output_sha256": output_hash,
-                    "decision": decision,
-                    "reason_codes": reason_codes,
-                    "metrics": current.metrics,
-                    "labels": self._checkpoint_labels(current),
-                },
+            control_status = self._execute_asset(
+                run=run,
+                sequence=sequence,
+                planned_source=planned_source,
+                ordered_nodes=ordered_nodes,
+                staging_files=staging_files,
+                context=context,
             )
-            self.run_store.add_event(
-                run["id"],
-                "asset_completed",
-                {
-                    "sequence": sequence,
-                    "decision": decision,
-                    "source_uri": str(source),
-                    "reason_codes": reason_codes,
-                    "retryable": decision == "failed",
-                },
-                progress=sequence + 1,
-            )
+            if control_status == "PAUSING":
+                self.run_store.mark_paused(run["id"])
+                self.run_store.add_event(run["id"], "run_paused")
+                return None
+            if control_status == "CANCELLING":
+                self.run_store.mark_cancelled(run["id"])
+                self.run_store.add_event(run["id"], "run_cancelled")
+                return None
 
         completed = self.run_store.items(run["id"])
         self._validate_publication_outcomes(run, completed)

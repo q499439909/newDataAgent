@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
     select,
     text,
@@ -203,10 +205,29 @@ class SqliteDatabase:
             f"sqlite:///{self.path.as_posix()}",
             connect_args={"check_same_thread": False},
         )
+        # WAL lets concurrent readers coexist with a single writer; busy_timeout
+        # makes a contending writer wait instead of failing with "database is
+        # locked". Both are applied per-connection so worker threads stay safe.
+        @event.listens_for(self.engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
         self.session_factory = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
+        # Serializes writers across threads within this process so the count
+        # recompute in RunStore.add_item and similar read-modify-write blocks
+        # cannot race. WAL allows readers to proceed without the lock.
+        self._write_lock = threading.RLock()
         self._migrate_run_lineage()
         self._install_worker_claim_guard()
+
+    @property
+    def write_lock(self) -> threading.RLock:
+        return self._write_lock
 
     def session(self) -> Session:
         return self.session_factory()
@@ -519,7 +540,7 @@ class RunStore:
             return [self._source_dict(row) for row in rows]
 
     def add_item(self, run_id: str, item: dict[str, Any]) -> None:
-        with self.database.session() as session, session.begin():
+        with self.database.write_lock, self.database.session() as session, session.begin():
             session.add(
                 RunItemRow(
                     run_id=run_id,
@@ -552,7 +573,7 @@ class RunStore:
             return [self._item_dict(row) for row in rows]
 
     def add_node_result(self, run_id: str, result: dict[str, Any]) -> None:
-        with self.database.session() as session, session.begin():
+        with self.database.write_lock, self.database.session() as session, session.begin():
             session.add(
                 RunNodeResultRow(
                     run_id=run_id,
@@ -597,7 +618,7 @@ class RunStore:
         message: str = "",
         progress: int | None = None,
     ) -> dict[str, Any]:
-        with self.database.session() as session, session.begin():
+        with self.database.write_lock, self.database.session() as session, session.begin():
             if session.get(RunRow, run_id) is None:
                 raise KeyError(f"Run not found: {run_id}")
             row = RunEventRow(
@@ -695,7 +716,7 @@ class RunStore:
 
     def _update(self, run_id: str, **values: Any) -> None:
         values["updated_at"] = datetime.now(UTC)
-        with self.database.session() as session, session.begin():
+        with self.database.write_lock, self.database.session() as session, session.begin():
             result = session.execute(update(RunRow).where(RunRow.id == run_id).values(**values))
             if result.rowcount != 1:
                 raise KeyError(f"Run not found: {run_id}")
