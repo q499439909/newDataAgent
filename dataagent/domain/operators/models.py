@@ -22,6 +22,7 @@ class OperatorCategory(StrEnum):
 
 class OperatorStatus(StrEnum):
     DRAFT = "DRAFT"
+    PROVIDER_AVAILABLE = "PROVIDER_AVAILABLE"
     EVALUATED = "EVALUATED"
     PERSONAL_RELEASE = "PERSONAL_RELEASE"
     PUBLIC_RELEASE = "PUBLIC_RELEASE"

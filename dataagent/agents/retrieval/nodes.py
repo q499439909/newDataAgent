@@ -26,6 +26,15 @@ _NATIVE_CAPABILITY_TAGS: dict[str, frozenset[str]] = {
     "manifest": frozenset({"manifest"}),
 }
 
+_COVERAGE_LIFECYCLE_ORDER = {
+    OperatorStatus.PUBLIC_RELEASE.value: 0,
+    OperatorStatus.PERSONAL_RELEASE.value: 1,
+    OperatorStatus.EVALUATED.value: 2,
+    OperatorStatus.PROVIDER_AVAILABLE.value: 3,
+    OperatorStatus.DRAFT.value: 4,
+    OperatorStatus.DEPRECATED.value: 5,
+}
+
 
 def _capability_coverage(
     spec: TaskSpecVersion,
@@ -145,7 +154,14 @@ def _capability_coverage(
                     ),
                 )
             )
-        evidence.sort(key=lambda item: (not item.executable, -item.score, item.operator_version_id))
+        evidence.sort(
+            key=lambda item: (
+                not item.executable,
+                _COVERAGE_LIFECYCLE_ORDER.get(item.lifecycle_status, 99),
+                -item.score,
+                item.operator_version_id,
+            )
+        )
         selected = next((item for item in evidence if item.executable), None)
         status = (
             CapabilityCoverageStatus.COVERED

@@ -11,8 +11,18 @@ _LIFECYCLE_SCORES = {
     OperatorStatus.PUBLIC_RELEASE: 45,
     OperatorStatus.PERSONAL_RELEASE: 40,
     OperatorStatus.EVALUATED: 25,
+    OperatorStatus.PROVIDER_AVAILABLE: 20,
     OperatorStatus.DRAFT: 5,
     OperatorStatus.DEPRECATED: -200,
+}
+
+_LIFECYCLE_ORDER = {
+    OperatorStatus.PUBLIC_RELEASE: 0,
+    OperatorStatus.PERSONAL_RELEASE: 1,
+    OperatorStatus.EVALUATED: 2,
+    OperatorStatus.PROVIDER_AVAILABLE: 3,
+    OperatorStatus.DRAFT: 4,
+    OperatorStatus.DEPRECATED: 5,
 }
 
 _EXPECTED_OUTPUTS: dict[str, frozenset[str]] = {
@@ -58,6 +68,7 @@ class OperatorCandidateRanker:
                 ranked,
                 key=lambda item: (
                     not item.executable,
+                    _LIFECYCLE_ORDER[item.status],
                     -item.score,
                     item.operator_version_id,
                 ),

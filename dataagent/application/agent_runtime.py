@@ -792,6 +792,7 @@ class AgentRuntime:
         self, pipeline: PipelineVersion
     ) -> dict[str, Any]:
         released = {
+            OperatorStatus.PROVIDER_AVAILABLE,
             OperatorStatus.PERSONAL_RELEASE,
             OperatorStatus.PUBLIC_RELEASE,
         }

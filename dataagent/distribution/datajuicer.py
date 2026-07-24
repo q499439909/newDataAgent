@@ -263,22 +263,22 @@ def _capability_entry(
 
     admitted_refs = {item.ref for item in DATAJUICER_ADMISSIONS}
     admitted = descriptor.provider_operator_ref in admitted_refs
-    remote_vlm = descriptor.provider_operator_ref == "image_tagging_vlm_mapper"
-    governance_status = "PERSONAL_RELEASE" if admitted else "DRAFT"
-    governed_backends: list[str] = []
+    governance_status = "PERSONAL_RELEASE" if admitted else "PROVIDER_AVAILABLE"
+    callable_profiles: list[str] = []
     cpu_pack_installed = installed_profile in {"auto", "cpu", "linux-gpu"}
     remote_pack_installed = installed_profile in {"auto", "remote", "linux-gpu"}
-    if admitted and cpu_pack_installed and "local_cpu" in machine_compatible:
-        governed_backends.append("local_cpu")
-    if remote_vlm and remote_pack_installed and "remote_api" in machine_compatible:
-        governed_backends.append("remote_api")
+    gpu_pack_installed = installed_profile == "linux-gpu"
+    if cpu_pack_installed and "local_cpu" in machine_compatible:
+        callable_profiles.append("local_cpu")
+    if remote_pack_installed and "remote_api" in machine_compatible:
+        callable_profiles.append("remote_api")
+    if gpu_pack_installed and "linux_gpu_worker" in machine_compatible:
+        callable_profiles.append("linux_gpu_worker")
 
     blocked_reasons: list[str] = []
-    if not admitted and not remote_vlm:
-        blocked_reasons.append("PRODUCTION_ADMISSION_REQUIRED")
-    if admitted and not cpu_pack_installed:
+    if "local_cpu" in runtime_candidates and not cpu_pack_installed:
         blocked_reasons.append("CPU_PROVIDER_PACK_REQUIRED")
-    if remote_vlm and not remote_pack_installed:
+    if "remote_api" in runtime_candidates and not remote_pack_installed:
         blocked_reasons.append("REMOTE_PROVIDER_PACK_REQUIRED")
     if "remote_api" in runtime_candidates and not machine["remote_api_credentials_configured"]:
         blocked_reasons.append("REMOTE_API_CREDENTIALS_REQUIRED")
@@ -296,7 +296,8 @@ def _capability_entry(
         "runtime_candidates": runtime_candidates,
         "machine_compatible_profiles": machine_compatible,
         "governance_status": governance_status,
-        "governed_executable_profiles": governed_backends,
+        "dataagent_verified": admitted,
+        "callable_profiles": callable_profiles,
         "dependency_groups": dependency_groups,
         "blocked_reasons": list(dict.fromkeys(blocked_reasons)),
         "source_digest": descriptor.source_digest,
@@ -512,17 +513,20 @@ class DataJuicerInstaller:
             "linux_gpu_candidates": sum(
                 "linux_gpu_worker" in item["runtime_candidates"] for item in operators
             ),
-            "governed_executable_now": sum(
-                bool(item["governed_executable_profiles"]) for item in operators
+            "provider_callable_now": sum(
+                bool(item["callable_profiles"]) for item in operators
             ),
-            "personal_release": sum(
-                item["governance_status"] == "PERSONAL_RELEASE" for item in operators
+            "dataagent_verified": sum(
+                bool(item["dataagent_verified"]) for item in operators
             ),
-            "draft": sum(item["governance_status"] == "DRAFT" for item in operators),
+            "provider_available": sum(
+                item["governance_status"] == "PROVIDER_AVAILABLE"
+                for item in operators
+            ),
         }
         install_artifacts = _install_artifacts(provider_home)
         report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": _utc_now(),
             "provider_id": "datajuicer",
             "provider_version": provider_version,

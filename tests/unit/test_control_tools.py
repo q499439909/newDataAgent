@@ -335,13 +335,13 @@ def test_pipeline_artifact_validation_reports_operator_and_parameter_blockers() 
     assert invalid_result.data["blockers"][0]["code"] == "PARAMETER_SCHEMA_VIOLATION"
 
 
-def test_pipeline_artifact_validation_never_promotes_draft_operator() -> None:
+def test_pipeline_artifact_validation_accepts_provider_available_operator() -> None:
     library = build_operator_library(include_datajuicer=False)
     draft = library.registry.get("builtin.quality_filter:1").model_copy(
         update={
             "id": "datajuicer.image_quality_filter.remote_api:1",
             "family_id": "datajuicer.image_quality_filter.remote_api",
-            "status": OperatorStatus.DRAFT,
+            "status": OperatorStatus.PROVIDER_AVAILABLE,
         }
     )
     context = _context(operator_registry=OperatorRegistry((draft,)))
@@ -362,7 +362,7 @@ def test_pipeline_artifact_validation_never_promotes_draft_operator() -> None:
         {"content": compiled.data["content"]},
     )
 
-    assert result.ok is False
-    assert result.data["production_eligible"] is False
-    assert result.data["operators"][0]["status"] == "DRAFT"
-    assert result.data["blockers"][0]["code"] == "OPERATOR_NOT_RELEASED"
+    assert result.ok is True
+    assert result.data["production_eligible"] is True
+    assert result.data["operators"][0]["status"] == "PROVIDER_AVAILABLE"
+    assert result.data["blockers"] == []

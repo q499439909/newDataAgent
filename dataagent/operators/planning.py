@@ -29,7 +29,8 @@ _STATUS_RANK = {
     OperatorStatus.PUBLIC_RELEASE: 0,
     OperatorStatus.PERSONAL_RELEASE: 1,
     OperatorStatus.EVALUATED: 2,
-    OperatorStatus.DRAFT: 3,
+    OperatorStatus.PROVIDER_AVAILABLE: 3,
+    OperatorStatus.DRAFT: 4,
     OperatorStatus.DEPRECATED: 99,
 }
 

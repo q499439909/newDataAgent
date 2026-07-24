@@ -366,7 +366,7 @@ def test_datajuicer_discovery_cache_and_admission_registry_are_separate(tmp_path
     assert cached_provider.discover() == discovered
 
 
-def test_datajuicer_catalog_generates_draft_candidates_without_publishing_them() -> None:
+def test_datajuicer_catalog_exposes_provider_operators_without_dataagent_admission() -> None:
     provider = DataJuicerOperatorProvider(
         searcher_factory=_MixedCatalogSearcher,
         provider_version="1.5.3",
@@ -383,7 +383,7 @@ def test_datajuicer_catalog_generates_draft_candidates_without_publishing_them()
     assert by_ref["image_shape_filter"].spec.status == OperatorStatus.PERSONAL_RELEASE
 
     segment = by_ref["image_segment_mapper"]
-    assert segment.spec.status == OperatorStatus.DRAFT
+    assert segment.spec.status == OperatorStatus.PROVIDER_AVAILABLE
     assert segment.spec.execution_scope == ExecutionScope.ASSET
     assert {profile.backend for profile in segment.spec.supported_runtime_profiles} == {
         RuntimeBackend.CUDA
@@ -391,7 +391,7 @@ def test_datajuicer_catalog_generates_draft_candidates_without_publishing_them()
     assert "candidate" in segment.spec.capability_tags
 
     text_filter = by_ref["text_length_filter"]
-    assert text_filter.spec.status == OperatorStatus.DRAFT
+    assert text_filter.spec.status == OperatorStatus.PROVIDER_AVAILABLE
     assert text_filter.spec.input_schema == "ProviderDatasetRecord"
     assert not provider.validate("text_length_filter", {}, RuntimeBackend.CPU).ok
 
@@ -732,7 +732,7 @@ def test_production_pipeline_cannot_use_mock_operator() -> None:
         AgentRuntime()._validate_production_pipeline(pipeline)
 
 
-def test_production_pipeline_can_execute_matched_cpu_image_candidate() -> None:
+def test_production_pipeline_can_execute_provider_available_cpu_operator() -> None:
     library = _planning_library()
     runtime = AgentRuntime(include_datajuicer=False)
     runtime.operator_library = library
@@ -758,7 +758,7 @@ def test_production_pipeline_can_execute_matched_cpu_image_candidate() -> None:
         approved=True,
     )
 
-    runtime._validate_production_pipeline(pipeline)
+    candidate = library.registry.get(node.operator_version_id)
+    assert candidate.status == OperatorStatus.PROVIDER_AVAILABLE
     runtime.allow_datajuicer_candidate_execution = False
-    with pytest.raises(ValueError, match="status DRAFT"):
-        runtime._validate_production_pipeline(pipeline)
+    runtime._validate_production_pipeline(pipeline)

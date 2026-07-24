@@ -143,6 +143,7 @@ def _validate_pipeline_artifact(
     operators_ok = True
     parameters_ok = True
     released = {
+        OperatorStatus.PROVIDER_AVAILABLE,
         OperatorStatus.PERSONAL_RELEASE,
         OperatorStatus.PUBLIC_RELEASE,
     }

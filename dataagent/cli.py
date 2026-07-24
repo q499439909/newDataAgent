@@ -171,7 +171,7 @@ def _print_provider_result(result: dict, *, title: str) -> None:
     table.add_row("CPU candidates", str(counts["local_cpu_candidates"]))
     table.add_row("Remote candidates", str(counts["remote_api_candidates"]))
     table.add_row("Linux GPU candidates", str(counts["linux_gpu_candidates"]))
-    table.add_row("Governed executable now", str(counts["governed_executable_now"]))
+    table.add_row("Provider callable now", str(counts["provider_callable_now"]))
     table.add_row("Capability report", str(registration["capability_report"]))
     console.print(table)
 
@@ -206,7 +206,7 @@ def provider_report(
         report = DataJuicerInstaller(settings.home).report()
         operators = report["operators"]
         if blocked_only:
-            operators = [item for item in operators if item["blocked_reasons"]]
+            operators = [item for item in operators if not item["callable_profiles"]]
         table = Table(title="Data-Juicer Provider Capability Report")
         table.add_column("Operator", overflow="fold")
         table.add_column("Status")
@@ -218,7 +218,7 @@ def provider_report(
                 str(item["operator_ref"]),
                 str(item["governance_status"]),
                 ", ".join(item["runtime_candidates"]) or "unclassified",
-                ", ".join(item["governed_executable_profiles"]) or "-",
+                ", ".join(item["callable_profiles"]) or "-",
                 ", ".join(item["blocked_reasons"]) or "-",
             )
         console.print(table)

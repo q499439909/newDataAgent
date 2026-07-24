@@ -103,9 +103,9 @@ def test_register_existing_provider_and_load_from_settings(
         "local_cpu_candidates": 216,
         "remote_api_candidates": 1,
         "linux_gpu_candidates": 1,
-        "governed_executable_now": 4,
-        "personal_release": 3,
-        "draft": 214,
+        "provider_callable_now": 217,
+        "dataagent_verified": 3,
+        "provider_available": 214,
     }
     assert load_provider_registration(home, "datajuicer") == registration
     assert Path(registration["catalog"]).is_file()
@@ -209,7 +209,7 @@ def test_fresh_install_creates_isolated_runtime_with_frozen_packages(
     assert "imagededup==0.3.3.post2" in install_command
     assert "openai>=1,<2" in install_command
     assert result["report"]["install_artifacts"][0]["sha256"] == "a" * 64
-    assert result["report"]["counts"]["governed_executable_now"] == 3
+    assert result["report"]["counts"]["provider_callable_now"] == 216
     assert not (
         home / "providers" / "datajuicer" / "1.5.3" / ".installing"
     ).exists()
@@ -232,7 +232,7 @@ def test_catalog_profile_reports_discovery_without_execution(
         searcher_factory=_FakeSearcher,
     ).install(profile="catalog", existing_python=python_executable)
 
-    assert result["report"]["counts"]["governed_executable_now"] == 0
+    assert result["report"]["counts"]["provider_callable_now"] == 0
     by_ref = {
         item["operator_ref"]: item for item in result["report"]["operators"]
     }
@@ -242,6 +242,35 @@ def test_catalog_profile_reports_discovery_without_execution(
     assert "REMOTE_PROVIDER_PACK_REQUIRED" in by_ref[
         "image_tagging_vlm_mapper"
     ]["blocked_reasons"]
+
+
+def test_unadmitted_operator_is_provider_available_when_runtime_is_ready(
+    tmp_path: Path, monkeypatch
+) -> None:
+    python_executable = tmp_path / "provider" / "python.exe"
+    process_bin = tmp_path / "provider" / "dj-process.exe"
+    python_executable.parent.mkdir(parents=True)
+    python_executable.touch()
+    process_bin.touch()
+    _FakeSearcher.process_bin = process_bin
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("BAILIAN_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+
+    result = DataJuicerInstaller(
+        tmp_path / "home",
+        command_runner=_freeze_runner,
+        searcher_factory=_FakeSearcher,
+    ).install(profile="cpu", existing_python=python_executable)
+
+    by_ref = {
+        item["operator_ref"]: item for item in result["report"]["operators"]
+    }
+    candidate = by_ref["catalog_operator_000"]
+    assert candidate["governance_status"] == "PROVIDER_AVAILABLE"
+    assert candidate["dataagent_verified"] is False
+    assert candidate["callable_profiles"] == ["local_cpu"]
+    assert "PRODUCTION_ADMISSION_REQUIRED" not in candidate["blocked_reasons"]
 
 
 def test_catalog_count_drift_is_rejected(tmp_path: Path) -> None:

@@ -518,7 +518,7 @@ def build_datajuicer_proxy_operators(
                 status=(
                     OperatorStatus.PERSONAL_RELEASE
                     if is_admitted
-                    else OperatorStatus.DRAFT
+                    else OperatorStatus.PROVIDER_AVAILABLE
                 ),
                 owner_id="system",
                 visibility="private",
