@@ -113,6 +113,7 @@ def _semantic_values(input_data: OperatorInput) -> set[str]:
 
 
 class AuthenticityDecisionOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.authenticity_decision:1",
         name="AuthenticityDecisionOperator",
@@ -175,6 +176,7 @@ class AuthenticityDecisionOperator:
 
 
 class VisualSemanticSelectionOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.visual_semantic_selection:1",
         name="VisualSemanticSelectionOperator",
@@ -232,6 +234,7 @@ class VisualSemanticSelectionOperator:
 
 
 class ClassResolutionOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.class_resolution:1",
         name="ClassResolutionOperator",
@@ -327,6 +330,7 @@ class ClassResolutionOperator:
 
 
 class DatasetPartitionOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.dataset_partition:1",
         name="DatasetPartitionOperator",

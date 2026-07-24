@@ -67,6 +67,7 @@ def _spec(
 
 
 class DecodeCheckOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.decode_check:1",
         name="图片解码与元数据检查",
@@ -96,6 +97,7 @@ class DecodeCheckOperator:
 
 
 class QualityFilterOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.quality_filter:1",
         name="图片质量过滤",
@@ -143,6 +145,7 @@ class QualityFilterOperator:
 
 
 class PerceptualDedupOperator:
+    parallel_safe = False  # mutates context.shared["seen_dhash"]; first-seen-wins must stay serial
     spec = _spec(
         operator_id="builtin.perceptual_dedup:1",
         name="感知哈希去重",
@@ -195,6 +198,7 @@ class PerceptualDedupOperator:
 
 
 class ManifestOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.manifest:1",
         name="Manifest 记录",

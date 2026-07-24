@@ -59,6 +59,7 @@ class Settings:
     image_generation_model: str = "wan2.7-image"
     image_generation_pro_model: str = "wan2.7-image-pro"
     text_image_model: str = "qwen-image-2.0-pro"
+    worker_concurrency: int = 4
 
     @classmethod
     def load(cls, cwd: Path | None = None) -> "Settings":
@@ -152,6 +153,9 @@ class Settings:
             ),
             text_image_model=os.getenv(
                 "TEXT_IMAGE_MODEL", "qwen-image-2.0-pro"
+            ),
+            worker_concurrency=max(
+                1, int(os.getenv("DATAAGENT_WORKER_CONCURRENCY", "4"))
             ),
         )
 

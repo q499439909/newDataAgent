@@ -96,6 +96,7 @@ def _model_spec(
 class _MockModelOperator:
     capability: str
     spec: OperatorSpecVersion
+    parallel_safe = False  # mock backend, not production-relevant for concurrency
 
     def __init__(self, model_manager: ModelManager | None = None) -> None:
         self.model_manager = model_manager or ModelManager(

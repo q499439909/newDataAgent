@@ -27,6 +27,7 @@ class LocalRunWorker:
         vision_model: str = "qwen3.7-plus",
         vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         vlm_gateway: Callable[..., dict[str, Any]] | None = None,
+        worker_concurrency: int = 1,
     ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
@@ -51,6 +52,7 @@ class LocalRunWorker:
                 vlm_gateway=vlm_gateway,
             ).runtime,
             quality_evaluator=QualityEvaluator(self.version_store),
+            worker_concurrency=worker_concurrency,
         )
 
     def process_next(self) -> dict[str, Any] | None:

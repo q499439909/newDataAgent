@@ -67,6 +67,7 @@ def _spec(
 
 
 class AnnotationCoordinateOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.annotation_coordinates:1",
         display_name="标注坐标转换",
@@ -122,6 +123,7 @@ class AnnotationCoordinateOperator:
 
 
 class AutoContrastOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.auto_contrast:1",
         display_name="自动对比度增强",
@@ -176,6 +178,7 @@ class AutoContrastOperator:
 
 
 class DeterministicSamplerOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.deterministic_sampler:1",
         display_name="确定性随机采样",
@@ -221,6 +224,7 @@ class DeterministicSamplerOperator:
 
 
 class HardConstraintEvaluatorOperator:
+    parallel_safe = True
     spec = _spec(
         operator_id="builtin.hard_constraint_evaluator:1",
         display_name="图片硬约束评估",

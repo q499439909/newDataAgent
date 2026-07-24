@@ -245,6 +245,9 @@ class ProviderProxyOperator:
         self.spec = spec
         self.provider = provider
         self.provider_operator_type = provider_operator_type
+        # Provider operators spawn subprocesses and read context.shared["active_node_id"],
+        # so they are not safe to run concurrently per-asset by default.
+        self.parallel_safe = False
         self.supports_dataset_batch = (
             self.spec.execution_scope == ExecutionScope.DATASET
             or (

@@ -85,12 +85,14 @@ class DatasetRunExecutor:
         version_store: DomainVersionStore,
         operator_runtime: OperatorRuntime,
         quality_evaluator: QualityEvaluator,
+        worker_concurrency: int = 1,
     ) -> None:
         self.home = home.resolve()
         self.run_store = run_store
         self.version_store = version_store
         self.operator_runtime = operator_runtime
         self.quality_evaluator = quality_evaluator
+        self.worker_concurrency = max(1, int(worker_concurrency))
 
     def execute(self, run_id: str) -> dict[str, Any]:
         run = self.run_store.get(run_id)

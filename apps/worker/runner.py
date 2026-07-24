@@ -29,6 +29,7 @@ def main() -> None:
             vision_model=settings.vision_model,
             vision_api_base_url=settings.vision_api_base_url,
             vlm_gateway=vlm_gateway,
+            worker_concurrency=settings.worker_concurrency,
         )
         if args.once:
             worker.process_next()
