@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ..domain.operators import OperatorStatus, RuntimeBackend
 from .catalog_matching import OperatorCatalogMatch
 from .registry import OperatorRegistry
+from .runtime_resolution import unavailable_runtime_resolution
 
 
 _LIFECYCLE_SCORES = {
@@ -96,10 +97,12 @@ class OperatorCandidateRanker:
         )
         cost_tier, cost_score = self._cost_score(backend, policy.cost_preference)
         blocked_reason = None
+        runtime_resolution = None
         if "image" not in operator.capability_tags:
             blocked_reason = "The current Agent only executes image operators"
         elif not runtime_available:
             blocked_reason = f"Runtime backend {backend.value} is not available"
+            runtime_resolution = unavailable_runtime_resolution(backend)
         elif operator.status == OperatorStatus.DEPRECATED:
             blocked_reason = "Deprecated operators cannot be selected"
         elif operator.status == OperatorStatus.DRAFT and not policy.allow_draft_candidates:
@@ -133,6 +136,7 @@ class OperatorCandidateRanker:
                 "status": operator.status,
                 "executable": blocked_reason is None,
                 "blocked_reason": blocked_reason,
+                "runtime_resolution": runtime_resolution,
             }
         )
 

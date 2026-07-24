@@ -1763,6 +1763,16 @@ class ConversationService:
                 if not item.get("executable")
             ]
             if blocked:
+                resolution = next(
+                    (
+                        (item.get("provider_operator_ref", ""), item["runtime_resolution"])
+                        for item in blocked
+                        if item.get("runtime_resolution")
+                    ),
+                    None,
+                )
+                if resolution is not None:
+                    return ConversationService._runtime_resolution_reply(*resolution)
                 details = "；".join(
                     f"{item['provider_operator_ref']}：{item.get('blocked_reason') or '不可执行'}"
                     for item in blocked
@@ -1776,12 +1786,43 @@ class ConversationService:
     @staticmethod
     def _capability_resolution_reply(value: dict[str, Any]) -> str:
         gaps = value.get("gaps", [])
+        for gap in gaps:
+            for candidate in gap.get("candidates", []):
+                resolution = candidate.get("runtime_resolution")
+                if resolution:
+                    operator_ref = (
+                        candidate.get("provider_operator_ref")
+                        or candidate.get("operator_version_id")
+                        or "unknown"
+                    )
+                    return ConversationService._runtime_resolution_reply(
+                        operator_ref,
+                        resolution,
+                    )
         details = "、".join(
             f"{item.get('capability')}（{item.get('status')}）" for item in gaps
         )
         return (
             f"当前仍有能力缺口：{details}。请选择："
             "1 重新检索；2 启用远程模型后重试；3 修改 TaskSpec；4 终止工单。"
+        )
+
+    @staticmethod
+    def _runtime_resolution_reply(
+        operator_ref: str,
+        resolution: dict[str, Any],
+    ) -> str:
+        reasons = "\n".join(
+            f"- {reason}" for reason in resolution.get("reasons", [])
+        )
+        options = "\n".join(
+            f"{index}. {option.get('label', option.get('id', ''))}"
+            for index, option in enumerate(resolution.get("options", []), start=1)
+        )
+        return (
+            f"找到算子：\n\n{operator_ref}\n\n"
+            f"但是当前环境无法执行：\n\n原因：\n{reasons}\n\n"
+            f"解决方案：\n\n{options}"
         )
 
     @staticmethod

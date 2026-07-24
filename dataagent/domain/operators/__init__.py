@@ -16,6 +16,8 @@ from .models import (
     ProviderRef,
     RuntimeBackend,
     RuntimeProfile,
+    RuntimeResolution,
+    RuntimeResolutionOption,
 )
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "ProviderRef",
     "RuntimeBackend",
     "RuntimeProfile",
+    "RuntimeResolution",
+    "RuntimeResolutionOption",
 ]

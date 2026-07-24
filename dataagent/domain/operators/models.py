@@ -43,6 +43,17 @@ class RuntimeBackend(StrEnum):
     REMOTE = "remote"
 
 
+class RuntimeResolutionOption(DomainModel):
+    id: str
+    label: str
+
+
+class RuntimeResolution(DomainModel):
+    code: str
+    reasons: tuple[str, ...]
+    options: tuple[RuntimeResolutionOption, ...]
+
+
 class ExecutionScope(StrEnum):
     ASSET = "asset"
     DATASET = "dataset"

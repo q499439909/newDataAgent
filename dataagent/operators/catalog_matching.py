@@ -6,9 +6,15 @@ from typing import Any, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBackend
+from ..domain.operators import (
+    OperatorSpecVersion,
+    OperatorStatus,
+    RuntimeBackend,
+    RuntimeResolution,
+)
 from ..domain.specs import TaskCapabilitySpec
 from .registry import OperatorRegistry
+from .runtime_resolution import unavailable_runtime_resolution
 
 
 class OperatorCatalogMatch(BaseModel):
@@ -37,6 +43,7 @@ class OperatorCatalogMatch(BaseModel):
     status: OperatorStatus
     executable: bool
     blocked_reason: str | None = None
+    runtime_resolution: RuntimeResolution | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -420,10 +427,12 @@ class HybridOperatorCatalogMatcher:
             else next(iter(backends))
         )
         blocked_reason = None
+        runtime_resolution = None
         if "image" not in operator.capability_tags:
             blocked_reason = "The current Agent only executes image operators"
         elif backend != RuntimeBackend.CPU:
             blocked_reason = f"Runtime backend {backend.value} is not available"
+            runtime_resolution = unavailable_runtime_resolution(backend)
         elif operator.status == OperatorStatus.DRAFT and not allow_draft_candidates:
             blocked_reason = "Draft candidate execution is disabled"
         scores = evidence["scores"]
@@ -445,6 +454,7 @@ class HybridOperatorCatalogMatcher:
             status=operator.status,
             executable=blocked_reason is None,
             blocked_reason=blocked_reason,
+            runtime_resolution=runtime_resolution,
             parameters=_suggest_parameters(
                 operator.provider.provider_operator_ref,
                 requirement,

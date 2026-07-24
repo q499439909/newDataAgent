@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from ..common.models import DomainModel, VersionedModel
+from ..operators import RuntimeResolution
 
 
 class CapabilityCoverageStatus(StrEnum):
@@ -17,11 +18,13 @@ class CapabilityCoverageStatus(StrEnum):
 class CapabilityCandidateEvidence(DomainModel):
     operator_version_id: str
     provider_id: str
+    provider_operator_ref: str = ""
     runtime_backend: str
     lifecycle_status: str
     executable: bool
     score: int = 0
     blocked_reason: str | None = None
+    runtime_resolution: RuntimeResolution | None = None
 
 
 class CapabilityCoverage(DomainModel):

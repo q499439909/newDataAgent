@@ -106,11 +106,13 @@ def _capability_coverage(
                 CapabilityCandidateEvidence(
                     operator_version_id=item.operator_version_id,
                     provider_id=item.provider_id,
+                    provider_operator_ref=item.provider_operator_ref,
                     runtime_backend=item.runtime_backend.value,
                     lifecycle_status=item.status.value,
                     executable=item.executable,
                     score=item.score,
                     blocked_reason=item.blocked_reason,
+                    runtime_resolution=item.runtime_resolution,
                 )
             )
         for operator in all_operators:
@@ -140,6 +142,7 @@ def _capability_coverage(
                 CapabilityCandidateEvidence(
                     operator_version_id=operator.id,
                     provider_id="native",
+                    provider_operator_ref=operator.provider.provider_operator_ref,
                     runtime_backend=backend.value,
                     lifecycle_status=operator.status.value,
                     executable=executable,

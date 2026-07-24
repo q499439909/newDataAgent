@@ -411,6 +411,22 @@ def test_task_requirement_matches_executable_and_blocked_datajuicer_candidates()
     assert by_intent["segmentation"].executable is False
     assert by_intent["segmentation"].runtime_backend == RuntimeBackend.CUDA
     assert "not available" in (by_intent["segmentation"].blocked_reason or "")
+    assert by_intent["segmentation"].runtime_resolution is not None
+    assert by_intent["segmentation"].runtime_resolution.code == (
+        "CUDA_WORKER_UNAVAILABLE"
+    )
+    assert by_intent["segmentation"].runtime_resolution.reasons == (
+        "需要 CUDA",
+        "当前 Worker 没有 GPU",
+    )
+    assert tuple(
+        item.label
+        for item in by_intent["segmentation"].runtime_resolution.options
+    ) == (
+        "使用 GPU Worker 执行",
+        "使用 Remote API 版本",
+        "跳过该步骤",
+    )
 
 
 def test_retrieval_stops_when_only_matched_datajuicer_runtime_is_unavailable() -> None:
@@ -441,6 +457,14 @@ def test_retrieval_stops_when_only_matched_datajuicer_runtime_is_unavailable() -
         "datajuicer.image_segment_mapper:1"
     )
     assert retrieval["operator_candidates"][0]["executable"] is False
+    assert retrieval["operator_candidates"][0]["runtime_resolution"]["code"] == (
+        "CUDA_WORKER_UNAVAILABLE"
+    )
+    coverage_candidate = retrieval["capability_coverage"][0]["candidates"][0]
+    assert coverage_candidate["provider_operator_ref"] == "image_segment_mapper"
+    assert coverage_candidate["runtime_resolution"]["options"][0]["id"] == (
+        "use_gpu_worker"
+    )
     assert retrieval["retrieval_plan"]["sufficient"] is False
 
 

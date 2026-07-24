@@ -1155,6 +1155,50 @@ def test_blocked_operator_candidates_are_explained_after_confirmation() -> None:
     assert "cuda" in reply
 
 
+def test_gpu_operator_resolution_explains_runtime_and_recovery_options() -> None:
+    reply = ConversationService._turn_reply(
+        {
+            "interrupts": [],
+            "state": {
+                "next_action": "expand_retrieval",
+                "operator_candidates": [
+                    {
+                        "provider_operator_ref": "image_aesthetics_filter",
+                        "executable": False,
+                        "blocked_reason": "Runtime backend cuda is not available",
+                        "runtime_resolution": {
+                            "code": "CUDA_WORKER_UNAVAILABLE",
+                            "reasons": ["需要 CUDA", "当前 Worker 没有 GPU"],
+                            "options": [
+                                {
+                                    "id": "use_gpu_worker",
+                                    "label": "使用 GPU Worker 执行",
+                                },
+                                {
+                                    "id": "use_remote_variant",
+                                    "label": "使用 Remote API 版本",
+                                },
+                                {
+                                    "id": "skip_capability",
+                                    "label": "跳过该步骤",
+                                },
+                            ],
+                        },
+                    }
+                ],
+            },
+        },
+        approved=True,
+    )
+
+    assert "找到算子：\n\nimage_aesthetics_filter" in reply
+    assert "原因：\n- 需要 CUDA\n- 当前 Worker 没有 GPU" in reply
+    assert "1. 使用 GPU Worker 执行" in reply
+    assert "2. 使用 Remote API 版本" in reply
+    assert "3. 跳过该步骤" in reply
+    assert "资格" not in reply
+
+
 def test_pipeline_approval_uses_grounded_pipeline_context(tmp_path) -> None:
     pipelines = [
         {
