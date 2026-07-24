@@ -270,14 +270,11 @@ class ClassResolutionOperator:
                         "required": ["id", "aliases"],
                         "additionalProperties": False,
                     },
-                    "default": [
-                        {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
-                        {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
-                    ],
                 },
                 "mixed_label": {"type": "string", "default": "mixed"},
                 "unknown_label": {"type": "string", "default": "unknown"},
             },
+            "required": ["labels"],
             "additionalProperties": False,
         },
     )
@@ -286,10 +283,11 @@ class ClassResolutionOperator:
         self, context: OperatorContext, input_data: OperatorInput, parameters: dict[str, Any]
     ) -> OperatorResult:
         evidence = _semantic_values(input_data)
-        labels = parameters.get("labels") or [
-            {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
-            {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
-        ]
+        labels = parameters.get("labels")
+        if not labels:
+            raise ValueError(
+                "ClassResolutionOperator requires task-specific labels"
+            )
         mixed_label = str(parameters.get("mixed_label", "mixed"))
         unknown_label = str(parameters.get("unknown_label", "unknown"))
         matches: list[str] = []
@@ -346,11 +344,11 @@ class DatasetPartitionOperator:
                 "allowed_labels": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
-                    "default": ["cat", "dog"],
                 },
                 "mixed_label": {"type": "string", "default": "mixed"},
                 "unknown_label": {"type": "string", "default": "unknown"},
             },
+            "required": ["allowed_labels"],
             "additionalProperties": False,
         },
     )
@@ -360,7 +358,11 @@ class DatasetPartitionOperator:
     ) -> OperatorResult:
         unknown_label = str(parameters.get("unknown_label", "unknown"))
         mixed_label = str(parameters.get("mixed_label", "mixed"))
-        allowed_labels = parameters.get("allowed_labels") or ["cat", "dog"]
+        allowed_labels = parameters.get("allowed_labels")
+        if not allowed_labels:
+            raise ValueError(
+                "DatasetPartitionOperator requires task-specific allowed_labels"
+            )
         resolved = str(input_data.labels.get("resolved_class", unknown_label))
         allowed = {
             *allowed_labels,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from dataagent.operators import OperatorRuntime
 from dataagent.operators.builtin.semantic import (
     AuthenticityDecisionOperator,
     ClassResolutionOperator,
@@ -7,6 +10,7 @@ from dataagent.operators.builtin.semantic import (
     VisualSemanticSelectionOperator,
 )
 from dataagent.operators.protocol import OperatorContext, OperatorInput
+from dataagent.operators.validation import ParameterValidationError
 
 
 def _context() -> OperatorContext:
@@ -64,7 +68,14 @@ def test_visual_semantic_selection_rejects_mismatch_and_governs_uncertain() -> N
 
 def test_class_resolution_handles_cat_dog_mixed_and_unknown() -> None:
     operator = ClassResolutionOperator()
-    parameters = {"mixed_policy": "review", "unknown_policy": "reject"}
+    parameters = {
+        "mixed_policy": "review",
+        "unknown_policy": "reject",
+        "labels": [
+            {"id": "cat", "aliases": ["cat", "kitten", "feline"]},
+            {"id": "dog", "aliases": ["dog", "puppy", "canine"]},
+        ],
+    }
 
     cat = operator.execute(_context(), _input(["cat"]), parameters)
     mixed = operator.execute(_context(), _input(["cat", "dog"]), parameters)
@@ -83,7 +94,12 @@ def test_dataset_partition_emits_collision_resistant_relative_path() -> None:
     )
 
     result = operator.execute(
-        _context(), input_data, {"directory_prefix": "classes"}
+        _context(),
+        input_data,
+        {
+            "directory_prefix": "classes",
+            "allowed_labels": ["cat", "dog"],
+        },
     )
 
     assert result.labels["output_relative_path"] == (
@@ -123,3 +139,32 @@ def test_class_resolution_and_partition_support_task_specific_labels() -> None:
     assert partitioned.labels["output_relative_path"] == (
         "classes/pig/pet-aaaaaaaaaaaa.jpg"
     )
+
+
+def test_class_resolution_requires_task_specific_labels() -> None:
+    runtime = OperatorRuntime((ClassResolutionOperator(),))
+
+    with pytest.raises(ParameterValidationError, match="labels"):
+        runtime.execute(
+            operator_version_id="builtin.class_resolution:1",
+            context=_context(),
+            input_data=_input(["cat"]),
+            parameters={
+                "mixed_policy": "review",
+                "unknown_policy": "reject",
+            },
+        )
+
+
+def test_dataset_partition_requires_task_specific_allowed_labels() -> None:
+    runtime = OperatorRuntime((DatasetPartitionOperator(),))
+
+    with pytest.raises(ParameterValidationError, match="allowed_labels"):
+        runtime.execute(
+            operator_version_id="builtin.dataset_partition:1",
+            context=_context(),
+            input_data=_input(["pig"]).model_copy(
+                update={"labels": {"resolved_class": "pig"}}
+            ),
+            parameters={"directory_prefix": "classes"},
+        )
