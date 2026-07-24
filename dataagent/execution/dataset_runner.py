@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -278,31 +278,41 @@ class DatasetRunExecutor:
                 f"{issue.output_uri or issue.source_uri}"
             )
 
-    def _parallel_worker_limit(self, ordered_nodes: list[Any]) -> int:
+    def _parallel_execution_policy(
+        self,
+        ordered_nodes: list[Any],
+    ) -> tuple[int, dict[str, Any] | None]:
         if self.worker_concurrency < 2:
-            return 1
+            return 1, {"reason": "worker_concurrency_is_one"}
         remote_limits: list[int] = []
         for node in ordered_nodes:
             operator = self.operator_runtime.get(node.operator_version_id)
-            if (
-                operator.spec.execution_scope != ExecutionScope.ASSET
-                or not bool(getattr(operator, "parallel_safe", False))
-                or bool(getattr(operator, "supports_dataset_batch", False))
-            ):
-                return 1
+            if operator.spec.execution_scope != ExecutionScope.ASSET:
+                return 1, {
+                    "reason": "dataset_scoped_operator",
+                    "operator_version_id": node.operator_version_id,
+                }
+            if not bool(getattr(operator, "parallel_safe", False)):
+                return 1, {
+                    "reason": "operator_not_parallel_safe",
+                    "operator_version_id": node.operator_version_id,
+                }
+            if bool(getattr(operator, "supports_dataset_batch", False)):
+                return 1, {
+                    "reason": "dataset_batch_operator",
+                    "operator_version_id": node.operator_version_id,
+                }
             if node.runtime_backend.value == "remote":
                 remote_limits.extend(
                     profile.concurrency
                     for profile in operator.spec.supported_runtime_profiles
                     if profile.backend == node.runtime_backend
                 )
-        return max(
+        worker_limit = max(
             1,
-            min(
-                self.worker_concurrency,
-                *(remote_limits or [self.worker_concurrency]),
-            ),
+            min(self.worker_concurrency, *(remote_limits or [self.worker_concurrency])),
         )
+        return worker_limit, None
 
     def _execute_asset(
         self,
@@ -561,8 +571,15 @@ class DatasetRunExecutor:
             max_workers=worker_count,
             thread_name_prefix="dataagent-asset",
         ) as executor:
-            futures = {
-                executor.submit(
+            pending_iterator = iter(pending)
+            futures: dict[Future[str], int] = {}
+
+            def submit_next() -> bool:
+                try:
+                    sequence, planned_source = next(pending_iterator)
+                except StopIteration:
+                    return False
+                future = executor.submit(
                     self._execute_asset,
                     run=run,
                     sequence=sequence,
@@ -570,13 +587,29 @@ class DatasetRunExecutor:
                     ordered_nodes=ordered_nodes,
                     staging_files=staging_files,
                     context=self._parallel_asset_context(run, artifact_root),
-                ): sequence
-                for sequence, planned_source in pending
-            }
-            for future in as_completed(futures):
-                result = future.result()
-                if result in {"PAUSING", "CANCELLING"}:
-                    control_status = result
+                )
+                futures[future] = sequence
+                return True
+
+            for _ in range(worker_count):
+                if not submit_next():
+                    break
+            while futures:
+                completed_futures, _ = wait(
+                    tuple(futures),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in completed_futures:
+                    futures.pop(future)
+                    result = future.result()
+                    if result in {"PAUSING", "CANCELLING"}:
+                        control_status = result
+                current_status = self.run_store.get(run["id"])["status"]
+                if current_status in {"PAUSING", "CANCELLING"}:
+                    control_status = current_status
+                if control_status == "completed":
+                    while len(futures) < worker_count and submit_next():
+                        pass
         return control_status
 
     def _execute(self, run: dict[str, Any]) -> DatasetVersion | None:
@@ -727,9 +760,12 @@ class DatasetRunExecutor:
                 node_id=node.id,
                 provider_id=operator.spec.provider.provider_id,
             )
+        parallel_limit, parallel_blocker = self._parallel_execution_policy(
+            ordered_nodes
+        )
         parallel_workers = min(
             len(planned),
-            self._parallel_worker_limit(ordered_nodes),
+            parallel_limit,
         )
         if parallel_workers > 1:
             self.run_store.add_event(
@@ -761,6 +797,19 @@ class DatasetRunExecutor:
             completed = self.run_store.items(run["id"])
             self._validate_publication_outcomes(run, completed)
             return self._publish(run, spec, pipeline, roots, completed)
+        if (
+            len(planned) > 1
+            and self.worker_concurrency > 1
+            and parallel_blocker is not None
+        ):
+            self.run_store.add_event(
+                run["id"],
+                "asset_parallelism_disabled",
+                {
+                    "requested_concurrency": self.worker_concurrency,
+                    **parallel_blocker,
+                },
+            )
         for sequence, planned_source in enumerate(planned):
             source = Path(planned_source["source_uri"])
             source_hash = _sha256(source)
