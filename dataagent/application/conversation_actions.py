@@ -20,6 +20,7 @@ class ConversationIntent(StrEnum):
     CHAT = "CHAT"
     START_WORK_ORDER = "START_WORK_ORDER"
     PROVIDE_SOURCE = "PROVIDE_SOURCE"
+    CLARIFY_REQUIREMENT = "CLARIFY_REQUIREMENT"
     EDIT_TASK_SPEC = "EDIT_TASK_SPEC"
     APPROVE = "APPROVE"
     REJECT = "REJECT"
@@ -81,6 +82,11 @@ class StartWorkOrderAction(_ActionBase):
 class ProvideSourceAction(_ActionBase):
     intent: Literal[ConversationIntent.PROVIDE_SOURCE]
     source: str = Field(min_length=1)
+
+
+class ClarifyRequirementAction(_ActionBase):
+    intent: Literal[ConversationIntent.CLARIFY_REQUIREMENT]
+    answer: str = Field(min_length=1)
 
 
 class EditTaskSpecAction(_ActionBase):
@@ -171,6 +177,7 @@ ConversationAction = Annotated[
     ChatAction
     | StartWorkOrderAction
     | ProvideSourceAction
+    | ClarifyRequirementAction
     | EditTaskSpecAction
     | ApproveAction
     | RejectAction

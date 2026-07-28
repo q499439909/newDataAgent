@@ -1568,3 +1568,37 @@ Evidence 反例、dataset-level 去重、错误拒绝、上游拒绝以及源文
 逐子句 Coverage 门禁要求必须各自产生新的原子 Constraint，导致 Grounding
 失败。该问题应通过通用的“constraint definition/qualifier”语义建模修复，
 不能在第二批 Trial Tool 内处理，更不能增加 yifu 关键词例外。
+
+## 21. 2026-07-28 第三批 A：Requirement Agent 可观察规划闭环
+
+Requirement Agent 已从一次性 `RequirementPlanner.plan()` 升级为受控
+Action/Observation Loop。模型通过 `validate_requirement_draft` Planning
+Tool 提交完整 RequirementDraft；Tool 只执行 Schema、source grounding、
+ClauseTrace coverage 和引用完整性校验。
+
+ClauseTrace 将用户语句区分为可执行约束、定义、偏好、输出和上下文。定义通过
+`constraint_refs` 限定已有 Constraint，不单独触发 Operator 检索。这解决了
+“主体定义”“静音定义”“敏感信息定义”等开放语义被误建成伪能力的问题。
+
+主图现在支持 Requirement Agent 主动进入 `requirement_clarification` HITL。
+Conversation 只承载问题和用户答案；答案追加为新的用户输入来源，重新交给
+Requirement Agent，而不是由 Conversation 修改 TaskSpec。
+
+该改造仍未进入正式执行/QC。下一纵向切片应在本批真实需求规划验收通过后，
+连接 Approved Pipeline、正式 Run、独立 QC Observation 和主 Agent 全局返工。
+
+### 21.1 验收状态
+
+第三批 A 已完成代码与测试验收：
+
+- RequirementDraft 与 TaskSpec 均持久化 ClauseTrace；
+- Requirement Agent 正式路径由模型决策、校验 Tool、Observation 和状态循环组成；
+- Conversation 只承载 session、HITL 与恢复，不代替 Agent 修改 TaskSpec；
+- 分句校验不会再因“动作。补充定义：……”中的冒号隐藏待执行动作；
+- 真实 yifu 需求规划生成 9 个 Constraint、11 个 ClauseTrace，并进入
+  `task_spec_confirmation`；
+- 全量 `307` 项测试通过，编译和差异格式检查通过。
+
+本批的停止边界仍是 TaskSpec 确认。下一纵向切片不得把“需求阶段通过”扩大解释成
+端到端成功；应继续实现 Approved Pipeline 到正式 Run、独立 QC Observation、主 Agent
+根据失败证据决定回到检索、重新编排、重跑或请求用户。

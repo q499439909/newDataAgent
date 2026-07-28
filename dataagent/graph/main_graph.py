@@ -53,7 +53,10 @@ def build_main_graph(
     )
     graph.add_node(
         "requirement_agent",
-        build_requirement_graph(requirement_planner),
+        build_requirement_graph(
+            requirement_planner,
+            agent_planner=agent_planner,
+        ),
     )
     graph.add_node("confirm_task_spec", confirm_task_spec)
     graph.add_node(

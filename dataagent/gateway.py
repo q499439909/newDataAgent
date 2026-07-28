@@ -15,7 +15,7 @@ from .config import Settings
 from .application.conversation_actions import conversation_action_json_schema
 from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
-from .domain.specs import RequirementDraft
+from .domain.specs import RequirementDraft, validate_requirement_draft_grounding
 from .agents.runtime import AgentDecision, AgentPlanningRequest
 
 
@@ -50,29 +50,8 @@ def _requirement_draft_grounding_errors(
     requirement: str,
     draft: RequirementDraft,
 ) -> list[str]:
-    compact_requirement = re.sub(r"\s+", "", requirement)
-    errors: list[str] = []
-    for constraint in draft.constraints:
-        compact_span = re.sub(r"\s+", "", constraint.source_text)
-        if compact_span not in compact_requirement:
-            errors.append(
-                f"{constraint.id}.source_text is not an exact span of the requirement"
-            )
-    grounded_spans = [
-        re.sub(r"\s+", "", constraint.source_text)
-        for constraint in draft.constraints
-    ]
-    for raw_clause in re.split(r"[；;\n]+", requirement):
-        clause = raw_clause.rsplit("：", 1)[-1]
-        clause = re.sub(r"^\s*\d+\s*[.、)]\s*", "", clause).strip()
-        compact_clause = re.sub(r"\s+", "", clause)
-        if len(compact_clause) < 4:
-            continue
-        if not any(span and span in compact_clause for span in grounded_spans):
-            errors.append(
-                f"requirement clause has no atomic constraint: {clause}"
-            )
-    return errors
+    observation = validate_requirement_draft_grounding(requirement, draft)
+    return [item.message for item in observation.violations]
 
 
 class ModelGateway:
@@ -302,6 +281,11 @@ class ModelGateway:
             "You are DataAgent's Requirement Planning Agent. Convert the user's "
             "request into a complete, implementation-neutral RequirementDraft. "
             "Split every independently testable condition into one atomic constraint. "
+            "Classify every meaningful source clause with a ClauseTrace. A clause "
+            "that defines or qualifies an existing condition is a definition trace "
+            "referencing that Constraint; it is not a new Constraint unless it is "
+            "independently testable. Preference, output, and context clauses use "
+            "their corresponding trace roles. "
             "Every filtering, transformation, classification, annotation, deduplication, "
             "or output clause must have at least one Constraint; a semantic requirement "
             "does not substitute for its Constraint. "
@@ -325,8 +309,8 @@ class ModelGateway:
                 request_payload["repair_observation"] = {
                     "errors": grounding_errors,
                     "instruction": (
-                        "Discard every ungrounded constraint and regenerate from "
-                        "the original requirement only."
+                        "Repair Constraint and ClauseTrace grounding using only "
+                        "exact spans from the original requirement."
                     ),
                 }
             result = self._messages(

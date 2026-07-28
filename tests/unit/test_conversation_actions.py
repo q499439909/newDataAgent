@@ -56,6 +56,12 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
     facts = parse_conversation_action(
         {"intent": "QUERY_CONTROL_FACTS", "facets": ["run", "pipeline"]}
     )
+    clarification = parse_conversation_action(
+        {
+            "intent": "CLARIFY_REQUIREMENT",
+            "answer": "Use a similarity threshold of 0.8.",
+        }
+    )
     start = parse_conversation_action(
         {
             "intent": "START_WORK_ORDER",
@@ -75,6 +81,7 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
     assert edit.intent == ConversationIntent.EDIT_TASK_SPEC
     assert pipeline.strategy == "balanced"
     assert facts.facets == ("run", "pipeline")
+    assert clarification.answer == "Use a similarity threshold of 0.8."
     assert start.task_spec_patch is not None
     assert start.task_spec_patch.classification is not None
     assert start.task_spec_patch.classification.labels[0].id == "pig"

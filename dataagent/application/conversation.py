@@ -646,6 +646,43 @@ class ConversationService:
         if not work_order_id:
             base["reply"] = "当前还没有工单。请先告诉我需要生产什么图片数据。"
             return base
+        if decision.intent == ConversationIntent.CLARIFY_REQUIREMENT:
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+            if (
+                not turn["interrupts"]
+                or turn["interrupts"][0]["value"].get("kind")
+                != "requirement_clarification"
+            ):
+                base["reply"] = "当前没有等待补充的需求问题。"
+                base["turn"] = turn
+                return base
+            turn = self.agent_runtime.resume(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision={
+                    "answer": decision.answer,
+                    "channel": "conversation",
+                },
+            )
+            base["turn"] = turn
+            task_spec = turn["state"].get("task_spec")
+            if task_spec:
+                base["reply"] = (
+                    "已记录你的补充。\n\n"
+                    + self._task_spec_details_reply(task_spec)
+                    + "\n\n如果以上内容无误，请直接回复“确认”；"
+                    "需要修改时，直接说明要改哪一项。"
+                )
+            elif turn["interrupts"]:
+                value = turn["interrupts"][0]["value"]
+                base["reply"] = str(
+                    value.get("summary")
+                    or "还需要你继续补充需求信息。"
+                )
+            return base
         if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
             facts_context = control_context or context
             facets = set(decision.facets)
@@ -1040,6 +1077,27 @@ class ConversationService:
             )
             response["turn"] = turn
             task_spec = turn["state"].get("task_spec", {})
+            if (
+                not task_spec
+                and turn["interrupts"]
+                and turn["interrupts"][0]["value"].get("kind")
+                == "requirement_clarification"
+            ):
+                value = turn["interrupts"][0]["value"]
+                questions = value.get("questions") or ()
+                response["reply"] = (
+                    f"已创建工单 {turn['work_order_id']}。\n\n"
+                    + str(value.get("summary") or "还需要你补充需求信息。")
+                    + (
+                        "\n\n" + "\n".join(
+                            f"{index}. {question}"
+                            for index, question in enumerate(questions, start=1)
+                        )
+                        if questions
+                        else ""
+                    )
+                )
+                return response
             draft_details = self._task_spec_details_reply(task_spec)
             if task_spec.get("ambiguities"):
                 response["reply"] = (

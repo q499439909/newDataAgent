@@ -80,6 +80,7 @@ class AgentTool:
     description: str
     input_schema: dict[str, Any]
     execute: Callable[[dict[str, Any]], dict[str, Any]]
+    summarize_input: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def as_schema(self) -> dict[str, Any]:
         return {
@@ -172,11 +173,21 @@ class AgentDecisionLoop:
                 )
             try:
                 tool = self.tools[str(decision.tool_name)]
-            except KeyError as exc:
-                raise ValueError(
-                    f"{self.agent_name} selected an unavailable tool: "
-                    f"{decision.tool_name}"
-                ) from exc
+            except KeyError:
+                observations.append(
+                    AgentObservation(
+                        sequence=len(observations) + 1,
+                        tool_name=str(decision.tool_name),
+                        tool_input=decision.tool_input,
+                        data={
+                            "ok": False,
+                            "error_type": "unavailable_tool",
+                            "error": "Tool is not available to this Agent",
+                            "available_tools": sorted(self.tools),
+                        },
+                    )
+                )
+                continue
             try:
                 data = tool.execute(dict(decision.tool_input))
             except Exception as exc:
@@ -185,11 +196,16 @@ class AgentDecisionLoop:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
+            observation_input = (
+                tool.summarize_input(dict(decision.tool_input))
+                if tool.summarize_input is not None
+                else decision.tool_input
+            )
             observations.append(
                 AgentObservation(
                     sequence=len(observations) + 1,
                     tool_name=tool.name,
-                    tool_input=decision.tool_input,
+                    tool_input=observation_input,
                     data=data,
                 )
             )

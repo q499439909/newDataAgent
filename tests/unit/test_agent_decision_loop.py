@@ -81,6 +81,92 @@ def test_agent_uses_tool_observation_before_finishing() -> None:
     assert [item.action for item in result.decisions] == ["tool", "finish"]
 
 
+def test_agent_observes_an_unavailable_tool_and_can_choose_an_allowed_tool() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Try an unavailable environment tool.",
+                tool_name="list_directory",
+                tool_input={},
+            ),
+            AgentDecision(
+                action="tool",
+                reason_summary="Use the governed planning tool instead.",
+                tool_name="inspect_context",
+                tool_input={},
+            ),
+            AgentDecision(
+                action="finish",
+                reason_summary="The governed observation is sufficient.",
+                output={"ok": True},
+            ),
+        ]
+    )
+    loop = AgentDecisionLoop(
+        agent_name="requirement",
+        planner=planner,
+        tools=(
+            AgentTool(
+                name="inspect_context",
+                description="Inspect governed task context.",
+                input_schema={"type": "object", "additionalProperties": False},
+                execute=lambda payload: {"ok": True},
+            ),
+        ),
+        max_iterations=4,
+    )
+
+    result = loop.run(goal="Use only governed tools", context={})
+
+    assert result.status == "finished"
+    assert result.observations[0].data == {
+        "ok": False,
+        "error_type": "unavailable_tool",
+        "error": "Tool is not available to this Agent",
+        "available_tools": ["inspect_context"],
+    }
+    assert planner.requests[1].observations[0].tool_name == "list_directory"
+
+
+def test_agent_tool_can_compact_large_inputs_in_model_observations() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Validate a large draft.",
+                tool_name="validate_draft",
+                tool_input={"items": [{"value": index} for index in range(20)]},
+            ),
+            AgentDecision(
+                action="finish",
+                reason_summary="The validation result is sufficient.",
+                output={"ok": True},
+            ),
+        ]
+    )
+    loop = AgentDecisionLoop(
+        agent_name="requirement",
+        planner=planner,
+        tools=(
+            AgentTool(
+                name="validate_draft",
+                description="Validate a draft.",
+                input_schema={"type": "object"},
+                execute=lambda payload: {"ok": False, "violations": ["missing"]},
+                summarize_input=lambda payload: {
+                    "item_count": len(payload["items"])
+                },
+            ),
+        ),
+        max_iterations=3,
+    )
+
+    loop.run(goal="Validate the draft", context={})
+
+    assert planner.requests[1].observations[0].tool_input == {"item_count": 20}
+
+
 def test_main_agent_model_selects_the_next_specialist_from_current_state() -> None:
     planner = ScriptedPlanner(
         [

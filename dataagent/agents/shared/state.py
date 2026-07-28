@@ -8,6 +8,7 @@ class WorkOrderGraphState(TypedDict, total=False):
     owner_id: str
     requirement: str
     data_sources: list[dict[str, Any]]
+    requirement_clarification_request: dict[str, Any]
 
     task_spec: dict[str, Any]
     task_spec_confirmed: bool

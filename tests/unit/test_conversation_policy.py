@@ -1,7 +1,25 @@
 from __future__ import annotations
 
 from dataagent.application.conversation_actions import parse_conversation_action
-from dataagent.application.conversation_policy import validate_conversation_action
+from dataagent.application.conversation_policy import (
+    allowed_conversation_actions,
+    validate_conversation_action,
+)
+
+
+def test_requirement_clarification_is_allowed_only_at_its_interrupt() -> None:
+    context = {
+        "work_order_id": "work_order_1",
+        "agent_state": {
+            "waiting": "requirement_clarification",
+            "next_action": "clarify_requirement",
+        },
+    }
+
+    allowed = allowed_conversation_actions(context)
+
+    assert "CLARIFY_REQUIREMENT" in allowed
+    assert "APPROVE" not in allowed
 
 
 def test_semantically_unverified_pipeline_requires_recompilation() -> None:

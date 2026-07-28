@@ -76,6 +76,15 @@ class ClassificationSpec(DomainModel):
         return self
 
 
+class RequirementClauseTrace(DomainModel):
+    """Source-grounded role of one user clause in a Requirement Draft."""
+
+    source_text: str = Field(min_length=1)
+    role: Literal["constraint", "definition", "preference", "output", "context"]
+    constraint_refs: tuple[str, ...] = ()
+    normalized_effect: dict[str, Any] = Field(default_factory=dict)
+
+
 class RequirementDraft(DomainModel):
     """Business interpretation of a request, before operator retrieval.
 
@@ -85,6 +94,7 @@ class RequirementDraft(DomainModel):
 
     objective: str = Field(min_length=1)
     constraints: tuple[ConstraintContract, ...] = ()
+    clause_traces: tuple[RequirementClauseTrace, ...] = ()
     classification: ClassificationSpec | None = None
     semantic_requirements: tuple[str, ...] = ()
     exclusion_requirements: tuple[str, ...] = ()
@@ -182,6 +192,7 @@ class TaskSpecVersion(VersionedModel):
     required_capabilities: tuple[str, ...] = ()
     capability_requirements: tuple[TaskCapabilitySpec, ...] = ()
     constraints: tuple[ConstraintContract, ...] = ()
+    clause_traces: tuple[RequirementClauseTrace, ...] = ()
     classification: ClassificationSpec | None = None
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     semantic_requirements: tuple[str, ...] = ()

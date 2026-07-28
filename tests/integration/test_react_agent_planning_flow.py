@@ -31,6 +31,50 @@ class WorkOrderScriptedPlanner:
     def __init__(self) -> None:
         self.requests: list[AgentPlanningRequest] = []
         self._agent_steps = {
+            "requirement": iter(
+                (
+                    AgentDecision(
+                        action="tool",
+                        reason_summary="Validate the source-grounded requirement.",
+                        tool_name="validate_requirement_draft",
+                        tool_input={
+                            "objective": (
+                                "image width must be at least seven pixels"
+                            ),
+                            "constraints": [
+                                {
+                                    "id": "constraint_arbitrary_metric",
+                                    "source_text": (
+                                        "image width must be at least seven pixels"
+                                    ),
+                                    "scope": "asset",
+                                    "field": "image.width",
+                                    "operator": "gte",
+                                    "value": 7,
+                                    "unit": "px",
+                                    "required_evidence_type": "image_width",
+                                }
+                            ],
+                            "clause_traces": [
+                                {
+                                    "source_text": (
+                                        "image width must be at least seven pixels"
+                                    ),
+                                    "role": "constraint",
+                                    "constraint_refs": [
+                                        "constraint_arbitrary_metric"
+                                    ],
+                                }
+                            ],
+                        },
+                    ),
+                    AgentDecision(
+                        action="finish",
+                        reason_summary="The Requirement Draft is grounded.",
+                        output={"use_validated_draft": True},
+                    ),
+                )
+            ),
             "main": iter(
                 (
                     AgentDecision(
@@ -208,7 +252,7 @@ def test_work_order_runs_model_actions_and_specialist_tool_observations() -> Non
     } == {"retention_first", "balanced", "quality_first"}
     assert [
         item["agent"] for item in planned["state"]["agent_observations"]
-    ] == ["retrieval", "processing"]
+    ] == ["requirement", "retrieval", "processing"]
     assert planned["state"]["capability_coverage"][0]["capability"] == (
         "image.width"
     )

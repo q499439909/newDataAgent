@@ -1428,6 +1428,55 @@ Trial。不要为了让 yifu 变绿而增加任务正则、静默删除定义子
 TaskSpec；下一批开始前应先让 RequirementDraft 能区分“新增硬约束”和“对已有
 约束的定义/限定”，并保留两者的 source trace。
 
+### 第三批 A 当前进展
+
+上述 Requirement Planner 阻断已按通用机制改造：
+
+- `RequirementClauseTrace` 区分 constraint、definition、preference、output
+  和 context；
+- 定义只引用已有 Constraint，不生成伪 capability；
+- Requirement Agent 使用 `validate_requirement_draft` Tool 和 Grounding
+  Observation 自主修订；
+- `ask_user/report_gap` 会产生 `requirement_clarification` interrupt；
+- Conversation 新增 `CLARIFY_REQUIREMENT`，只负责把用户回答送回 Agent；
+- 未授权 Tool 变为可修复 Observation，不再直接炸掉 WorkOrder；
+- 大型 Draft 的模型可见 Observation 使用摘要，避免循环上下文膨胀。
+
+泛化测试覆盖音频静音定义、文本敏感信息定义、非法 Constraint 引用、缺 Trace
+修复和澄清恢复。生产代码没有新增 yifu、黑色衣服或人脸关键词分支。
+
 ## 11. 一句话接手结论
 
 DataAgent 已从“模型生成后只做结构校验”推进到“数据处理 Agent 编排后在隔离小样本上真实运行，并依据 Constraint Evidence Observation 自主重编排”；下一批应连接正式执行、独立 QC 与主 Agent 全局返工，而不是继续增加业务关键词、固定 Pipeline 或 Tool 内自动修复规则。
+
+## 12. 第三批 A 完成状态（2026-07-28）
+
+第三批 A 已收口：
+
+- 新增通用 `RequirementClauseTrace`，把 constraint、definition、preference、output、
+  context 与用户原文建立可验证关系；
+- Requirement Agent 通过 `validate_requirement_draft` Tool 读取 Observation、自主修订，
+  或通过 LangGraph interrupt 请求用户澄清；
+- Conversation 只转交澄清答案，不再承担 TaskSpec 智能修改；
+- Agent Runtime 将未授权 Tool 选择返回为可恢复 Observation，并支持大型 Tool 输入摘要；
+- 修复“动作句被后续定义冒号吞掉”的通用分句漏洞；
+- 当前案例、音频案例、文本案例、非法引用和漏动作反例均有自动化测试；
+- 全量 `307` 项测试通过，`compileall` 与 `git diff --check` 通过；
+- 真实 yifu 验证只运行到 Requirement 阶段：得到 9 个 Constraint、11 个 ClauseTrace，
+  进入 TaskSpec 确认，并显式保留去重阈值歧义。
+
+不要把这次验证表述为 yifu 端到端成功。Retrieval、三 Pipeline Trial、用户选择、正式执行、
+QC 和输出 Golden Set 核验没有在本次真实模型验证中运行。
+
+下一批应继续做单一纵向切片：
+
+```text
+Approved Pipeline
+  -> formal run
+  -> independent QC Observation
+  -> Main Agent reads evidence
+  -> finish | reretrieve | recompile | rerun | ask_user
+```
+
+仍然遵守 `AGENTS.md`：失败由 Observation 暴露，修复决定属于模型；Tool 不读取任务关键词
+决定方案，不在 Validator 中写补丁，不用固定 yifu Pipeline 伪造成功。

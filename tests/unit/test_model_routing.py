@@ -106,9 +106,9 @@ def test_requirement_planning_repairs_constraints_not_grounded_in_user_text(
                     }
                 ],
             },
-            {
-                "objective": "筛选宽高比合格的图片",
-                "constraints": [
+                {
+                    "objective": "筛选宽高比合格的图片",
+                    "constraints": [
                     {
                         "id": "constraint_aspect_ratio",
                         "source_text": "宽高比在 0.3 到 3.5 之间",
@@ -117,10 +117,17 @@ def test_requirement_planning_repairs_constraints_not_grounded_in_user_text(
                         "operator": "gte",
                         "value": 0.3,
                         "unit": "ratio",
-                        "required_evidence_type": "image_aspect_ratio",
-                    }
-                ],
-            },
+                            "required_evidence_type": "image_aspect_ratio",
+                        }
+                    ],
+                    "clause_traces": [
+                        {
+                            "source_text": "宽高比在 0.3 到 3.5 之间",
+                            "role": "constraint",
+                            "constraint_refs": ["constraint_aspect_ratio"],
+                        }
+                    ],
+                },
         )
     )
     calls = []
@@ -170,6 +177,13 @@ def test_requirement_planning_repairs_an_omitted_requirement_clause(
             {
                 "objective": "筛选图片",
                 "constraints": [base_constraint],
+                "clause_traces": [
+                    {
+                        "source_text": "人脸数量在2个及以下",
+                        "role": "constraint",
+                        "constraint_refs": ["constraint_face_count"],
+                    }
+                ],
             },
             {
                 "objective": "筛选并去重图片",
@@ -185,8 +199,20 @@ def test_requirement_planning_repairs_an_omitted_requirement_clause(
                         "unit": "count",
                         "required_evidence_type": "duplicate_group",
                     },
-                ],
-            },
+                    ],
+                    "clause_traces": [
+                        {
+                            "source_text": "人脸数量在2个及以下",
+                            "role": "constraint",
+                            "constraint_refs": ["constraint_face_count"],
+                        },
+                        {
+                            "source_text": "去除重复图片",
+                            "role": "constraint",
+                            "constraint_refs": ["constraint_duplicate"],
+                        },
+                    ],
+                },
         )
     )
     calls = []
@@ -204,7 +230,73 @@ def test_requirement_planning_repairs_an_omitted_requirement_clause(
     )
 
     assert len(payload["constraints"]) == 2
-    assert "requirement clause has no atomic constraint" in calls[1]
+    assert "Requirement clause has no ClauseTrace" in calls[1]
+
+
+def test_requirement_planning_accepts_a_grounded_constraint_definition(
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        api_key="test-key",
+        base_url="https://example.invalid",
+        planning_model="glm-5.2",
+        vision_model="qwen3.7-plus",
+        home=Path(".dataagent"),
+        owner="test-user",
+        env_path=None,
+    )
+    gateway = ModelGateway(settings)
+    response = {
+        "objective": "保留主要人物穿深色服装的图片",
+        "constraints": [
+            {
+                "id": "constraint_subject_clothing",
+                "source_text": "保留主要人物穿深色服装的图片",
+                "scope": "asset",
+                "field": "image.main_subject.clothing_color",
+                "operator": "eq",
+                "value": "dark",
+                "unit": "category",
+                "required_evidence_type": (
+                    "subject_clothing_color_classification"
+                ),
+            }
+        ],
+        "clause_traces": [
+            {
+                "source_text": "保留主要人物穿深色服装的图片",
+                "role": "constraint",
+                "constraint_refs": ["constraint_subject_clothing"],
+            },
+            {
+                "source_text": "主要人物指画面中可见面积最大的人物",
+                "role": "definition",
+                "constraint_refs": ["constraint_subject_clothing"],
+                "normalized_effect": {
+                    "subject_selector": "largest_visible_person_by_area"
+                },
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        gateway,
+        "_messages",
+        lambda model, system, content, max_tokens=2048: ModelResult(
+            text=json.dumps(response),
+            model=model,
+        ),
+    )
+
+    payload = gateway.plan_requirement_draft(
+        requirement=(
+            "保留主要人物穿深色服装的图片；"
+            "主要人物指画面中可见面积最大的人物"
+        ),
+        data_sources=({"type": "local_directory", "uri": "D:/data"},),
+    )
+
+    assert payload["clause_traces"][1]["role"] == "definition"
 
 
 def test_settings_default_fast_text_model_is_glm_5_2() -> None:

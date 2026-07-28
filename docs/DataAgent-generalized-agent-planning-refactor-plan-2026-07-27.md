@@ -1137,3 +1137,100 @@ Grounding 门禁把“黑色衣服判定定义”和“默认可见人脸定义�
 约束”，并在 TaskSpec 生成阶段终止。这是需求规划层的独立泛化缺陷，不是
 PipelineTrialRunner 执行失败；不得通过给 yifu 增加正则、跳过 Grounding 或
 直接注入 TaskSpec 来伪造第二批端到端成功。
+
+## 16. 2026-07-28 第三批 A 实施记录：Requirement Agent Grounding Loop
+
+本批修复真实 yifu 冒烟暴露的单一根因：
+
+> 旧 Grounding Validator 把“每个需求子句都必须被解释”错误实现成“每个需求
+> 子句都必须生成一个原子 Constraint”，因此定义、限定、偏好和上下文要么
+> 变成伪 Constraint，要么阻断规划。
+
+新增 `RequirementClauseTrace`：
+
+```text
+source_text
+role = constraint | definition | preference | output | context
+constraint_refs
+normalized_effect
+```
+
+确定性 Validator 现在检查：
+
+- Constraint 和 ClauseTrace 的 `source_text` 均来自用户原文；
+- 每个有效需求子句都有 ClauseTrace；
+- `constraint` 和 `definition` Trace 必须引用真实存在的 Constraint；
+- 每个 Constraint 至少被一个 `constraint` Trace 追踪；
+- 不允许定义引用不存在的 Constraint；
+- 不根据“主体、黑色、人脸、音频、文本”等业务词决定角色。
+
+Requirement Agent 正式路径已改成：
+
+```text
+模型提出 RequirementDraft + ClauseTrace
+  -> validate_requirement_draft Planning Tool
+  -> Grounding Observation
+  -> 模型修订
+  -> 再验证
+  -> finish 或 requirement_clarification HITL
+```
+
+修复权属于模型。Validator 只报告事实，不生成 Constraint、不改 Draft。
+RequirementDraft 通过后，ClauseTrace 随 TaskSpec 持久化，供后续检索、处理和
+审计读取。
+
+Agent Runtime 同时补齐两项通用行为：
+
+- 模型选择未授权 Tool 时，不再令整个 WorkOrder 异常退出，而是返回
+  `unavailable_tool` Observation 和允许的 Tool 列表，由模型重选；
+- 大型 Tool 输入可使用 `summarize_input` 生成模型可见摘要，避免每轮把完整
+  Draft 重复塞回上下文；原始模型 Decision 仍保留在本轮执行记录中。
+
+Conversation Layer 新增 `CLARIFY_REQUIREMENT` 控制动作。当 Requirement Agent
+返回 `ask_user` 或 `report_gap` 时，LangGraph 产生
+`requirement_clarification` interrupt；用户在原会话回答后，答案作为新的
+用户补充原文回到 Requirement Agent，再次执行 Grounding Loop。
+
+本批测试遵循 `AGENTS.md`：
+
+- 当前案例：定义性补充不再被强迫生成伪 Constraint；
+- 泛化案例 A：音频静音窗口和 RMS 阈值定义；
+- 泛化案例 B：文本敏感信息范围和脱敏保留定义；
+- 反例：定义引用不存在的 Constraint 必须失败；
+- Agent 修复：第一次缺 Trace，读取 Observation 后第二次通过；
+- HITL：提出澄清、用户回答、重新生成 TaskSpec；
+- Runtime 边界：未授权 Tool Observation 和大型输入摘要。
+
+本批没有增加任何任务关键词映射、固定 yifu TaskSpec、固定 Pipeline 或静默
+fallback。无模型兼容解析器仍是单独清理事项。
+
+### 16.1 第三批 A 最终验证结果
+
+本批最终补充了一个容易被忽略的通用反例：当“待执行动作。补充定义：定义内容”
+出现在同一段输入中时，分句器不得因为冒号而丢弃定义前的待执行动作。当前实现按自然句号、
+分号和换行划分待追踪子句，不再用最后一个冒号截断原文。
+
+验证结果：
+
+- 当前定义补充案例、音频静音定义、文本脱敏定义均通过；
+- 非法 Constraint 引用、漏掉定义前动作、缺少 ClauseTrace 均会失败；
+- Requirement Agent 能读取校验 Observation 后修订 Draft；
+- 未授权 Tool 会成为可恢复 Observation，模型可以重新选择；
+- Requirement 澄清支持 LangGraph interrupt、用户回答和恢复执行；
+- 全量自动化回归：`307 tests collected`，全部通过；保留 1 条既有
+  Starlette/FastAPI 弃用警告；
+- `compileall` 与 `git diff --check` 通过。
+
+真实模型仅验证到 yifu 的需求规划阶段，结果为：
+
+```text
+next_action = confirm_task_spec
+constraints = 9
+clause_traces = 11
+roles = context + constraint + definition
+```
+
+“主体”“黑色衣服”“人脸计数”“每组感知重复图片保留一张”均作为定义引用已有
+Constraint，没有生成伪 capability。模型同时显式保留了“感知去重阈值依赖已注册算子
+默认策略”的歧义。该结果只证明 Requirement Agent 已能生成可追踪 TaskSpec 并进入确认，
+不代表 Retrieval、三 Pipeline Trial、正式执行或 QC 已在本次验证中通过。
