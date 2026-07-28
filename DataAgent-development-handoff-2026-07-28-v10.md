@@ -6,7 +6,7 @@
 > 当前实现快照：`d95f681 feat: establish generalized agent runtime planning`  
 > 上一版：`DataAgent-development-handoff-2026-07-24-v9.md`  
 > v9 文档提交：`9509148 docs: capture current DataAgent project baseline`  
-> 当前自动回归：`280 passed, 1 warning`  
+> 当前自动回归：`296 passed, 1 warning`
 > 本文范围：v9 之后的产品定位修正、PRD v1.2、通用 Constraint/Evidence 契约、主 Agent 与四 Agent Runtime、检索和数据处理 ReAct Loop、真实 `yifu` 规划验证、Web 工作台，以及下一批执行反馈闭环计划。
 
 ## 0. 最重要的结论
@@ -757,7 +757,7 @@ Data-Juicer Provider Catalog：约 218 个 Operator
 结果：
 
 ```text
-280 passed, 1 warning
+296 passed, 1 warning
 ```
 
 唯一警告：
@@ -1328,7 +1328,7 @@ git diff --check
 当前预期：
 
 ```text
-280 passed, 1 warning
+296 passed, 1 warning
 ```
 
 ### 8.3 Agent Runtime 检查
@@ -1376,6 +1376,58 @@ f714824 fix: align provider proxy availability metadata
 d95f681 feat: establish generalized agent runtime planning
 ```
 
-## 10. 一句话接手结论
+## 10. 第二批开发进展（2026-07-28）
 
-DataAgent 已从 v9 的“受治理视觉 Pipeline、Native VLM、Data-Juicer Provider 和有界并行执行”推进到“数据任务规划主 Agent驱动、专业 Agent 通过模型决策和 Tool Observation 自主检索与编排、Constraint/Coverage/Evidence 可追踪”的第一版通用 Agent Runtime；下一步不要继续增加关键词规则、固定 Pipeline 或更多浅 Tools，而应先建立真实小样本 `PipelineTrialRunner`，让数据处理 Agent 能根据真实执行 Evidence、误删和漏删 Observation 重新规划，再完成正式执行与 QC 的全局返工闭环。
+第二批的真实 Pipeline Trial Observation 纵向切片已经落地：
+
+- 新增 `dataagent/execution/pipeline_trial.py`，公开
+  `PipelineTrialRunner.run(PipelineTrialRequest) -> PipelineTrialObservation`；
+- Trial 从确认后的本地数据源发现有界样本，在隔离目录复制输入后执行，不修改
+  用户源文件；
+- Trial 通过正式 `OperatorRuntime` 执行数据准备、逐资产节点和 dataset-level
+  节点，并按 Constraint 汇总 Evidence；
+- 缺 Evidence、约束未满足、Operator 异常和 dataset-level 失败均以结构化
+  Observation 返回；
+- 上游正确拒绝后未执行的下游约束标记为 `not_evaluated`，不产生假缺失；
+- 数据处理 Agent 的 `trial_pipeline_variants` 在正式模型配置下会真实执行三条
+  Pipeline；失败 Observation 返回模型，由模型决定重新编排；
+- Trial Tool 不拥有修复权，不选择算子、不重排节点；
+- Data-Juicer 尺寸、宽高比和文件大小输出增加固定协议 Adapter，和既有人脸计数
+  Adapter 一起形成可比较的运行 Evidence；
+- API 仅在模型 Gateway 可用时启用真实 Trial；兼容模式明确报告
+  `pre_execution_validation`。
+
+本批泛化证明没有使用 yifu 硬编码：
+
+```text
+image.vehicle_count <= 3
+document.character_count >= 10
+Operator 成功但缺 Evidence -> 必须失败
+源文件被试验 Operator 修改 -> 只修改隔离副本
+```
+
+完整自动化测试当前为：
+
+```text
+296 passed
+1 个既有 Starlette/FastAPI 弃用警告
+```
+
+仍未完成：
+
+- 全量正式执行、QC 和主 Agent 全局返工闭环；
+- 误删率、漏删率、成本与三策略统计比较；
+- 数据库数据检索（由其他同事开发）；
+- 无模型兼容路径中的历史场景正则清理；
+- Conversation 完全降为 Session Layer 和前端计划/活动/正式输出分层。
+
+真实 yifu 冒烟的当前阻断点需要单独记录：补齐“主体、黑色、可见人脸、感知
+重复”定义后，Requirement Planner 的逐子句 Grounding 校验仍把其中两条
+定义性子句判为“没有原子约束”，因此停在 TaskSpec 生成阶段，尚未进入第二批
+Trial。不要为了让 yifu 变绿而增加任务正则、静默删除定义子句或注入固定
+TaskSpec；下一批开始前应先让 RequirementDraft 能区分“新增硬约束”和“对已有
+约束的定义/限定”，并保留两者的 source trace。
+
+## 11. 一句话接手结论
+
+DataAgent 已从“模型生成后只做结构校验”推进到“数据处理 Agent 编排后在隔离小样本上真实运行，并依据 Constraint Evidence Observation 自主重编排”；下一批应连接正式执行、独立 QC 与主 Agent 全局返工，而不是继续增加业务关键词、固定 Pipeline 或 Tool 内自动修复规则。

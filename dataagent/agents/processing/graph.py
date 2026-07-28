@@ -3,6 +3,7 @@ from functools import partial
 from langgraph.graph import END, START, StateGraph
 
 from ...operators import OperatorLibrary
+from ...execution.pipeline_trial import PipelineTrialRunner
 from ...experiences import PipelineExperienceRetriever
 from ..runtime import AgentPlanner
 from ..shared import WorkOrderGraphState
@@ -13,6 +14,7 @@ def build_processing_graph(
     operator_library: OperatorLibrary | None = None,
     experience_retriever: PipelineExperienceRetriever | None = None,
     planner: AgentPlanner | None = None,
+    trial_runner: PipelineTrialRunner | None = None,
 ):
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node(
@@ -22,6 +24,7 @@ def build_processing_graph(
             operator_library=operator_library,
             experience_retriever=experience_retriever,
             planner=planner,
+            trial_runner=trial_runner,
         ),
     )
     graph.add_node("select_representatives", select_representative_pipelines)

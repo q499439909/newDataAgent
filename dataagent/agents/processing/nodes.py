@@ -22,6 +22,11 @@ from ...prompts import builtin_prompt_registry
 from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 from ...domain.specs.binding import bind_constraint_parameters
+from ...execution.pipeline_trial import (
+    PipelineTrialRequest,
+    PipelineTrialRunner,
+    PipelineTrialStatus,
+)
 
 
 STRATEGY_POLICIES: dict[PipelineStrategy, dict[str, Any]] = {
@@ -776,12 +781,14 @@ def generate_pipeline_variants(
     operator_library: OperatorLibrary | None = None,
     experience_retriever: PipelineExperienceRetriever | None = None,
     planner: AgentPlanner | None = None,
+    trial_runner: PipelineTrialRunner | None = None,
 ) -> dict:
     if planner is not None:
         return _generate_agent_pipeline_variants(
             state,
             operator_library=operator_library,
             planner=planner,
+            trial_runner=trial_runner,
         )
     spec = TaskSpecVersion.model_validate(state["task_spec"])
     library = operator_library or build_operator_library(include_datajuicer=False)
@@ -828,6 +835,7 @@ def _generate_agent_pipeline_variants(
     *,
     operator_library: OperatorLibrary | None,
     planner: AgentPlanner,
+    trial_runner: PipelineTrialRunner | None,
 ) -> dict:
     library = operator_library or build_operator_library(include_datajuicer=False)
     spec = TaskSpecVersion.model_validate(state["task_spec"])
@@ -1043,6 +1051,27 @@ def _generate_agent_pipeline_variants(
                 "No compiled Pipeline variants exist; call "
                 "compile_pipeline_variants first."
             )
+        if trial_runner is not None:
+            observations = [
+                trial_runner.run(
+                    PipelineTrialRequest(
+                        task_spec=spec,
+                        pipeline=pipeline,
+                    )
+                )
+                for pipeline in compiled
+            ]
+            trial_passed = all(
+                item.status == PipelineTrialStatus.PASSED
+                for item in observations
+            )
+            return {
+                "ok": trial_passed,
+                "trial_mode": "sample_execution",
+                "pipelines": [
+                    item.model_dump(mode="json") for item in observations
+                ],
+            }
         results: list[dict[str, Any]] = []
         for pipeline in compiled:
             violations: list[str] = []
@@ -1076,6 +1105,7 @@ def _generate_agent_pipeline_variants(
         trial_passed = all(item["ok"] for item in results)
         return {
             "ok": trial_passed,
+            "trial_mode": "pre_execution_validation",
             "pipelines": results,
         }
 
@@ -1187,9 +1217,11 @@ def _generate_agent_pipeline_variants(
             AgentTool(
                 name="trial_pipeline_variants",
                 description=(
-                    "Run deterministic pre-execution checks against the latest "
-                    "compiled PipelineArtifacts and return observations for "
-                    "repair. This tool does not choose, reorder, or edit nodes."
+                    "Run the latest PipelineArtifacts on an isolated bounded "
+                    "sample when a PipelineTrialRunner is configured, returning "
+                    "Constraint Evidence and execution observations for repair. "
+                    "Compatibility mode performs pre-execution validation only. "
+                    "The tool never chooses, reorders, or edits nodes."
                 ),
                 input_schema={
                     "type": "object",

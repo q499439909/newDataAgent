@@ -15,6 +15,7 @@ from ..agents.retrieval import build_retrieval_graph
 from ..agents.shared import WorkOrderGraphState
 from ..agents.strategy import build_strategy_graph
 from ..experiences import PipelineExperienceRetriever
+from ..execution.pipeline_trial import PipelineTrialRunner
 from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
 
 
@@ -33,6 +34,7 @@ def build_main_graph(
     experience_retriever: PipelineExperienceRetriever | None = None,
     requirement_planner: RequirementPlanner | None = None,
     agent_planner: AgentPlanner | None = None,
+    pipeline_trial_runner: PipelineTrialRunner | None = None,
 ):
     """Build the four-agent decision graph.
 
@@ -70,6 +72,7 @@ def build_main_graph(
             operator_library,
             experience_retriever,
             planner=agent_planner,
+            trial_runner=pipeline_trial_runner,
         ),
     )
     graph.add_node("resolve_capability_gaps", resolve_capability_gaps)

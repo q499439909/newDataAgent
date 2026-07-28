@@ -1524,3 +1524,47 @@ WOMEN-Tees_Tanks-id_00000079-09_1_front.jpg
 因此，本轮完成了执行链、门禁和主 Agent hub 基础，但没有完成 Golden Task 的
 正确性闭环：需求规划仍有场景硬编码，且人脸 Evidence 存在已确认的错误。不能
 据此宣称 `yifu` 或整个四 Agent Runtime 已经验收完成。
+
+## 20. 2026-07-28 第二批开发结果：Pipeline Trial 与数据处理 Agent 修复循环
+
+第二批按接手文档冻结的单一根因实施：规划产物与真实 Operator 执行之间缺少
+通用 Trial Observation，因此数据处理 Agent 看不到真实证据，也无法据此修复。
+
+新增的深 Module 只暴露：
+
+```text
+PipelineTrialRunner.run(PipelineTrialRequest)
+  -> PipelineTrialObservation
+```
+
+它负责在隔离副本上执行有界样本、收集逐 Constraint Evidence、区分失败与
+上游已拒绝、汇总 dataset-level Evidence，并返回 Artifact 引用。它不负责
+选择算子、修改参数或重排 Pipeline。
+
+数据处理 Agent 的正式模型循环现在为：
+
+```text
+inspect candidates
+  -> compile three Pipeline variants
+  -> trial_pipeline_variants
+  -> real Operator observations
+  -> model decides finish or recompiles
+```
+
+这满足“模型决策 + Tool 调用 + 环境反馈 + 状态循环”：Tool 提供事实，模型保留
+规划权。兼容模式仍只做前置验证，并以 `trial_mode=pre_execution_validation`
+显式区分，不能报告成真实试跑。
+
+本批没有修改检索 Agent 的职责。它仍只返回 Operator/历史 Pipeline 候选和
+充分性；未来数据库检索继续通过既定 `RetrievalPlan/CandidatePool` 接口接入。
+
+验证覆盖了当前缺 Evidence 失败、车辆数量和文档字符数两个异语义案例、缺
+Evidence 反例、dataset-level 去重、错误拒绝、上游拒绝以及源文件隔离。
+完整回归结果为 `296 passed`。这证明 Trial/repair Interface 具备字段和模态
+替换能力，但不等于 Registry 已经具备任意数据处理 Operator，也不等于 yifu
+全量正式执行与人工 Golden Set 已完成。
+
+真实 yifu 冒烟目前先暴露了上游 Requirement Planner 缺陷：定义性补充被
+逐子句 Coverage 门禁要求必须各自产生新的原子 Constraint，导致 Grounding
+失败。该问题应通过通用的“constraint definition/qualifier”语义建模修复，
+不能在第二批 Trial Tool 内处理，更不能增加 yifu 关键词例外。

@@ -141,6 +141,7 @@ def create_app(
         agent_planner=(
             GatewayAgentPlanner(gateway) if gateway.configured else None
         ),
+        enable_pipeline_trials=gateway.configured,
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service

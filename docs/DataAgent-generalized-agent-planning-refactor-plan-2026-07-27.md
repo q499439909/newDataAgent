@@ -1060,3 +1060,80 @@ Trial Golden Set acceptance = passed
 比较一致性，不断言某个文件名必然等于某个固定人数。OpenCV 的检测值可能与
 人工目测不同，这属于 Operator 质量评估和 Golden Set 门禁问题，不能通过
 在 Agent 或测试中覆盖答案解决。
+
+## 15. 2026-07-28 第二批实施记录：真实 Pipeline Trial Observation
+
+本批只实现已确认的纵向切片，没有扩展检索数据库职责，也没有进入正式执行、
+QC 和主 Agent 全局返工：
+
+```text
+数据处理 Agent 编排三个 Pipeline
+  -> trial_pipeline_variants Tool
+  -> PipelineTrialRunner 在隔离目录执行同一有界样本
+  -> 按 Constraint 汇总 Evidence/失败
+  -> Trial Observation 返回模型
+  -> 模型决定重新编排或结束
+```
+
+正式公开边界为：
+
+```text
+PipelineTrialRunner.run(PipelineTrialRequest)
+  -> PipelineTrialObservation
+```
+
+`PipelineTrialRunner` 隐藏样本发现、源文件复制、DAG 执行、Operator
+Observation 汇总、Constraint 比较、dataset-level Evidence 和 Artifact
+位置。它不选择算子、不重排节点、不自动修复 Pipeline。修复决定仍由数据处理
+Agent 的模型循环产生。
+
+当前已经实现：
+
+- 从确认后的 `TaskSpec` 本地数据源发现确定性有界样本，也可显式传入样本；
+- 在独立 Trial 目录复制输入，真实 Operator 不接触原文件；
+- 使用正式 `OperatorRuntime` 按 Pipeline 顺序执行；
+- 对每个资产和 Constraint 返回 `passed`、`failed`、
+  `missing_evidence` 或 `not_evaluated`；
+- 上游已正确拒绝的资产不会被下游误报为缺 Evidence；
+- Operator 虽执行成功但没有硬约束 Evidence 时，Trial 必须失败；
+- 支持 dataset-level 重复组“一组只保留一个代表”的 Evidence 判断；
+- 三条 Pipeline 全部 Trial 通过后才允许数据处理 Agent 结束；
+- 任一 Trial 失败时，完整 Observation 回到模型，模型可以重新调用编译 Tool；
+- API 在模型配置可用时启用真实 Trial；无模型兼容路径明确标记为
+  `pre_execution_validation`，不能冒充真实试跑。
+
+Data-Juicer Provider 增加了通用输出适配：
+
+- `image_shape_filter` 输出 `width`、`height`；
+- `image_aspect_ratio_filter` 输出 `aspect_ratio`；
+- `image_size_filter` 输出 `file_size_bytes`；
+- 已有 `image_face_count_filter` 继续输出实际运行得到的 `face_count`。
+
+这些 Adapter 只转换 Provider 的固定输出协议，不包含用户语句、任务实体、
+路径或 Pipeline 选择规则。
+
+本批自动化测试覆盖：
+
+- 当前失败机制：Pipeline 节点存在但没有产生 required Evidence；
+- 泛化案例 A：`image.vehicle_count <= 3`；
+- 泛化案例 B：`document.character_count >= 10`；
+- 反例：Operator 成功但 Evidence 缺失；
+- 边界：正确拒绝、错误拒绝、上游拒绝、数据集去重和源文件隔离；
+- Agent 修复：首次错误覆盖返回 `MISSING_EVIDENCE`，模型看到 Observation
+  后重新编排，第二次 Trial 通过。
+
+当前边界必须如实保留：
+
+- Trial 使用小样本，不等于全量正式执行；
+- 尚未计算误删率、漏删率、成本和三个策略的统计显著差异；
+- 真实 Operator 能力仍受 Registry 和 Provider 可用性约束；
+- 正式执行后的 QC 与主 Agent 全局返工属于第三批；
+- `parse_requirement_contract()` 场景正则仍是无模型兼容路径，正式模型配置
+  模式不以它作为规划权威；彻底删除属于单独兼容清理批次。
+
+真实 `D:\data\yifu` 冒烟验证已使用当前模型规划器和完整补充定义执行。该次
+验证没有进入 Retrieval/Processing/Trial：Requirement Planner 的逐子句
+Grounding 门禁把“黑色衣服判定定义”和“默认可见人脸定义”判定为“没有原子
+约束”，并在 TaskSpec 生成阶段终止。这是需求规划层的独立泛化缺陷，不是
+PipelineTrialRunner 执行失败；不得通过给 yifu 增加正则、跳过 Grounding 或
+直接注入 TaskSpec 来伪造第二批端到端成功。

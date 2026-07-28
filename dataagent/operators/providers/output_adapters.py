@@ -72,8 +72,97 @@ def _adapt_face_count(
     adapted["face_count"] = value
     return AdaptedProviderOutput(
         fields=adapted,
-        metrics={"face_count": value},
+        metrics={"face_count": value, "image.face_count": value},
         contract_id="detected_face_count:1",
+    )
+
+
+def _adapt_image_shape(
+    parameters: dict[str, Any], fields: dict[str, Any]
+) -> AdaptedProviderOutput:
+    stats = fields.get("__dj__stats__")
+    if not isinstance(stats, dict) or not {
+        "image_width",
+        "image_height",
+    }.intersection(stats):
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="image_dimensions:1",
+        )
+    width = _single_stat(fields, "image_width")
+    height = _single_stat(fields, "image_height")
+    if (
+        isinstance(width, bool)
+        or not isinstance(width, int)
+        or isinstance(height, bool)
+        or not isinstance(height, int)
+    ):
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="image_dimensions:1",
+            errors=("image_width and image_height must each contain one integer",),
+        )
+    adapted = {key: item for key, item in fields.items() if key != "__dj__stats__"}
+    return AdaptedProviderOutput(
+        fields=adapted,
+        metrics={
+            "width": width,
+            "height": height,
+            "image.width": width,
+            "image.height": height,
+        },
+        contract_id="image_dimensions:1",
+    )
+
+
+def _adapt_aspect_ratio(
+    parameters: dict[str, Any], fields: dict[str, Any]
+) -> AdaptedProviderOutput:
+    stats = fields.get("__dj__stats__")
+    if not isinstance(stats, dict) or "aspect_ratios" not in stats:
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="image_aspect_ratio:1",
+        )
+    value = _single_stat(fields, "aspect_ratios")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="image_aspect_ratio:1",
+            errors=("aspect_ratios must contain exactly one number",),
+        )
+    adapted = {key: item for key, item in fields.items() if key != "__dj__stats__"}
+    return AdaptedProviderOutput(
+        fields=adapted,
+        metrics={
+            "aspect_ratio": float(value),
+            "image.aspect_ratio": float(value),
+        },
+        contract_id="image_aspect_ratio:1",
+    )
+
+
+def _adapt_file_size(
+    parameters: dict[str, Any], fields: dict[str, Any]
+) -> AdaptedProviderOutput:
+    stats = fields.get("__dj__stats__")
+    if not isinstance(stats, dict) or "image_sizes" not in stats:
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="source_file_size_bytes:1",
+        )
+    value = _single_stat(fields, "image_sizes")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="source_file_size_bytes:1",
+            errors=("image_sizes must contain exactly one integer",),
+        )
+    adapted = {key: item for key, item in fields.items() if key != "__dj__stats__"}
+    return AdaptedProviderOutput(
+        fields=adapted,
+        metrics={"file_size_bytes": value, "file.size": value},
+        contract_id="source_file_size_bytes:1",
     )
 
 
@@ -82,6 +171,9 @@ _ADAPTERS: dict[
 ] = {
     "image_tagging_vlm_mapper": _adapt_image_tagging,
     "image_face_count_filter": _adapt_face_count,
+    "image_shape_filter": _adapt_image_shape,
+    "image_aspect_ratio_filter": _adapt_aspect_ratio,
+    "image_size_filter": _adapt_file_size,
 }
 
 

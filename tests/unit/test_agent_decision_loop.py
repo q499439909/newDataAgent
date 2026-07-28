@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from PIL import Image
+
 from dataagent.agents.runtime import (
     AgentDecision,
     AgentDecisionLoop,
@@ -13,6 +15,7 @@ from dataagent.agents.strategy.nodes import generate_sampling_plan
 from dataagent.domain.common import new_id
 from dataagent.domain.specs import TaskSpecVersion
 from dataagent.operators import build_operator_library
+from dataagent.execution.pipeline_trial import PipelineTrialRunner
 import pytest
 
 
@@ -472,6 +475,152 @@ def test_processing_agent_repairs_pipeline_after_trial_observation() -> None:
         "error"
     ]
     assert planner.requests[3].observations[-1].data["ok"] is True
+
+
+def test_processing_agent_repairs_from_real_sample_trial_observation(
+    tmp_path,
+) -> None:
+    source = tmp_path / "asset.png"
+    Image.new("RGB", (80, 80), color="white").save(source)
+    incomplete = [
+        {
+            "strategy": strategy,
+            "nodes": [
+                {
+                    "operator_version_id": "builtin.manifest:1",
+                    "parameters": {},
+                    "constraint_ids": ["constraint_alpha"],
+                }
+            ],
+        }
+        for strategy in ("retention_first", "balanced", "quality_first")
+    ]
+    repaired = [
+        {
+            "strategy": strategy,
+            "nodes": [
+                {
+                    "operator_version_id": "builtin.decode_check:1",
+                    "parameters": {},
+                    "constraint_ids": ["constraint_alpha"],
+                },
+                {
+                    "operator_version_id": "builtin.manifest:1",
+                    "parameters": {},
+                    "constraint_ids": [],
+                },
+            ],
+        }
+        for strategy in ("retention_first", "balanced", "quality_first")
+    ]
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Compile the initial candidates.",
+                tool_name="compile_pipeline_variants",
+                tool_input={"pipelines": incomplete},
+            ),
+            AgentDecision(
+                action="tool",
+                reason_summary="Run the initial candidates on real samples.",
+                tool_name="trial_pipeline_variants",
+                tool_input={},
+            ),
+            AgentDecision(
+                action="tool",
+                reason_summary="Repair the missing Evidence observation.",
+                tool_name="compile_pipeline_variants",
+                tool_input={"pipelines": repaired},
+            ),
+            AgentDecision(
+                action="tool",
+                reason_summary="Run the repaired candidates.",
+                tool_name="trial_pipeline_variants",
+                tool_input={},
+            ),
+            AgentDecision(
+                action="finish",
+                reason_summary="The repaired candidates have real Evidence.",
+                output={"use_compiled_variants": True},
+            ),
+        ]
+    )
+    library = build_operator_library(include_datajuicer=False)
+    spec = TaskSpecVersion(
+        id=new_id("spec"),
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        work_order_id="work_1",
+        objective="Retain assets whose width is at least 64 pixels.",
+        data_sources=(
+            {"type": "local_directory", "uri": str(tmp_path)},
+        ),
+        constraints=(
+            {
+                "id": "constraint_alpha",
+                "source_text": "width is at least 64 pixels",
+                "scope": "asset",
+                "field": "image.width",
+                "operator": "gte",
+                "value": 64,
+                "unit": "pixel",
+                "required_evidence_type": "image_metadata",
+            },
+        ),
+        confirmed=True,
+    )
+    candidates = [
+        {
+            "intent": capability,
+            "capability": capability,
+            "operator_version_id": operator_id,
+            "provider_id": "native",
+            "provider_operator_ref": operator_id,
+            "display_name": operator_id,
+            "score": 0,
+            "runtime_backend": "cpu",
+            "status": "PUBLIC_RELEASE",
+            "executable": True,
+        }
+        for capability, operator_id in (
+            ("image.width", "builtin.decode_check:1"),
+            ("manifest", "builtin.manifest:1"),
+        )
+    ]
+
+    result = generate_pipeline_variants(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "operator_candidates": candidates,
+            "capability_coverage": [],
+            "trace": [],
+        },
+        operator_library=library,
+        planner=planner,
+        trial_runner=PipelineTrialRunner(
+            library,
+            trial_root=tmp_path / "trials",
+        ),
+    )
+
+    failed_trial = planner.requests[2].observations[-1]
+    passed_trial = planner.requests[4].observations[-1]
+    assert failed_trial.tool_name == "trial_pipeline_variants"
+    assert failed_trial.data["ok"] is False
+    assert {
+        item["failure_code"]
+        for pipeline in failed_trial.data["pipelines"]
+        for item in pipeline["constraint_results"]
+    } == {"MISSING_EVIDENCE"}
+    assert passed_trial.data["ok"] is True
+    assert all(
+        pipeline["status"] == "passed"
+        for pipeline in passed_trial.data["pipelines"]
+    )
+    assert len(result["pipeline_variants"]) == 3
 
 
 def test_strategy_agent_uses_tool_observation_to_build_sampling_plan() -> None:

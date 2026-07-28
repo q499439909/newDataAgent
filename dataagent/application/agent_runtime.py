@@ -20,6 +20,7 @@ from ..agents.requirement import RequirementPlanner
 from ..agents.runtime import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
+from ..execution.pipeline_trial import PipelineTrialRunner
 from ..experiences import PipelineExperienceRetriever, PipelineExperienceService
 from ..graph import build_main_graph
 from ..graph.interrupts import revise_task_spec_version
@@ -69,6 +70,8 @@ class AgentRuntime:
         vlm_gateway: Callable[..., dict[str, Any]] | None = None,
         requirement_planner: RequirementPlanner | None = None,
         agent_planner: AgentPlanner | None = None,
+        enable_pipeline_trials: bool = False,
+        pipeline_trial_max_assets: int = 3,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -113,6 +116,19 @@ class AgentRuntime:
         )
         self.builtin_operators = self.operator_library.operators
         self.operator_registry = self.operator_library.registry
+        self.pipeline_trial_runner = (
+            PipelineTrialRunner(
+                self.operator_library,
+                trial_root=(
+                    self.home / "pipeline-trials"
+                    if self.home is not None
+                    else None
+                ),
+                max_assets=pipeline_trial_max_assets,
+            )
+            if enable_pipeline_trials and agent_planner is not None
+            else None
+        )
         self.graph = build_main_graph(
             self.checkpointer,
             operator_library=self.operator_library,
@@ -136,6 +152,7 @@ class AgentRuntime:
             ),
             requirement_planner=requirement_planner,
             agent_planner=agent_planner,
+            pipeline_trial_runner=self.pipeline_trial_runner,
         )
 
     def start(
