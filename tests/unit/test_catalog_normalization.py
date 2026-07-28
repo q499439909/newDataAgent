@@ -19,7 +19,7 @@ from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.domain.pipelines import PipelineVersion
-from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
+from dataagent.domain.specs import ConstraintContract, DataSourceSpec, TaskSpecVersion
 from dataagent.graph.interrupts import revise_task_spec_version
 from dataagent.operators.providers import (
     DataJuicerProcessExecutor,
@@ -39,6 +39,44 @@ from dataagent.operators.catalog_ranking import (
 )
 from dataagent.operators.library import build_operator_library
 from dataagent.operators.validation import validate_parameters
+
+
+def test_revising_structured_task_does_not_restore_legacy_keyword_capabilities() -> None:
+    spec = TaskSpecVersion(
+        id="spec_structured_revision",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement",
+        work_order_id="work_order_structured_revision",
+        objective="保留至少检测到三辆车的图片",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/data/images"),
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_vehicle_count",
+                source_text="至少检测到三辆车",
+                scope="asset",
+                field="image.vehicle_count",
+                operator="gte",
+                value=3,
+                unit="count",
+                required_evidence_type="detected_vehicle_count",
+            ),
+        ),
+        semantic_requirements=("主体是道路场景",),
+        output_actions=("filter", "manifest"),
+    )
+
+    revised = revise_task_spec_version(
+        spec,
+        patch={"preferences": {"output_layout": "flat"}},
+        actor="user_1",
+    )
+
+    assert revised.capability_requirements == ()
+    assert revised.required_capabilities == ()
+    assert revised.output_actions == spec.output_actions
 
 
 def _raw_vlm_descriptor() -> ProviderOperatorDescriptor:
@@ -697,23 +735,32 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
         runtime=OperatorRuntime(operators),
         providers=base.providers,
     )
-    initial = generate_task_spec(
-        {
-            "work_order_id": "work_order_black_clothing",
-            "owner_id": "user_1",
-            "requirement": "筛选出里面穿了黑色衣服的图片",
-            "data_sources": [
-                {
-                    "type": "local_directory",
-                    "uri": "D:/images",
-                    "mapping": {},
-                }
-            ],
-            "trace": [],
-        }
+    initial = TaskSpecVersion(
+        id="spec_black_clothing",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement",
+        work_order_id="work_order_black_clothing",
+        objective="筛选出主体穿黑色衣服的图片",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/images"),
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_black_clothing",
+                source_text="主体穿黑色衣服",
+                scope="asset",
+                field="image.subject_clothing_color",
+                operator="eq",
+                value="black",
+                unit="label",
+                required_evidence_type="visual_semantic_judgment",
+            ),
+        ),
+        semantic_requirements=("主体可见衣物的主要颜色为黑色",),
     )
     revised = revise_task_spec_version(
-        TaskSpecVersion.model_validate(initial["task_spec"]),
+        initial,
         patch={
             "classification": {
                 "mode": "closed_set",
@@ -737,11 +784,7 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
         actor="user_1",
     )
 
-    assert [item.capability for item in revised.capability_requirements] == [
-        "image_decode",
-        "visual_semantic_selection",
-        "manifest",
-    ]
+    assert revised.capability_requirements == ()
     assert revised.output_actions == ("filter", "manifest")
 
     retrieval = generate_retrieval_plan(
@@ -789,9 +832,10 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
     assert visual_node.prompt_binding is not None
     assert visual_node.prompt_binding.template_id == "image-semantic-selection"
     assert visual_node.prompt_binding.template_version == 2
-    assert "筛选出里面穿了黑色衣服的图片" in visual_node.parameters[
+    assert "筛选出里面穿了黑色衣服的图片" not in visual_node.parameters[
         "system_prompt"
     ]
+    assert "主体可见衣物的主要颜色为黑色" in visual_node.parameters["system_prompt"]
     assert '"black_clothing"' in visual_node.parameters["system_prompt"]
     assert "Required visual conditions: none" not in visual_node.parameters[
         "system_prompt"

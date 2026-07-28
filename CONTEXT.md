@@ -36,6 +36,38 @@ _Avoid_: Recipe writer, arbitrary YAML writer
 A durable artifact representation of a pipeline draft or version, suitable for validation, review, reuse, or export.
 _Avoid_: Recipe
 
+**User Constraint**:
+An atomic, user-confirmed condition that a produced asset or dataset must satisfy, including its comparison semantics and required proof.
+_Avoid_: Keyword rule, prompt fragment
+
+**System Invariant**:
+A platform-enforced condition that applies independently of the user's requested filtering criteria, such as source immutability.
+_Avoid_: User Constraint, inferred user requirement
+
+**Evidence Claim**:
+A versioned assertion produced by an Operator about an asset or dataset, including provenance but not an assumption that the assertion is correct.
+_Avoid_: Fact, verified result
+
+**Validated Evidence**:
+An Evidence Claim produced by a qualified Operator or Pipeline and accepted through the applicable verification path, such as deterministic recomputation, qualified model output, or human review.
+_Avoid_: Present field, Operator output
+
+**Requirement Draft**:
+The Data Task Planning Agent's implementation-neutral interpretation of a user request. It contains the objective, atomic Constraint Contracts, ambiguities, assumptions, and acceptance intent, but never concrete Operators, models, parameters, or Pipeline order.
+_Avoid_: Pipeline proposal, Operator selection
+
+**Constraint Contract**:
+An atomic, source-traceable statement of one observable target, comparator, value, unit, hardness, and required Evidence type. Constraint identifiers and targets are task-generated and must not be tied to one regression dataset.
+_Avoid_: Scenario field, fixed business rule
+
+**Constraint Parameter Binding**:
+The Processing Agent's versioned mapping from a Constraint Contract to parameters declared by a selected Operator. Binding follows comparator and parameter-schema semantics; it never supplies observed Evidence values.
+_Avoid_: Evidence value, filename expectation
+
+**Golden Task**:
+A representative end-to-end acceptance scenario kept outside production planning logic and used to test general Agent behaviour.
+_Avoid_: Production template, hard-coded workflow
+
 **Operator**:
 A versioned data-processing capability used inside a Pipeline to inspect, transform, filter, or annotate assets.
 _Avoid_: Control Tool

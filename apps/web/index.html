@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DataAgent 工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="全局导航">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">D</div>
+          <div>
+            <strong>DataAgent</strong>
+            <span>数据生产闭环</span>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" type="button">工作台</button>
+          <button class="nav-item" type="button">项目与工单</button>
+          <button class="nav-item" type="button">实验</button>
+          <button class="nav-item" type="button">数据版本</button>
+          <button class="nav-item" type="button">Pipeline 库</button>
+          <button class="nav-item" type="button">审批中心</button>
+        </nav>
+
+        <section class="task-list" aria-label="工单列表">
+          <div class="section-title">
+            <span>近期工单</span>
+            <button class="icon-button" id="refreshButton" type="button" title="刷新">↻</button>
+          </div>
+          <button class="task-card selected" type="button">
+            <span class="task-status running"></span>
+            <strong id="taskName">猫狗图片清洗与去重</strong>
+            <small id="taskMeta">WAITING_SPEC_APPROVAL · local-user</small>
+          </button>
+          <button class="task-card" type="button">
+            <span class="task-status queued"></span>
+            <strong>夜间街景困难样本扩充</strong>
+            <small>DRAFT · demo</small>
+          </button>
+          <button class="task-card" type="button">
+            <span class="task-status done"></span>
+            <strong>商品主图质量抽检</strong>
+            <small>COMPLETED · demo</small>
+          </button>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Web 主界面 · 临时驾驶舱</p>
+            <h1>训练目标驱动的数据生产工作台</h1>
+          </div>
+          <div class="top-actions">
+            <label class="owner-field">
+              <span>Owner</span>
+              <input id="ownerInput" value="local-user" />
+            </label>
+            <button class="ghost-button" id="loadStateButton" type="button">载入状态</button>
+          </div>
+        </header>
+
+        <section class="command-panel" aria-label="创建任务">
+          <div class="command-copy">
+            <strong>新建数据任务</strong>
+            <span>输入训练目标、数据目录和验收口径，生成 TaskSpec 后进入人工确认。</span>
+          </div>
+          <div class="command-form">
+            <input id="sourceInput" placeholder="本地图片目录，例如 D:\images\incoming" />
+            <textarea id="requirementInput" rows="2">筛选短边至少 1440、主体清晰、无明显水印的猫狗生活照，去重并输出可训练数据集。</textarea>
+            <button class="primary-button" id="startButton" type="button">启动 Agent</button>
+          </div>
+        </section>
+
+        <section class="status-grid" aria-label="任务概览">
+          <article class="metric">
+            <span>当前阶段</span>
+            <strong id="currentStage">需求确认</strong>
+            <small id="nextAction">等待人工确认 TaskSpec</small>
+          </article>
+          <article class="metric">
+            <span>候选充分率</span>
+            <strong id="candidateMetric">78%</strong>
+            <small>目标切片覆盖 12 / 15</small>
+          </article>
+          <article class="metric">
+            <span>预计成本</span>
+            <strong id="costMetric">¥42.80</strong>
+            <small>试跑 180 张代表样本</small>
+          </article>
+          <article class="metric">
+            <span>待人工动作</span>
+            <strong id="hitlMetric">1</strong>
+            <small>高风险决策由人控制</small>
+          </article>
+        </section>
+
+        <section class="main-grid">
+          <div class="primary-column">
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">LangGraph 主图</p>
+                  <h2>闭环进度</h2>
+                </div>
+                <span class="pill" id="threadId">thread_demo</span>
+              </div>
+              <ol class="flow" id="flowList"></ol>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">HITL</p>
+                  <h2>待处理审批</h2>
+                </div>
+                <span class="pill warning" id="interruptKind">task_spec_confirmation</span>
+              </div>
+              <div class="approval" id="approvalPanel"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">Pipeline 对比</p>
+                  <h2>三条代表方案</h2>
+                </div>
+                <div class="segmented" role="tablist">
+                  <button class="active" type="button">表格</button>
+                  <button type="button">流程</button>
+                  <button type="button">样例</button>
+                </div>
+              </div>
+              <div class="pipeline-table" id="pipelineTable"></div>
+            </article>
+          </div>
+
+          <aside class="inspector">
+            <article class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">四 Agent</p>
+                  <h2>最近输出</h2>
+                </div>
+              </div>
+              <div class="agent-list" id="agentList"></div>
+            </article>
+
+            <article class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">版本血缘</p>
+                  <h2>正式对象</h2>
+                </div>
+              </div>
+              <div class="lineage" id="lineageList"></div>
+            </article>
+
+            <article class="panel compact">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">运行控制</p>
+                  <h2>Dataset Run</h2>
+                </div>
+              </div>
+              <div class="run-box">
+                <div class="run-progress"><span id="runProgress"></span></div>
+                <div class="run-meta">
+                  <strong id="runStatus">未提交</strong>
+                  <span id="runDetail">Pipeline 通过后可提交全量执行</span>
+                </div>
+                <button class="primary-button wide" id="submitRunButton" type="button">提交全量 Run</button>
+              </div>
+            </article>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js?v=3"></script>
+  </body>
+</html>

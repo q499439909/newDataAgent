@@ -16,6 +16,8 @@ from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBacke
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
+from ..agents.requirement import RequirementPlanner
+from ..agents.runtime import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
 from ..experiences import PipelineExperienceRetriever, PipelineExperienceService
@@ -65,6 +67,8 @@ class AgentRuntime:
         vision_model: str = "qwen3.7-plus",
         vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         vlm_gateway: Callable[..., dict[str, Any]] | None = None,
+        requirement_planner: RequirementPlanner | None = None,
+        agent_planner: AgentPlanner | None = None,
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
@@ -130,6 +134,8 @@ class AgentRuntime:
                 if self.version_store is not None
                 else None
             ),
+            requirement_planner=requirement_planner,
+            agent_planner=agent_planner,
         )
 
     def start(
@@ -797,6 +803,19 @@ class AgentRuntime:
             OperatorStatus.PUBLIC_RELEASE,
         }
         violations: list[str] = []
+        covered_constraint_ids = {
+            item.constraint_id for item in pipeline.constraint_coverage
+        }
+        missing_constraint_ids = [
+            constraint_id
+            for constraint_id in pipeline.required_constraint_ids
+            if constraint_id not in covered_constraint_ids
+        ]
+        if missing_constraint_ids:
+            violations.append(
+                "Pipeline is missing required constraint coverage: "
+                + ", ".join(missing_constraint_ids)
+            )
         try:
             self.operator_library.runtime.validate_pipeline(pipeline)
         except (KeyError, ValueError) as exc:
@@ -899,6 +918,43 @@ class AgentRuntime:
             rating=rating,
             comment=comment,
         )
+        if not accepted:
+            run = self.run_store.get(run_id, owner_id)
+            record = self._get_authorized(run["work_order_id"], owner_id)
+            snapshot = self.graph.get_state(self._config(record))
+            state = dict(snapshot.values)
+            feedback_observation = {
+                "agent": "main",
+                "status": "feedback_received",
+                "summary": "Negative run feedback requires Pipeline replanning.",
+                "run_id": run_id,
+                "accepted": False,
+                "rating": rating,
+                "comment": comment,
+            }
+            self.graph.update_state(
+                self._config(record),
+                {
+                    "pipeline_variants": [],
+                    "representative_pipelines": [],
+                    "approved_pipeline": {},
+                    "selected_pipeline_id": "",
+                    "pipeline_approval": {},
+                    "sampling_plan": {},
+                    "next_action": "generate_pipeline_candidates",
+                    "current_agent": "main",
+                    "latest_run_feedback": feedback_observation,
+                    "agent_observations": [
+                        *state.get("agent_observations", ()),
+                        feedback_observation,
+                    ],
+                    "trace": [
+                        *state.get("trace", []),
+                        "feedback:negative_pipeline_replan_requested",
+                    ],
+                },
+                as_node="strategy_agent",
+            )
         return {
             "feedback": feedback.model_dump(mode="json"),
             "experience": experience.model_dump(mode="json"),

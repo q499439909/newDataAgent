@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass(frozen=True)
 class AdaptedProviderOutput:
     fields: dict[str, Any]
+    metrics: dict[str, Any] = field(default_factory=dict)
     contract_id: str | None = None
     errors: tuple[str, ...] = ()
 
@@ -49,10 +50,38 @@ def _adapt_image_tagging(
     )
 
 
+def _single_stat(fields: dict[str, Any], name: str) -> Any:
+    stats = fields.get("__dj__stats__", {})
+    value = stats.get(name) if isinstance(stats, dict) else None
+    if isinstance(value, list) and len(value) == 1:
+        return value[0]
+    return None
+
+
+def _adapt_face_count(
+    parameters: dict[str, Any], fields: dict[str, Any]
+) -> AdaptedProviderOutput:
+    value = _single_stat(fields, "face_counts")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return AdaptedProviderOutput(
+            fields=dict(fields),
+            contract_id="detected_face_count:1",
+            errors=("face_counts must contain exactly one integer",),
+        )
+    adapted = {key: item for key, item in fields.items() if key != "__dj__stats__"}
+    adapted["face_count"] = value
+    return AdaptedProviderOutput(
+        fields=adapted,
+        metrics={"face_count": value},
+        contract_id="detected_face_count:1",
+    )
+
+
 _ADAPTERS: dict[
     str, Callable[[dict[str, Any], dict[str, Any]], AdaptedProviderOutput]
 ] = {
     "image_tagging_vlm_mapper": _adapt_image_tagging,
+    "image_face_count_filter": _adapt_face_count,
 }
 
 

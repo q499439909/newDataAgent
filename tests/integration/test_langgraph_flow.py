@@ -61,6 +61,20 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
     assert final["approved_pipeline"]["version"] == 2
     assert final["sampling_plan"]["random_seed"] == 42
     assert final["next_action"] == "submit_dataset_run"
+    assert [item["action"] for item in final["main_agent_decisions"]] == [
+        "run_requirement_agent",
+        "confirm_task_spec",
+        "run_retrieval_agent",
+        "run_processing_agent",
+        "approve_pipeline",
+        "run_strategy_agent",
+        "finish_planning",
+    ]
+    assert final["task_plan"][-1] == {
+        "id": "submit_dataset_run",
+        "label": "Submit the approved dataset run",
+        "status": "ready",
+    }
     assert final["trace"] == [
         "requirement:task_spec_generated",
         "requirement:task_spec_validated",

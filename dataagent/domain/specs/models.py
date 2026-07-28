@@ -29,6 +29,20 @@ class TaskCapabilitySpec(DomainModel):
     required: bool = True
 
 
+class ConstraintContract(DomainModel):
+    id: str = Field(
+        pattern=r"^(?:C\d{2,}|constraint_[a-z0-9][a-z0-9_-]*)$"
+    )
+    source_text: str = Field(min_length=1)
+    scope: Literal["asset", "dataset"]
+    field: str = Field(min_length=1)
+    operator: Literal["eq", "lt", "lte", "gt", "gte"]
+    value: str | bool | int | float
+    unit: str = Field(min_length=1)
+    hardness: Literal["hard", "soft"] = "hard"
+    required_evidence_type: str = Field(min_length=1)
+
+
 class ClassificationLabelSpec(DomainModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     display_name: str = Field(min_length=1)
@@ -60,6 +74,30 @@ class ClassificationSpec(DomainModel):
         if {self.mixed_label, self.unknown_label}.intersection(label_ids):
             raise ValueError("Task labels cannot reuse mixed or unknown labels")
         return self
+
+
+class RequirementDraft(DomainModel):
+    """Business interpretation of a request, before operator retrieval.
+
+    This object deliberately contains no operator, model, or capability choice.
+    Those decisions belong to RetrievalAgent and ProcessingAgent.
+    """
+
+    objective: str = Field(min_length=1)
+    constraints: tuple[ConstraintContract, ...] = ()
+    classification: ClassificationSpec | None = None
+    semantic_requirements: tuple[str, ...] = ()
+    exclusion_requirements: tuple[str, ...] = ()
+    hard_constraints: dict[str, Any] = Field(default_factory=dict)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    ambiguities: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+
+    @property
+    def required_capabilities(self) -> tuple[str, ...]:
+        """Make the role boundary explicit for callers and tests."""
+
+        return ()
 
 
 class TaskSpecHardConstraintsPatch(BaseModel):
@@ -137,9 +175,13 @@ class TaskSpecVersion(VersionedModel):
     work_order_id: str
     objective: str
     data_sources: tuple[DataSourceSpec, ...]
+    planning_origin: Literal[
+        "agent_planner", "legacy_compatibility"
+    ] = "agent_planner"
     output_actions: tuple[str, ...] = ("filter", "manifest")
     required_capabilities: tuple[str, ...] = ()
     capability_requirements: tuple[TaskCapabilitySpec, ...] = ()
+    constraints: tuple[ConstraintContract, ...] = ()
     classification: ClassificationSpec | None = None
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     semantic_requirements: tuple[str, ...] = ()
@@ -171,6 +213,9 @@ class TaskSpecVersion(VersionedModel):
             if item.id in item.depends_on:
                 raise ValueError("Task capabilities cannot depend on themselves")
         self._assert_capability_dag()
+        constraint_ids = [item.id for item in self.constraints]
+        if len(constraint_ids) != len(set(constraint_ids)):
+            raise ValueError("Task constraint ids must be unique")
         return self
 
     def _assert_capability_dag(self) -> None:

@@ -78,6 +78,8 @@ class ImageMetrics(BaseModel):
     dhash: str
     width: int
     height: int
+    aspect_ratio: float = 0.0
+    file_size_bytes: int = 0
     format: str
     brightness: float
     blur_score: float

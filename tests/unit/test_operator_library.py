@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from dataagent.agents.processing.nodes import generate_pipeline_variants
+from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.domain.common import new_id
@@ -20,7 +21,7 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
-from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
+from dataagent.domain.specs import ConstraintContract, DataSourceSpec, TaskSpecVersion
 from dataagent.operators import (
     OperatorLibrary,
     OperatorRegistry,
@@ -249,25 +250,124 @@ class _MixedCatalogSearcher:
 
 class _PlanningCatalogSearcher:
     def search(self):
-        schema = {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        }
         return [
+            {
+                "name": "image_shape_filter",
+                "desc": "Filters images by width and height",
+                "type": "filter",
+                "tags": ["cpu", "image"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "min_width": {"type": "integer", "default": 1},
+                        "max_width": {"type": "integer", "default": 999999},
+                        "min_height": {"type": "integer", "default": 1},
+                        "max_height": {"type": "integer", "default": 999999},
+                        "any_or_all": {"type": "string", "default": "any"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "image_aspect_ratio_filter",
+                "desc": "Filters images by aspect ratio",
+                "type": "filter",
+                "tags": ["cpu", "image"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "min_ratio": {"type": "number", "default": 0.0},
+                        "max_ratio": {"type": "number", "default": 100.0},
+                        "any_or_all": {"type": "string", "default": "any"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "image_size_filter",
+                "desc": "Filters images by file size",
+                "type": "filter",
+                "tags": ["cpu", "image"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "min_size": {"type": "string", "default": "0"},
+                        "max_size": {"type": "string", "default": "1TB"},
+                        "any_or_all": {"type": "string", "default": "any"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
             {
                 "name": "image_face_count_filter",
                 "desc": "Filters images by face count",
                 "type": "filter",
                 "tags": ["cpu", "image"],
-                "parameter_schema": schema,
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "cv_classifier": {"type": "string", "default": ""},
+                        "min_face_count": {"type": "integer", "default": 1},
+                        "max_face_count": {"type": "integer", "default": 1},
+                        "any_or_all": {"type": "string", "default": "any"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "image_tagging_vlm_mapper",
+                "desc": "Evaluates task-specific visual semantic requirements",
+                "type": "mapper",
+                "tags": ["api", "gpu", "image", "multimodal", "vllm"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "system_prompt": {
+                            "type": ["string", "null"],
+                            "default": None,
+                        },
+                        "tag_field_name": {
+                            "type": "string",
+                            "default": "image_tags",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "detect_character_attributes_mapper",
+                "desc": "Detect main character clothing color attributes",
+                "type": "mapper",
+                "tags": ["cuda", "model"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "key_value_grouper",
+                "desc": "Group records by a configured key value",
+                "type": "grouper",
+                "tags": ["cpu", "dataset"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "default": ""},
+                    },
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "image_segment_mapper",
                 "desc": "Segments images with a model",
                 "type": "mapper",
                 "tags": ["gpu", "image", "model"],
-                "parameter_schema": schema,
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
             },
         ]
 
@@ -287,6 +387,384 @@ def _planning_library():
         runtime=OperatorRuntime(operators),
         providers=base.providers,
     )
+
+
+def test_retrieval_uses_structured_capabilities_for_yifu_operator_coverage() -> None:
+    library = _planning_library()
+    spec = TaskSpecVersion(
+        id="spec_yifu",
+        version=1,
+        created_by="user_1",
+        change_reason="confirmed constraints",
+        work_order_id="work_order_yifu",
+        objective="opaque confirmed task text",
+        data_sources=(DataSourceSpec(type="local_directory", uri="D:/data/yifu"),),
+        capability_requirements=tuple(
+            {
+                "id": capability,
+                "capability": capability,
+                "description": capability,
+            }
+            for capability in (
+                "image_shape",
+                "aspect_ratio",
+                "file_size",
+                "face_count",
+            )
+        ),
+        confirmed=True,
+    )
+
+    result = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset({RuntimeBackend.CPU}),
+    )
+
+    coverage = {
+        item["capability"]: item for item in result["capability_coverage"]
+    }
+    assert {
+        capability: coverage[capability]["selected_operator_version_id"]
+        for capability in coverage
+    } == {
+        "image_shape": "datajuicer.image_shape_filter:1",
+        "aspect_ratio": "datajuicer.image_aspect_ratio_filter:1",
+        "file_size": "datajuicer.image_size_filter:1",
+        "face_count": "datajuicer.image_face_count_filter:1",
+    }
+
+
+def test_retrieval_derives_operator_candidates_from_generic_constraints() -> None:
+    library = _planning_library()
+    spec = TaskSpecVersion(
+        id="spec_generic_face",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement draft",
+        work_order_id="work_order_generic_face",
+        objective="保留两张及以下人脸的图片",
+        data_sources=(DataSourceSpec(type="local_directory", uri="D:/data/images"),),
+        constraints=(
+            ConstraintContract(
+                id="constraint_face_count",
+                source_text="两张及以下人脸",
+                scope="asset",
+                field="image.face_count",
+                operator="lte",
+                value=2,
+                unit="count",
+                required_evidence_type="detected_face_count",
+            ),
+        ),
+        confirmed=True,
+    )
+
+    result = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset({RuntimeBackend.CPU}),
+    )
+
+    assert result["retrieval_plan"]["sufficient"] is True
+    assert result["capability_coverage"][0]["capability_id"] == (
+        "constraint_face_count"
+    )
+    assert result["capability_coverage"][0]["selected_operator_version_id"] == (
+        "datajuicer.image_face_count_filter:1"
+    )
+
+    pipelines = [
+        PipelineVersion.model_validate(item)
+        for item in generate_pipeline_variants(
+            {
+                "owner_id": "user_1",
+                "task_spec": spec.model_dump(mode="json"),
+                "trace": [],
+                **result,
+            },
+            operator_library=library,
+        )["pipeline_variants"]
+    ]
+    balanced = next(
+        item for item in pipelines if item.strategy == PipelineStrategy.BALANCED
+    )
+    face_node = next(
+        node
+        for node in balanced.nodes
+        if node.operator_version_id == "datajuicer.image_face_count_filter:1"
+    )
+    assert face_node.parameters["max_face_count"] == 2
+    assert face_node.parameters["min_face_count"] == 0
+    assert {item.constraint_id for item in balanced.constraint_coverage} == {
+        "constraint_face_count"
+    }
+
+
+def test_structured_constraints_override_stale_capability_plan_and_keep_system_io() -> None:
+    library = _planning_library()
+    spec = TaskSpecVersion(
+        id="spec_constraint_authority",
+        version=2,
+        created_by="user_1",
+        change_reason="confirmed structured task",
+        work_order_id="work_order_constraint_authority",
+        objective="Apply the confirmed observable constraints",
+        data_sources=(DataSourceSpec(type="local_directory", uri="D:/data/images"),),
+        capability_requirements=(
+            {
+                "id": "image_decode",
+                "capability": "image_decode",
+                "description": "stale legacy plan that must not hide constraints",
+            },
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_min_width",
+                source_text="width must be at least 64 pixels",
+                scope="asset",
+                field="image.width",
+                operator="gte",
+                value=64,
+                unit="px",
+                required_evidence_type="image_metadata",
+            ),
+            ConstraintContract(
+                id="constraint_max_faces",
+                source_text="at most two faces",
+                scope="asset",
+                field="image.face_count",
+                operator="lte",
+                value=2,
+                unit="count",
+                required_evidence_type="detected_face_count",
+            ),
+            ConstraintContract(
+                id="constraint_unique",
+                source_text="remove duplicate images",
+                scope="dataset",
+                field="image.is_duplicate",
+                operator="eq",
+                value=False,
+                unit="boolean",
+                required_evidence_type="duplicate_decision",
+            ),
+        ),
+        confirmed=True,
+    )
+
+    result = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset({RuntimeBackend.CPU}),
+    )
+
+    coverage = {
+        item["capability_id"]: item for item in result["capability_coverage"]
+    }
+    assert set(coverage) == {
+        "constraint_min_width",
+        "constraint_max_faces",
+        "constraint_unique",
+        "system_image_decode",
+        "system_manifest",
+    }
+    assert all(item["status"] == "covered" for item in coverage.values())
+
+    assert all(
+        not item["capability"].startswith("constraint:")
+        for item in coverage.values()
+    )
+
+
+def test_processing_compiles_complete_ordered_pipeline_from_structured_constraints() -> None:
+    library = _planning_library()
+
+    def constraint(
+        id: str,
+        text: str,
+        field: str,
+        operator: str,
+        value,
+        unit: str,
+        evidence: str,
+        *,
+        scope: str = "asset",
+    ) -> ConstraintContract:
+        return ConstraintContract(
+            id=id,
+            source_text=text,
+            scope=scope,
+            field=field,
+            operator=operator,
+            value=value,
+            unit=unit,
+            required_evidence_type=evidence,
+        )
+
+    spec = TaskSpecVersion(
+        id="spec_multi_constraint_images",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement",
+        work_order_id="work_order_multi_constraint_images",
+        objective="筛选满足全部已确认条件的图片",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/data/images"),
+        ),
+        constraints=(
+            constraint("C01", "宽度不少于64像素", "image.width", "gte", 64, "px", "image_metadata"),
+            constraint("C02", "高度不少于64像素", "image.height", "gte", 64, "px", "image_metadata"),
+            constraint("C03", "宽高比不少于0.3", "image.aspect_ratio", "gte", 0.3, "ratio", "image_metadata"),
+            constraint("C04", "宽高比不大于3.5", "image.aspect_ratio", "lte", 3.5, "ratio", "image_metadata"),
+            constraint("C05", "文件不少于1KB", "asset.file_size", "gte", 1024, "bytes", "source_file_metadata"),
+            constraint("C06", "文件不大于20MB", "asset.file_size", "lte", 20 * 1024 * 1024, "bytes", "source_file_metadata"),
+            constraint("C07", "人脸数量两张及以下", "image.face_count", "lte", 2, "count", "detected_face_count"),
+            constraint("C08", "主体穿黑色衣服", "image.subject_clothing_color", "eq", "black", "label", "visual_semantic_judgment"),
+            constraint("C09", "去除重复图片", "image.is_duplicate", "eq", False, "boolean", "duplicate_decision", scope="dataset"),
+        ),
+        semantic_requirements=("主体可见衣物的主要颜色为黑色",),
+        confirmed=True,
+    )
+    retrieval = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset(
+            {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+        ),
+    )
+
+    # The compatibility path must report uncertainty instead of manufacturing
+    # a case-specific Pipeline. Production planning uses the model-driven
+    # Retrieval and Processing loops.
+    assert retrieval["retrieval_plan"]["sufficient"] is False
+    assert any(
+        item["status"] != "covered"
+        for item in retrieval["capability_coverage"]
+    )
+
+
+def test_semantic_attribute_constraint_uses_visual_reasoning_not_object_detection() -> None:
+    library = _planning_library()
+    spec = TaskSpecVersion(
+        id="spec_semantic_attribute",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement",
+        work_order_id="work_order_semantic_attribute",
+        objective="保留满足已确认视觉属性的图片",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/data/images"),
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_visual_attribute",
+                source_text="主体穿黑色衣服",
+                scope="asset",
+                field="image.main_subject_clothing_color",
+                operator="eq",
+                value="black",
+                unit="color",
+                required_evidence_type="clothing_color_classification",
+            ),
+        ),
+        semantic_requirements=("判断主体衣服颜色是否为黑色",),
+        confirmed=True,
+    )
+
+    result = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset(
+            {RuntimeBackend.CPU, RuntimeBackend.REMOTE}
+        ),
+    )
+
+    semantic = next(
+        item
+        for item in result["capability_coverage"]
+        if item["capability_id"] == "constraint_visual_attribute"
+    )
+    assert semantic["capability"] == "visual_semantic_selection"
+    assert semantic["status"] == "covered"
+    assert semantic["selected_operator_version_id"] == (
+        "builtin.visual_semantic_selection:1"
+    )
+    assert result["retrieval_plan"]["sufficient"] is True
+
+
+def test_dataset_operation_intent_wins_over_weak_parameter_name_overlap() -> None:
+    library = _planning_library()
+    spec = TaskSpecVersion(
+        id="spec_dataset_dedup",
+        version=1,
+        created_by="user_1",
+        change_reason="model-planned requirement",
+        work_order_id="work_order_dataset_dedup",
+        objective="去除重复图片",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/data/images"),
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_dedup",
+                source_text="去除重复图片",
+                scope="dataset",
+                field="image.duplicate_group_id",
+                operator="eq",
+                value="keep_unique_representative_only",
+                unit="flag",
+                required_evidence_type="duplicate_detection",
+            ),
+        ),
+        confirmed=True,
+    )
+
+    result = generate_retrieval_plan(
+        {
+            "owner_id": "user_1",
+            "task_spec": spec.model_dump(mode="json"),
+            "trace": [],
+        },
+        operator_registry=library.registry,
+        allow_draft_candidates=True,
+        available_runtime_backends=frozenset({RuntimeBackend.CPU}),
+    )
+
+    dedup = next(
+        item
+        for item in result["capability_coverage"]
+        if item["capability_id"] == "constraint_dedup"
+    )
+    assert dedup["capability"] == "perceptual_duplicate"
+    assert dedup["status"] == "covered"
+    assert dedup["selected_operator_version_id"] == "builtin.perceptual_dedup:1"
+    assert result["retrieval_plan"]["sufficient"] is True
 
 
 def test_datajuicer_discovery_is_lazy_cached_and_metadata_only() -> None:
@@ -405,9 +883,7 @@ def test_task_requirement_matches_executable_and_blocked_datajuicer_candidates()
     )
     by_intent = {item.intent: item for item in matches}
 
-    assert by_intent["face_count"].provider_operator_ref == "image_face_count_filter"
-    assert by_intent["face_count"].executable is True
-    assert by_intent["face_count"].runtime_backend == RuntimeBackend.CPU
+    assert "face_count" not in by_intent
     assert by_intent["segmentation"].executable is False
     assert by_intent["segmentation"].runtime_backend == RuntimeBackend.CUDA
     assert "not available" in (by_intent["segmentation"].blocked_reason or "")
@@ -503,7 +979,7 @@ def test_processing_does_not_inject_candidates_without_capability_coverage() -> 
         "builtin.perceptual_dedup:1",
         "builtin.manifest:1",
     ]
-    assert retrieval["operator_candidates"][0]["executable"] is True
+    assert retrieval["operator_candidates"] == []
 
 
 def test_prepared_provider_result_preserves_upstream_asset_state() -> None:

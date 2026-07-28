@@ -33,6 +33,11 @@ class WorkOrderGraphState(TypedDict, total=False):
     next_action: str
     terminated: bool
     trace: list[str]
+    main_agent_action: str
+    main_agent_decisions: list[dict[str, Any]]
+    agent_observations: list[dict[str, Any]]
+    task_plan: list[dict[str, str]]
+    latest_run_feedback: dict[str, Any]
 
 
 def append_trace(state: WorkOrderGraphState, event: str) -> list[str]:

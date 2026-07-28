@@ -1,4 +1,5 @@
 from .models import (
+    ConstraintCoverage,
     NodePreviewItem,
     NodePreviewSet,
     PipelineEdge,
@@ -9,6 +10,7 @@ from .models import (
 )
 
 __all__ = [
+    "ConstraintCoverage",
     "NodePreviewItem",
     "NodePreviewSet",
     "PipelineEdge",

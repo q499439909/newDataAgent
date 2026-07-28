@@ -1,0 +1,6 @@
+{
+  "name": "DataAgent 多模态数据智能生产平台",
+  "description": "面向模型训练与评测的 DataAgent 多模态数据智能生产闭环平台，涵盖企业级用户账号注册/SHA-256离散哈希认证、多租户数据隔离、4 Agent 智能协同、个人与公共算子/Pipeline 库、全流程数据质量与模型评测闭环。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

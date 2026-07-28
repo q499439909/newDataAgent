@@ -27,6 +27,12 @@ from .output_adapters import adapt_provider_output
 
 
 _SAFE_OPERATOR_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_FILTER_CONSTRAINT_REASONS = {
+    "image_shape_filter": "CONSTRAINT_REJECTED:image_shape",
+    "image_aspect_ratio_filter": "CONSTRAINT_REJECTED:aspect_ratio",
+    "image_size_filter": "CONSTRAINT_REJECTED:file_size",
+    "image_face_count_filter": "CONSTRAINT_REJECTED:face_count",
+}
 
 
 def _tail(value: str, limit: int = 4000) -> str:
@@ -378,9 +384,13 @@ except ImportError:
             stats_meta = stats_by_id.get(internal_id, {}).get("__dj__meta__", {})
             if isinstance(stats_meta, dict):
                 output_fields.update(stats_meta)
+            stats = stats_by_id.get(internal_id, {}).get("__dj__stats__", {})
+            if isinstance(stats, dict):
+                output_fields["__dj__stats__"] = stats
             output_fields_by_id[internal_id] = output_fields
 
         output_errors: dict[str, tuple[str, ...]] = {}
+        output_metrics_by_id: dict[str, dict[str, Any]] = {}
         for internal_id in internal_ids:
             adapted = adapt_provider_output(
                 request.provider_operator_ref,
@@ -388,7 +398,8 @@ except ImportError:
                 output_fields_by_id.get(internal_id, {}),
             )
             output_fields_by_id[internal_id] = adapted.fields
-            if adapted.errors:
+            output_metrics_by_id[internal_id] = adapted.metrics
+            if adapted.errors and internal_id in rows_by_id:
                 output_errors[internal_id] = adapted.errors
         if output_errors:
             examples = "; ".join(
@@ -440,7 +451,10 @@ except ImportError:
                     asset_id=item.asset_id,
                     result=OperatorResult(
                         output_path=output_path,
-                        metrics=item.input_data.metrics,
+                        metrics={
+                            **item.input_data.metrics,
+                            **output_metrics_by_id.get(internal_id, {}),
+                        },
                         labels={
                             **item.input_data.labels,
                             "datajuicer_operator": request.provider_operator_ref,
@@ -461,7 +475,17 @@ except ImportError:
                         embeddings=item.input_data.embeddings,
                         decision="continue" if kept is not None else "reject",
                         reason_codes=(
-                            [] if kept is not None else ["DATAJUICER_FILTERED_OUT"]
+                            []
+                            if kept is not None
+                            else [
+                                "DATAJUICER_FILTERED_OUT",
+                                *(
+                                    [_FILTER_CONSTRAINT_REASONS[request.provider_operator_ref]]
+                                    if request.provider_operator_ref
+                                    in _FILTER_CONSTRAINT_REASONS
+                                    else []
+                                ),
+                            ]
                         ),
                     ),
                 )

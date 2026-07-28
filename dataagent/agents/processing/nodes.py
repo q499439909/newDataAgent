@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from ...domain.common import new_id
-from ...domain.operators import RuntimeBackend
+from ...domain.operators import OperatorCategory, RuntimeBackend
 from ...domain.pipelines import (
+    ConstraintCoverage,
     PipelineEdge,
     PipelineNode,
     PipelineStrategy,
@@ -18,7 +19,9 @@ from ...operators import OperatorLibrary, build_operator_library
 from ...operators.catalog_matching import OperatorCatalogMatch
 from ...operators.validation import validate_parameters
 from ...prompts import builtin_prompt_registry
+from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
+from ...domain.specs.binding import bind_constraint_parameters
 
 
 STRATEGY_POLICIES: dict[PipelineStrategy, dict[str, Any]] = {
@@ -62,6 +65,10 @@ _NODE_IDS = {
     "class_resolution": "class_resolution",
     "dataset_partition": "dataset_partition",
     "perceptual_deduplication": "deduplicate",
+    "image_shape": "image_shape",
+    "aspect_ratio": "aspect_ratio",
+    "file_size": "file_size",
+    "face_count": "face_count",
     "manifest": "manifest",
 }
 
@@ -127,8 +134,13 @@ def _classification_prompt_context(task_spec: TaskSpecVersion) -> list[dict[str,
 
 
 def _semantic_selection_variables(task_spec: TaskSpecVersion) -> dict[str, Any]:
+    semantic_objective = (
+        "Apply the confirmed visual semantic selection contract."
+        if task_spec.constraints
+        else task_spec.objective
+    )
     return {
-        "task_objective": task_spec.objective,
+        "task_objective": semantic_objective,
         "semantic_requirements": (
             "; ".join(task_spec.semantic_requirements) or task_spec.objective
         ),
@@ -153,12 +165,12 @@ def _candidate_map(state: WorkOrderGraphState) -> dict[str, OperatorCatalogMatch
 def _coverage_selection(
     state: WorkOrderGraphState,
 ) -> list[tuple[str, str]]:
+    spec = TaskSpecVersion.model_validate(state["task_spec"])
     coverage = [
         CapabilityCoverage.model_validate(item)
         for item in state.get("capability_coverage", ())
     ]
     if not coverage:
-        spec = TaskSpecVersion.model_validate(state["task_spec"])
         if spec.capability_requirements or spec.required_capabilities:
             raise ValueError(
                 "Capability coverage is required before compiling requested capabilities"
@@ -174,11 +186,49 @@ def _coverage_selection(
             "Cannot compile pipelines with uncovered capabilities: "
             + ", ".join(gaps)
         )
-    return [
-        (item.capability, str(item.selected_operator_version_id))
-        for item in coverage
-        if item.selected_operator_version_id
-    ]
+    constraint_order = {
+        constraint.id: index for index, constraint in enumerate(spec.constraints)
+    }
+
+    def priority(item: CapabilityCoverage) -> tuple[int, int]:
+        if item.capability == "image_decode":
+            return (-2, 0)
+        if item.capability_id in constraint_order:
+            return (0, constraint_order[item.capability_id])
+        if item.capability == "manifest":
+            return (2, 0)
+        return (1, 0)
+
+    selected: list[tuple[str, str]] = []
+    seen_operator_ids: set[str] = set()
+    for item in sorted(coverage, key=priority):
+        if not item.selected_operator_version_id:
+            continue
+        operator_id = str(item.selected_operator_version_id)
+        if operator_id in seen_operator_ids:
+            continue
+        seen_operator_ids.add(operator_id)
+        selected.append((item.capability, operator_id))
+    return selected
+
+
+def _node_id_for_operator(
+    capability: str,
+    operator_id: str,
+    library: OperatorLibrary,
+) -> str:
+    if capability in _NODE_IDS:
+        return _NODE_IDS[capability]
+    reference = library.registry.get(operator_id).provider.provider_operator_ref
+    normalized = reference.rsplit(".", 1)[-1]
+    for suffix in ("_filter", "_mapper", "_operator"):
+        normalized = normalized.removesuffix(suffix)
+    for known_capability, node_id in sorted(
+        _NODE_IDS.items(), key=lambda item: -len(item[0])
+    ):
+        if known_capability in normalized:
+            return node_id
+    return normalized
 
 
 def _runtime_for(
@@ -393,7 +443,48 @@ def _parameters_for_capability(
     capability: str,
     policy: dict[str, Any],
     task_spec: TaskSpecVersion,
+    operator_parameter_schema: dict[str, Any],
 ) -> dict[str, Any]:
+    bound, _ = bind_constraint_parameters(
+        operator_parameter_schema,
+        task_spec.constraints,
+    )
+    if bound:
+        return bound
+    constraints = {
+        (item.field.rsplit(".", 1)[-1], item.operator): item.value
+        for item in task_spec.constraints
+    }
+    if capability == "image_shape":
+        return {
+            "min_width": int(constraints[("width_px", "gte")]),
+            "min_height": int(constraints[("height_px", "gte")]),
+            "any_or_all": "all",
+        }
+    if capability == "aspect_ratio":
+        return {
+            "min_ratio": float(constraints[("aspect_ratio", "gte")]),
+            "max_ratio": float(constraints[("aspect_ratio", "lte")]),
+            "any_or_all": "all",
+        }
+    if capability == "file_size":
+        minimum = int(constraints[("file_size_bytes", "gte")])
+        maximum = int(constraints[("file_size_bytes", "lte")])
+        return {
+            "min_size": _format_binary_size(minimum),
+            "max_size": _format_binary_size(maximum),
+            "any_or_all": "all",
+        }
+    if capability == "face_count":
+        if ("face_count", "lte") in constraints:
+            upper_bound = int(constraints[("face_count", "lte")])
+        else:
+            upper_bound = int(constraints[("face_count", "lt")]) - 1
+        return {
+            "min_face_count": 0,
+            "max_face_count": upper_bound,
+            "any_or_all": "all",
+        }
     if capability == "image_quality":
         return {"confidence_threshold": policy["quality_threshold"]}
     if capability == "authenticity_assessment":
@@ -424,6 +515,75 @@ def _parameters_for_capability(
             "unknown_label": contract["unknown_label"],
         }
     return {}
+
+
+def _format_binary_size(value: int) -> str:
+    if value % (1024 * 1024) == 0:
+        return f"{value // (1024 * 1024)}MB"
+    if value % 1024 == 0:
+        return f"{value // 1024}KB"
+    return str(value)
+
+
+_CONSTRAINT_NODE_IDS = {
+    "width_px": "image_shape",
+    "height_px": "image_shape",
+    "aspect_ratio": "aspect_ratio",
+    "file_size_bytes": "file_size",
+    "face_count": "face_count",
+    "primary_subject_garment_color": "visual_tagging",
+    "exact_duplicate_count": "deduplicate",
+    "perceptual_duplicate_policy_applied": "deduplicate",
+    "source_assets_immutable": "ingest",
+}
+
+
+def _constraint_coverage(
+    spec: TaskSpecVersion,
+    nodes: tuple[PipelineNode, ...],
+    library: OperatorLibrary,
+    state: WorkOrderGraphState,
+) -> tuple[ConstraintCoverage, ...]:
+    by_id = {node.id: node for node in nodes}
+    by_operator_id = {node.operator_version_id: node for node in nodes}
+    selected_by_constraint = {
+        item.capability_id: item.selected_operator_version_id
+        for item in (
+            CapabilityCoverage.model_validate(payload)
+            for payload in state.get("capability_coverage", ())
+        )
+        if item.selected_operator_version_id
+    }
+    coverage: list[ConstraintCoverage] = []
+    for constraint in spec.constraints:
+        normalized_field = constraint.field.rsplit(".", 1)[-1]
+        node_id = _CONSTRAINT_NODE_IDS.get(normalized_field)
+        node = by_operator_id.get(
+            str(selected_by_constraint.get(constraint.id, ""))
+        )
+        if node is None:
+            node = by_id.get(node_id or "")
+        if node is None:
+            for candidate in nodes:
+                operator = library.registry.get(candidate.operator_version_id)
+                _, covered = bind_constraint_parameters(
+                    operator.parameter_schema,
+                    (constraint,),
+                )
+                if covered:
+                    node = candidate
+                    break
+        if node is None:
+            continue
+        coverage.append(
+            ConstraintCoverage(
+                constraint_id=constraint.id,
+                node_id=node.id,
+                operator_version_id=node.operator_version_id,
+                evidence_type=constraint.required_evidence_type,
+            )
+        )
+    return tuple(coverage)
 
 
 def _compile_nodes(
@@ -522,14 +682,23 @@ def _compile_nodes(
         ):
             continue
 
-        base_node_id = _NODE_IDS.get(capability, f"capability_{capability}")
+        base_node_id = _node_id_for_operator(
+            capability,
+            operator_id,
+            library,
+        )
         used_node_ids[base_node_id] = used_node_ids.get(base_node_id, 0) + 1
         node_id = (
             base_node_id
             if used_node_ids[base_node_id] == 1
             else f"{base_node_id}_{used_node_ids[base_node_id]}"
         )
-        parameters = _parameters_for_capability(capability, policy, task_spec)
+        parameters = _parameters_for_capability(
+            capability,
+            policy,
+            task_spec,
+            operator.parameter_schema,
+        )
         if operator_id in candidates:
             parameters = {
                 **candidates[operator_id].parameters,
@@ -591,6 +760,13 @@ def _build_pipeline(
             else "processing_agent"
         ),
         template_experience_id=template_experience_id,
+        required_constraint_ids=tuple(item.id for item in spec.constraints),
+        constraint_coverage=_constraint_coverage(
+            spec,
+            nodes,
+            operator_library or build_operator_library(include_datajuicer=False),
+            state,
+        ),
     )
 
 
@@ -599,7 +775,14 @@ def generate_pipeline_variants(
     *,
     operator_library: OperatorLibrary | None = None,
     experience_retriever: PipelineExperienceRetriever | None = None,
+    planner: AgentPlanner | None = None,
 ) -> dict:
+    if planner is not None:
+        return _generate_agent_pipeline_variants(
+            state,
+            operator_library=operator_library,
+            planner=planner,
+        )
     spec = TaskSpecVersion.model_validate(state["task_spec"])
     library = operator_library or build_operator_library(include_datajuicer=False)
     available_operator_ids = {
@@ -640,10 +823,449 @@ def generate_pipeline_variants(
     }
 
 
+def _generate_agent_pipeline_variants(
+    state: WorkOrderGraphState,
+    *,
+    operator_library: OperatorLibrary | None,
+    planner: AgentPlanner,
+) -> dict:
+    library = operator_library or build_operator_library(include_datajuicer=False)
+    spec = TaskSpecVersion.model_validate(state["task_spec"])
+    candidate_payloads = [
+        OperatorCatalogMatch.model_validate(item)
+        for item in state.get("operator_candidates", ())
+    ]
+    candidates = {
+        item.operator_version_id: item
+        for item in candidate_payloads
+        if item.executable
+    }
+    allowed_by_constraint: dict[str, set[str]] = {}
+    for payload in state.get("capability_coverage", ()):
+        coverage_item = CapabilityCoverage.model_validate(payload)
+        allowed = {
+            item.operator_version_id
+            for item in coverage_item.candidates
+            if item.executable
+        }
+        if coverage_item.selected_operator_version_id:
+            allowed.add(coverage_item.selected_operator_version_id)
+        allowed_by_constraint[coverage_item.capability_id] = allowed
+    compiled: list[PipelineVersion] = []
+    trial_passed = False
+
+    def inspect_operator(payload: dict[str, Any]) -> dict[str, Any]:
+        operator_id = str(payload.get("operator_version_id", ""))
+        if operator_id not in candidates:
+            raise ValueError(
+                "Processing Agent may inspect only executable retrieved candidates"
+            )
+        operator = library.registry.get(operator_id)
+        return {
+            "operator": {
+                "operator_version_id": operator.id,
+                "display_name": operator.display_name,
+                "description": operator.description,
+                "category": operator.primary_category.value,
+                "capability_tags": sorted(operator.capability_tags),
+                "parameter_schema": operator.parameter_schema,
+                "input_schema": operator.input_schema,
+                "output_schema": operator.output_schema,
+                "limitations": list(operator.limitations),
+            }
+        }
+
+    def compile_variants(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal trial_passed
+        trial_passed = False
+        raw_pipelines = payload.get("pipelines")
+        if not isinstance(raw_pipelines, list):
+            raise ValueError("pipelines must be an array")
+        by_strategy: dict[PipelineStrategy, dict[str, Any]] = {}
+        for raw in raw_pipelines:
+            if not isinstance(raw, dict):
+                raise ValueError("Every Pipeline proposal must be an object")
+            strategy = PipelineStrategy(str(raw.get("strategy", "")))
+            if strategy in by_strategy:
+                raise ValueError(f"Duplicate Pipeline strategy: {strategy.value}")
+            by_strategy[strategy] = raw
+        if set(by_strategy) != set(PipelineStrategy):
+            raise ValueError("Exactly one proposal is required for each strategy")
+
+        required_constraints = tuple(
+            item.id for item in spec.constraints if item.hardness == "hard"
+        )
+        constraints = {item.id: item for item in spec.constraints}
+        variants: list[PipelineVersion] = []
+        required_system_capabilities = {
+            action
+            for action in spec.output_actions
+            if any(
+                operator.primary_category == OperatorCategory.OUTPUT
+                and (
+                    action in operator.capability_tags
+                    or action == operator.secondary_category
+                )
+                for operator in library.registry.search(include_drafts=True)
+            )
+        }
+        for strategy in PipelineStrategy:
+            raw = by_strategy[strategy]
+            raw_nodes = raw.get("nodes")
+            if not isinstance(raw_nodes, list) or not raw_nodes:
+                raise ValueError(f"{strategy.value} requires at least one node")
+            nodes: list[PipelineNode] = []
+            coverage: list[ConstraintCoverage] = []
+            covered_ids: set[str] = set()
+            for index, raw_node in enumerate(raw_nodes, start=1):
+                if not isinstance(raw_node, dict):
+                    raise ValueError("Pipeline nodes must be objects")
+                operator_id = str(
+                    raw_node.get("operator_version_id", "")
+                )
+                if operator_id not in candidates:
+                    raise ValueError(
+                        "Pipeline uses an Operator that was not returned as an "
+                        f"executable retrieval candidate: {operator_id}"
+                    )
+                operator = library.registry.get(operator_id)
+                parameters = dict(raw_node.get("parameters") or {})
+                validate_parameters(operator.parameter_schema, parameters)
+                node_id = f"{strategy.value}_{index:02d}"
+                nodes.append(
+                    PipelineNode(
+                        id=node_id,
+                        operator_version_id=operator.id,
+                        name=operator.display_name,
+                        category=operator.primary_category.value,
+                        parameters=parameters,
+                        runtime_backend=candidates[operator_id].runtime_backend,
+                        required=bool(raw_node.get("required", True)),
+                    )
+                )
+                for constraint_id in raw_node.get("constraint_ids") or ():
+                    constraint_id = str(constraint_id)
+                    if constraint_id not in constraints:
+                        raise ValueError(
+                            f"Unknown Constraint coverage: {constraint_id}"
+                        )
+                    if constraint_id in covered_ids:
+                        continue
+                    constraint = constraints[constraint_id]
+                    allowed = allowed_by_constraint.get(constraint_id, set())
+                    if allowed and operator.id not in allowed:
+                        raise ValueError(
+                            f"{operator.id} was not retrieved as evidence for "
+                            f"Constraint {constraint_id}"
+                        )
+                    expected_parameters, bound = bind_constraint_parameters(
+                        operator.parameter_schema,
+                        (constraint,),
+                    )
+                    if bound and any(
+                        parameters.get(name) != value
+                        for name, value in expected_parameters.items()
+                    ):
+                        raise ValueError(
+                            f"{operator.id} parameters do not implement "
+                            f"Constraint {constraint_id}: expected "
+                            f"{expected_parameters}"
+                        )
+                    coverage.append(
+                        ConstraintCoverage(
+                            constraint_id=constraint_id,
+                            node_id=node_id,
+                            operator_version_id=operator.id,
+                            evidence_type=constraint.required_evidence_type,
+                        )
+                    )
+                    covered_ids.add(constraint_id)
+            missing = set(required_constraints).difference(covered_ids)
+            if missing:
+                raise ValueError(
+                    f"{strategy.value} does not cover Constraints: "
+                    + ", ".join(sorted(missing))
+                )
+            for capability in sorted(required_system_capabilities):
+                if not any(
+                    (
+                        capability
+                        in library.registry.get(
+                            node.operator_version_id
+                        ).capability_tags
+                        or capability
+                        == library.registry.get(
+                            node.operator_version_id
+                        ).secondary_category
+                    )
+                    for node in nodes
+                ):
+                    raise ValueError(
+                        f"{strategy.value} lacks required system capability "
+                        f"{capability}"
+                    )
+            edges = tuple(
+                PipelineEdge(source=left.id, target=right.id)
+                for left, right in zip(nodes, nodes[1:])
+            )
+            variants.append(
+                PipelineVersion(
+                    id=new_id("pipeline_version"),
+                    family_id=f"pipeline_{strategy.value}",
+                    version=1,
+                    created_by=state["owner_id"],
+                    change_reason=(
+                        "Processing Agent compiled an ordered proposal through "
+                        "the governed Artifact Tool"
+                    ),
+                    strategy=strategy,
+                    task_spec_version_id=spec.id,
+                    nodes=tuple(nodes),
+                    edges=edges,
+                    created_from="processing_agent_react",
+                    required_constraint_ids=required_constraints,
+                    constraint_coverage=tuple(coverage),
+                )
+            )
+        compiled.clear()
+        compiled.extend(variants)
+        return {
+            "ok": True,
+            "pipelines": [
+                item.model_dump(mode="json") for item in variants
+            ],
+        }
+
+    def trial_variants(_payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal trial_passed
+        if not compiled:
+            raise ValueError(
+                "No compiled Pipeline variants exist; call "
+                "compile_pipeline_variants first."
+            )
+        results: list[dict[str, Any]] = []
+        for pipeline in compiled:
+            violations: list[str] = []
+            covered = {item.constraint_id for item in pipeline.constraint_coverage}
+            missing = [
+                constraint_id
+                for constraint_id in pipeline.required_constraint_ids
+                if constraint_id not in covered
+            ]
+            if missing:
+                violations.append(
+                    "missing required constraint coverage: "
+                    + ", ".join(missing)
+                )
+            try:
+                library.runtime.validate_pipeline(pipeline)
+            except (KeyError, ValueError) as exc:
+                violations.append(str(exc))
+            results.append(
+                {
+                    "pipeline_id": pipeline.id,
+                    "strategy": pipeline.strategy.value,
+                    "node_count": len(pipeline.nodes),
+                    "constraint_coverage_count": len(
+                        pipeline.constraint_coverage
+                    ),
+                    "ok": not violations,
+                    "violations": violations,
+                }
+            )
+        trial_passed = all(item["ok"] for item in results)
+        return {
+            "ok": trial_passed,
+            "pipelines": results,
+        }
+
+    def validate_finish(_payload: dict[str, Any]) -> dict[str, Any]:
+        errors: list[dict[str, str]] = []
+        if not compiled:
+            errors.append(
+                {
+                    "code": "NO_VALIDATED_PIPELINES",
+                    "message": (
+                        "Call compile_pipeline_variants successfully before "
+                        "finishing."
+                    ),
+                }
+            )
+        if compiled and not trial_passed:
+            errors.append(
+                {
+                    "code": "PIPELINE_TRIAL_REQUIRED",
+                    "message": (
+                        "Call trial_pipeline_variants after the latest "
+                        "successful compilation before finishing."
+                    ),
+                }
+            )
+        return {"ok": not errors, "errors": errors}
+
+    loop = AgentDecisionLoop(
+        agent_name="processing",
+        planner=planner,
+        tools=(
+            AgentTool(
+                name="inspect_operator",
+                description=(
+                    "Inspect one retrieved executable Operator and its exact "
+                    "parameter schema."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "operator_version_id": {"type": "string"}
+                    },
+                    "required": ["operator_version_id"],
+                    "additionalProperties": False,
+                },
+                execute=inspect_operator,
+            ),
+            AgentTool(
+                name="compile_pipeline_variants",
+                description=(
+                    "Compile and validate three ordered Pipeline proposals. "
+                    "Order and parameters are preserved exactly; the tool never "
+                    "selects or reorders Operators."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "pipelines": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "strategy": {
+                                        "enum": [
+                                            item.value
+                                            for item in PipelineStrategy
+                                        ]
+                                    },
+                                    "nodes": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "operator_version_id": {
+                                                    "type": "string"
+                                                },
+                                                "parameters": {
+                                                    "type": "object"
+                                                },
+                                                "constraint_ids": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "string"
+                                                    },
+                                                },
+                                                "required": {
+                                                    "type": "boolean"
+                                                },
+                                            },
+                                            "required": [
+                                                "operator_version_id",
+                                                "parameters",
+                                                "constraint_ids",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                },
+                                "required": ["strategy", "nodes"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["pipelines"],
+                    "additionalProperties": False,
+                },
+                execute=compile_variants,
+            ),
+            AgentTool(
+                name="trial_pipeline_variants",
+                description=(
+                    "Run deterministic pre-execution checks against the latest "
+                    "compiled PipelineArtifacts and return observations for "
+                    "repair. This tool does not choose, reorder, or edit nodes."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                execute=trial_variants,
+            ),
+        ),
+        max_iterations=15,
+        finish_validator=validate_finish,
+    )
+    result = loop.run(
+        goal=(
+            "Use only retrieved candidates and confirmed Constraints to design "
+            "retention_first, balanced, and quality_first Pipelines. Decide "
+            "Operator selection, order, parameters, and Constraint coverage. "
+            "Compile them with the Artifact Tool and repair any validation "
+            "observation. Trial the latest compiled artifacts before finishing."
+        ),
+        context={
+            "task_spec": spec.model_dump(mode="json"),
+            "operator_candidates": [
+                item.model_dump(mode="json") for item in candidates.values()
+            ],
+            "pipeline_experience_matches": state.get(
+                "pipeline_experience_matches", ()
+            ),
+            "latest_run_feedback": state.get("latest_run_feedback"),
+            "observations": state.get("agent_observations", ()),
+        },
+    )
+    if result.status != "finished" or not compiled:
+        raise ValueError(
+            "Processing Agent finished without validated Pipeline variants"
+        )
+    observation = {
+        "agent": "processing",
+        "status": result.status,
+        "summary": result.decisions[-1].reason_summary,
+        "tool_observations": [
+            item.model_dump(mode="json") for item in result.observations
+        ],
+    }
+    return {
+        "pipeline_variants": [
+            item.model_dump(mode="json") for item in compiled
+        ],
+        "pipeline_experience_matches": state.get(
+            "pipeline_experience_matches", []
+        ),
+        "agent_observations": [
+            *state.get("agent_observations", ()),
+            observation,
+        ],
+        "current_agent": "processing",
+        "trace": append_trace(state, "processing:agent_loop_finished"),
+    }
+
+
 def select_representative_pipelines(state: WorkOrderGraphState) -> dict:
     variants = [PipelineVersion.model_validate(item) for item in state["pipeline_variants"]]
     if {item.strategy for item in variants} != set(PipelineStrategy):
         raise ValueError("Exactly one compiled pipeline is required for each strategy")
+    incomplete: list[str] = []
+    for pipeline in variants:
+        covered = {item.constraint_id for item in pipeline.constraint_coverage}
+        missing = set(pipeline.required_constraint_ids).difference(covered)
+        if missing:
+            incomplete.extend(sorted(missing))
+    if incomplete:
+        raise ValueError(
+            "Pipelines cannot be offered for approval because required "
+            "constraint coverage is missing: "
+            + ", ".join(dict.fromkeys(incomplete))
+        )
     return {
         "representative_pipelines": [item.model_dump(mode="json") for item in variants],
         "next_action": "approve_pipeline",

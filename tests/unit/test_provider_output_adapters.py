@@ -38,3 +38,16 @@ def test_unknown_operator_output_is_preserved_without_global_tag_assumptions() -
     assert result.fields == fields
     assert result.contract_id is None
     assert result.errors == ()
+
+
+def test_face_count_adapter_exposes_filter_stat_as_constraint_evidence() -> None:
+    result = adapt_provider_output(
+        "image_face_count_filter",
+        {"min_face_count": 0, "max_face_count": 1},
+        {"__dj__stats__": {"face_counts": [1]}},
+    )
+
+    assert result.errors == ()
+    assert result.metrics == {"face_count": 1}
+    assert result.fields["face_count"] == 1
+    assert result.contract_id == "detected_face_count:1"

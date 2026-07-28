@@ -8,9 +8,12 @@ from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, StreamingResponse
+from starlette.staticfiles import StaticFiles
 
 from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.agents.requirement import GatewayRequirementPlanner
+from dataagent.agents.runtime import GatewayAgentPlanner
 from dataagent.local_stack import health_payload
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
@@ -103,6 +106,17 @@ def create_app(
     conversation_service: ConversationService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DataAgent Control Plane", version="0.3.0")
+    web_dir = Path(__file__).resolve().parents[1] / "web"
+    if web_dir.exists():
+        app.mount("/web", StaticFiles(directory=web_dir, html=True), name="web")
+
+        @app.get("/web")
+        def web_index() -> FileResponse:
+            return FileResponse(web_dir / "index.html")
+
+        @app.get("/app")
+        def app_index() -> FileResponse:
+            return FileResponse(web_dir / "index.html")
     settings = Settings.load()
     gateway = ModelGateway(settings)
     vlm_gateway = gateway.call_vision_model_json if settings.api_key else None
@@ -121,6 +135,12 @@ def create_app(
         vision_model=settings.vision_model,
         vision_api_base_url=settings.vision_api_base_url,
         vlm_gateway=vlm_gateway,
+        requirement_planner=(
+            GatewayRequirementPlanner(gateway) if gateway.configured else None
+        ),
+        agent_planner=(
+            GatewayAgentPlanner(gateway) if gateway.configured else None
+        ),
     )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service

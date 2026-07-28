@@ -287,19 +287,23 @@ class DatasetRunExecutor:
         remote_limits: list[int] = []
         for node in ordered_nodes:
             operator = self.operator_runtime.get(node.operator_version_id)
-            if operator.spec.execution_scope != ExecutionScope.ASSET:
+            prepared_batch = bool(
+                getattr(operator, "supports_dataset_batch", False)
+            )
+            if (
+                operator.spec.execution_scope != ExecutionScope.ASSET
+                and not prepared_batch
+            ):
                 return 1, {
                     "reason": "dataset_scoped_operator",
                     "operator_version_id": node.operator_version_id,
                 }
-            if not bool(getattr(operator, "parallel_safe", False)):
+            if (
+                not prepared_batch
+                and not bool(getattr(operator, "parallel_safe", False))
+            ):
                 return 1, {
                     "reason": "operator_not_parallel_safe",
-                    "operator_version_id": node.operator_version_id,
-                }
-            if bool(getattr(operator, "supports_dataset_batch", False)):
-                return 1, {
-                    "reason": "dataset_batch_operator",
                     "operator_version_id": node.operator_version_id,
                 }
             if node.runtime_backend.value == "remote":
@@ -505,6 +509,7 @@ class DatasetRunExecutor:
         self,
         run: dict[str, Any],
         artifact_root: Path,
+        dataset_operator_results: dict[str, Any],
     ) -> OperatorContext:
         context: OperatorContext
 
@@ -533,6 +538,7 @@ class DatasetRunExecutor:
                 "artifact_root": artifact_root,
                 "cancel_check": cancel_check,
                 "event_sink": event_sink,
+                "dataset_operator_results": dataset_operator_results,
             },
         )
         return context
@@ -547,6 +553,7 @@ class DatasetRunExecutor:
         staging_files: Path,
         artifact_root: Path,
         worker_count: int,
+        dataset_operator_results: dict[str, Any],
     ) -> str:
         existing_by_sequence = {item["sequence"]: item for item in existing}
         pending: list[tuple[int, dict[str, Any]]] = []
@@ -586,7 +593,11 @@ class DatasetRunExecutor:
                     planned_source=planned_source,
                     ordered_nodes=ordered_nodes,
                     staging_files=staging_files,
-                    context=self._parallel_asset_context(run, artifact_root),
+                    context=self._parallel_asset_context(
+                        run,
+                        artifact_root,
+                        dataset_operator_results,
+                    ),
                 )
                 futures[future] = sequence
                 return True
@@ -727,7 +738,6 @@ class DatasetRunExecutor:
             is_dataset = operator.spec.execution_scope == ExecutionScope.DATASET
             is_batch_filter = (
                 batchable_prefix
-                and operator.spec.primary_category == OperatorCategory.FILTERING
                 and bool(getattr(operator, "supports_dataset_batch", False))
             )
             if not is_dataset and not is_batch_filter:
@@ -785,6 +795,9 @@ class DatasetRunExecutor:
                 staging_files=staging_files,
                 artifact_root=self.home / "runs" / run["id"] / "artifacts",
                 worker_count=parallel_workers,
+                dataset_operator_results=context.shared.get(
+                    "dataset_operator_results", {}
+                ),
             )
             if control_status == "PAUSING":
                 self.run_store.mark_paused(run["id"])

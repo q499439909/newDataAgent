@@ -9,7 +9,7 @@ from typing import Any
 
 from PIL import Image
 
-from dataagent.domain.operators import RuntimeBackend, RuntimeProfile
+from dataagent.domain.operators import OperatorCategory, RuntimeBackend, RuntimeProfile
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 from dataagent.domain.specs import DataSourceSpec, TaskSpecVersion
 from dataagent.evaluation import QualityEvaluator
@@ -162,6 +162,74 @@ class ConcurrentVlmGateway:
                 "request_id": request_id,
                 "model": "vision-test",
             }
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class PreparedBatchOperator:
+    supports_dataset_batch = True
+    parallel_safe = False
+
+    def __init__(self, parties: int) -> None:
+        base_spec = build_operator_library(
+            include_datajuicer=False
+        ).registry.get("builtin.manifest:1")
+        self.spec = base_spec.model_copy(
+            update={
+                "id": "test.prepared_batch:1",
+                "family_id": "test.prepared_batch",
+                "display_name": "Prepared batch filter",
+                "primary_category": OperatorCategory.FILTERING,
+                "implementation_ref": (
+                    "tests.integration.test_parallel_dataset_execution:"
+                    "PreparedBatchOperator"
+                ),
+            }
+        )
+        self.barrier = threading.Barrier(parties)
+        self.max_active = 0
+        self.active = 0
+        self._lock = threading.Lock()
+
+    def prepare_dataset(
+        self,
+        *,
+        node_id: str,
+        context: OperatorContext,
+        inputs: tuple[OperatorInput, ...],
+        parameters: dict,
+        runtime_backend: RuntimeBackend,
+    ) -> None:
+        context.shared.setdefault("dataset_operator_results", {})[node_id] = {
+            item.source_path: OperatorResult(
+                output_path=item.current_path,
+                labels={"prepared_batch": True},
+            )
+            for item in inputs
+        }
+
+    def execute(
+        self,
+        context: OperatorContext,
+        input_data: OperatorInput,
+        parameters: dict,
+    ) -> OperatorResult:
+        node_id = str(context.shared["active_node_id"])
+        prepared = context.shared["dataset_operator_results"][node_id][
+            input_data.source_path
+        ]
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.barrier.wait(timeout=2)
+            return prepared.model_copy(
+                update={
+                    "metrics": input_data.metrics,
+                    "labels": {**input_data.labels, **prepared.labels},
+                }
+            )
         finally:
             with self._lock:
                 self.active -= 1
@@ -474,3 +542,21 @@ def test_native_remote_vlm_runs_full_asset_contract_concurrently(
         ).glob("*.json")
     )
     assert len(evidence_files) == 4
+
+
+def test_prepared_batch_filter_replays_results_in_parallel(tmp_path: Path) -> None:
+    operator = PreparedBatchOperator(parties=2)
+    executor, run_store = _prepared_executor(
+        tmp_path,
+        operator,
+        worker_concurrency=2,
+    )
+
+    completed = executor.execute("run_parallel")
+
+    assert completed["status"] == "SUCCEEDED"
+    assert operator.max_active == 2
+    assert all(
+        item["labels"]["prepared_batch"] is True
+        for item in run_store.items("run_parallel")
+    )

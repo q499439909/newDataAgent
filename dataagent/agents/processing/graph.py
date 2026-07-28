@@ -4,6 +4,7 @@ from langgraph.graph import END, START, StateGraph
 
 from ...operators import OperatorLibrary
 from ...experiences import PipelineExperienceRetriever
+from ..runtime import AgentPlanner
 from ..shared import WorkOrderGraphState
 from .nodes import generate_pipeline_variants, select_representative_pipelines
 
@@ -11,6 +12,7 @@ from .nodes import generate_pipeline_variants, select_representative_pipelines
 def build_processing_graph(
     operator_library: OperatorLibrary | None = None,
     experience_retriever: PipelineExperienceRetriever | None = None,
+    planner: AgentPlanner | None = None,
 ):
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node(
@@ -19,6 +21,7 @@ def build_processing_graph(
             generate_pipeline_variants,
             operator_library=operator_library,
             experience_retriever=experience_retriever,
+            planner=planner,
         ),
     )
     graph.add_node("select_representatives", select_representative_pipelines)

@@ -5,6 +5,9 @@ model.env.*
 dataagent.local.env
 !.env.example
 .dataagent/
+.dataagent-dev/
+.dataagent-dev2/
+.dataagent-yifu-runtime/
 .pytest_cache/
 __pycache__/
 *.py[cod]

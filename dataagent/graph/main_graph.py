@@ -1,23 +1,25 @@
 from __future__ import annotations
 
+from functools import partial
+
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from ..operators import OperatorLibrary, build_operator_library
 from ..domain.operators import RuntimeBackend
 from ..agents.processing import build_processing_graph
-from ..agents.requirement import build_requirement_graph
+from ..agents.runtime import AgentPlanner
+from ..agents.main import decide_main_agent_turn
+from ..agents.requirement import RequirementPlanner, build_requirement_graph
 from ..agents.retrieval import build_retrieval_graph
 from ..agents.shared import WorkOrderGraphState
 from ..agents.strategy import build_strategy_graph
 from ..experiences import PipelineExperienceRetriever
 from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
-from .routing import (
-    route_after_pipeline_approval,
-    route_after_retrieval,
-    route_after_capability_resolution,
-    route_after_spec_approval,
-)
+
+
+def _route_main_agent(state: WorkOrderGraphState) -> str:
+    return state["main_agent_action"]
 
 
 def build_main_graph(
@@ -29,6 +31,8 @@ def build_main_graph(
         {RuntimeBackend.CPU}
     ),
     experience_retriever: PipelineExperienceRetriever | None = None,
+    requirement_planner: RequirementPlanner | None = None,
+    agent_planner: AgentPlanner | None = None,
 ):
     """Build the four-agent decision graph.
 
@@ -41,7 +45,14 @@ def build_main_graph(
         include_datajuicer=False
     )
     graph = StateGraph(WorkOrderGraphState)
-    graph.add_node("requirement_agent", build_requirement_graph())
+    graph.add_node(
+        "main_agent",
+        partial(decide_main_agent_turn, planner=agent_planner),
+    )
+    graph.add_node(
+        "requirement_agent",
+        build_requirement_graph(requirement_planner),
+    )
     graph.add_node("confirm_task_spec", confirm_task_spec)
     graph.add_node(
         "retrieval_agent",
@@ -49,45 +60,43 @@ def build_main_graph(
             operator_library.registry,
             allow_draft_candidates=allow_draft_datajuicer_candidates,
             available_runtime_backends=available_runtime_backends,
+            planner=agent_planner,
+            experience_retriever=experience_retriever,
         ),
     )
     graph.add_node(
         "processing_agent",
-        build_processing_graph(operator_library, experience_retriever),
+        build_processing_graph(
+            operator_library,
+            experience_retriever,
+            planner=agent_planner,
+        ),
     )
     graph.add_node("resolve_capability_gaps", resolve_capability_gaps)
     graph.add_node("approve_pipeline", approve_pipeline)
-    graph.add_node("strategy_agent", build_strategy_graph())
+    graph.add_node("strategy_agent", build_strategy_graph(agent_planner))
 
-    graph.add_edge(START, "requirement_agent")
-    graph.add_edge("requirement_agent", "confirm_task_spec")
+    graph.add_edge(START, "main_agent")
     graph.add_conditional_edges(
-        "confirm_task_spec",
-        route_after_spec_approval,
+        "main_agent",
+        _route_main_agent,
         {
-            "confirm": "confirm_task_spec",
-            "retrieval": "retrieval_agent",
-            "end": END,
+            "run_requirement_agent": "requirement_agent",
+            "confirm_task_spec": "confirm_task_spec",
+            "run_retrieval_agent": "retrieval_agent",
+            "resolve_capability_gaps": "resolve_capability_gaps",
+            "run_processing_agent": "processing_agent",
+            "approve_pipeline": "approve_pipeline",
+            "run_strategy_agent": "strategy_agent",
+            "finish_planning": END,
+            "terminate": END,
         },
     )
-    graph.add_conditional_edges(
-        "retrieval_agent",
-        route_after_retrieval,
-        {
-            "processing": "processing_agent",
-            "resolution": "resolve_capability_gaps",
-        },
-    )
-    graph.add_conditional_edges(
-        "resolve_capability_gaps",
-        route_after_capability_resolution,
-        {"retrieval": "retrieval_agent", "end": END},
-    )
-    graph.add_edge("processing_agent", "approve_pipeline")
-    graph.add_conditional_edges(
-        "approve_pipeline",
-        route_after_pipeline_approval,
-        {"strategy": "strategy_agent", "end": END},
-    )
-    graph.add_edge("strategy_agent", END)
+    graph.add_edge("requirement_agent", "main_agent")
+    graph.add_edge("confirm_task_spec", "main_agent")
+    graph.add_edge("retrieval_agent", "main_agent")
+    graph.add_edge("resolve_capability_gaps", "main_agent")
+    graph.add_edge("processing_agent", "main_agent")
+    graph.add_edge("approve_pipeline", "main_agent")
+    graph.add_edge("strategy_agent", "main_agent")
     return graph.compile(checkpointer=checkpointer)

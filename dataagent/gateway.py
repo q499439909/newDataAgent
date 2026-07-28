@@ -15,6 +15,8 @@ from .config import Settings
 from .application.conversation_actions import conversation_action_json_schema
 from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
+from .domain.specs import RequirementDraft
+from .agents.runtime import AgentDecision, AgentPlanningRequest
 
 
 class ModelGatewayError(RuntimeError):
@@ -42,6 +44,35 @@ def _extract_json(text: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or not payload:
         raise ModelGatewayError("Model response did not contain a JSON object")
     return payload
+
+
+def _requirement_draft_grounding_errors(
+    requirement: str,
+    draft: RequirementDraft,
+) -> list[str]:
+    compact_requirement = re.sub(r"\s+", "", requirement)
+    errors: list[str] = []
+    for constraint in draft.constraints:
+        compact_span = re.sub(r"\s+", "", constraint.source_text)
+        if compact_span not in compact_requirement:
+            errors.append(
+                f"{constraint.id}.source_text is not an exact span of the requirement"
+            )
+    grounded_spans = [
+        re.sub(r"\s+", "", constraint.source_text)
+        for constraint in draft.constraints
+    ]
+    for raw_clause in re.split(r"[；;\n]+", requirement):
+        clause = raw_clause.rsplit("：", 1)[-1]
+        clause = re.sub(r"^\s*\d+\s*[.、)]\s*", "", clause).strip()
+        compact_clause = re.sub(r"\s+", "", clause)
+        if len(compact_clause) < 4:
+            continue
+        if not any(span and span in compact_clause for span in grounded_spans):
+            errors.append(
+                f"requirement clause has no atomic constraint: {clause}"
+            )
+    return errors
 
 
 class ModelGateway:
@@ -256,6 +287,133 @@ class ModelGateway:
                 "Clarification model questions do not match TaskSpec ambiguities"
             )
         return payload, result.usage
+
+    def plan_requirement_draft(
+        self,
+        *,
+        requirement: str,
+        data_sources: tuple[dict, ...],
+    ) -> dict[str, Any]:
+        """Interpret a request without choosing operators or implementation."""
+
+        route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)
+        schema = RequirementDraft.model_json_schema()
+        system = (
+            "You are DataAgent's Requirement Planning Agent. Convert the user's "
+            "request into a complete, implementation-neutral RequirementDraft. "
+            "Split every independently testable condition into one atomic constraint. "
+            "Every filtering, transformation, classification, annotation, deduplication, "
+            "or output clause must have at least one Constraint; a semantic requirement "
+            "does not substitute for its Constraint. "
+            "Preserve comparison boundaries exactly (for example < differs from <=), "
+            "normalize units, retain the original source span, and list genuinely "
+            "blocking ambiguities. Constraint `field` is a generic observable target "
+            "such as image.face_count or image.vehicle_count. "
+            "Do not choose capabilities, operators, libraries, models, parameters, "
+            "pipeline nodes, or execution order; RetrievalAgent and ProcessingAgent "
+            "own those decisions. Do not infer evidence values from filenames or "
+            "paths. Return JSON only and match this JSON Schema exactly: "
+            + json.dumps(schema, ensure_ascii=False)
+        )
+        request_payload: dict[str, Any] = {
+            "requirement": requirement,
+            "data_sources": data_sources,
+        }
+        grounding_errors: list[str] = []
+        for attempt in range(3):
+            if grounding_errors:
+                request_payload["repair_observation"] = {
+                    "errors": grounding_errors,
+                    "instruction": (
+                        "Discard every ungrounded constraint and regenerate from "
+                        "the original requirement only."
+                    ),
+                }
+            result = self._messages(
+                route.model_id,
+                system,
+                json.dumps(request_payload, ensure_ascii=False),
+                max_tokens=3000,
+            )
+            draft = RequirementDraft.model_validate(_extract_json(result.text))
+            grounding_errors = _requirement_draft_grounding_errors(
+                requirement,
+                draft,
+            )
+            if not grounding_errors:
+                return draft.model_dump(mode="json")
+            request_payload["previous_invalid_draft"] = draft.model_dump(mode="json")
+        raise ModelGatewayError(
+            "Requirement planner could not produce a grounded draft: "
+            + "; ".join(grounding_errors)
+        )
+
+    def plan_agent_decision(
+        self,
+        request: AgentPlanningRequest,
+    ) -> dict[str, Any]:
+        """Choose one governed Agent action from tools and observations."""
+
+        task_kind = {
+            "retrieval": ModelTaskKind.RETRIEVAL_PLANNING,
+            "processing": ModelTaskKind.PROCESSING_PLANNING,
+            "strategy": ModelTaskKind.STRATEGY_PLANNING,
+        }.get(request.agent_name, ModelTaskKind.REQUIREMENT_PLANNING)
+        route = self.routing.route(task_kind)
+        system = (
+            f"You are DataAgent's {request.agent_name} Agent. Work toward the "
+            "given goal using only the supplied governed tools and factual "
+            "observations. Choose one next action per response. For action=tool, "
+            "set tool_name to an available tool and provide its arguments in "
+            "tool_input. After a tool result, inspect the observation before "
+            "deciding again. Use finish only when the goal is satisfied and put "
+            "the typed result in output. Use report_gap when available evidence "
+            "cannot cover the goal, and ask_user only when an explicit user "
+            "choice is required. Do not infer operator support from requirement "
+            "keywords and do not invent operator IDs, parameters, evidence, or "
+            "tool results. Return JSON only matching this schema: "
+            + json.dumps(AgentDecision.model_json_schema(), ensure_ascii=False)
+        )
+        payload = {
+            "agent": request.agent_name,
+            "goal": request.goal,
+            "iteration": request.iteration,
+            "context": request.context,
+            "tools": request.tools,
+            "observations": [
+                item.model_dump(mode="json") for item in request.observations
+            ],
+        }
+        last_error: Exception | None = None
+        max_tokens = {
+            "main": 800,
+            "retrieval": 2000,
+            "processing": 5000,
+            "strategy": 2000,
+        }.get(request.agent_name, 1500)
+        for _attempt in range(3):
+            result = self._messages(
+                route.model_id,
+                system,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                max_tokens=max_tokens,
+            )
+            try:
+                return AgentDecision.model_validate(
+                    _extract_json(result.text)
+                ).model_dump(mode="json")
+            except (ModelGatewayError, ValueError) as exc:
+                last_error = exc
+                payload["repair_observation"] = {
+                    "error": str(exc),
+                    "previous_response": result.text[:2000],
+                    "instruction": (
+                        "Return one non-empty JSON object matching AgentDecision."
+                    ),
+                }
+        raise ModelGatewayError(
+            f"Agent planner did not return a valid decision: {last_error}"
+        )
 
     def plan_task(self, requirement: str, source_path: str) -> tuple[TaskSpec, ModelUsage]:
         route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)

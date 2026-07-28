@@ -362,7 +362,12 @@ def test_worker_resumes_from_asset_checkpoint_without_reprocessing(tmp_path) -> 
             "decision": "keep",
             "reason_codes": [],
             "metrics": metrics,
-            "labels": {"quality_pass": True},
+            "labels": {
+                "quality_pass": True,
+                "duplicate": False,
+                "duplicate_group_id": "checkpoint_group_a",
+                "canonical_asset_path": str(first.resolve()),
+            },
         },
     )
     worker.run_store.initialize_plan(

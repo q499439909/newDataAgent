@@ -57,21 +57,33 @@ def revise_task_spec_version(
     exclusion_requirements = _merge_unique(
         spec.exclusion_requirements, patch.get("exclusion_requirements")
     )
-    planning_text = " ".join(
-        [objective, *semantic_requirements, *exclusion_requirements]
-    )
-    capabilities = decompose_task_capabilities(
-        planning_text,
-        has_semantic_selection=bool(
-            semantic_requirements or exclusion_requirements
-        ),
-    )
     disabled = {
         str(item)
         for item in hard_constraints.get("disabled_capabilities", [])
         if str(item).strip()
     }
-    capabilities = exclude_task_capabilities(capabilities, disabled)
+    uses_legacy_requirement_parser = (
+        spec.planning_origin == "legacy_compatibility"
+    )
+    if spec.constraints and not uses_legacy_requirement_parser:
+        # A structured TaskSpec describes what must be true, not how to
+        # implement it. Retrieval derives operator capabilities from those
+        # constraints after confirmation; re-running the legacy keyword
+        # decomposer here would silently replace the model-planned task.
+        capabilities = ()
+        output_actions = spec.output_actions
+    else:
+        planning_text = " ".join(
+            [objective, *semantic_requirements, *exclusion_requirements]
+        )
+        capabilities = decompose_task_capabilities(
+            planning_text,
+            has_semantic_selection=bool(
+                semantic_requirements or exclusion_requirements
+            ),
+        )
+        capabilities = exclude_task_capabilities(capabilities, disabled)
+        output_actions = infer_output_actions(capabilities)
     ambiguities = infer_task_ambiguities(
         capabilities,
         hard_constraints=hard_constraints,
@@ -85,7 +97,11 @@ def revise_task_spec_version(
             "version": spec.version + 1,
             "parent_version_id": spec.id,
             "created_by": actor,
-            "change_reason": "TaskSpec revised from conversation",
+            "change_reason": (
+                "legacy requirement planning revised from conversation"
+                if uses_legacy_requirement_parser
+                else "TaskSpec revised from conversation"
+            ),
             "objective": objective,
             "hard_constraints": hard_constraints,
             "semantic_requirements": semantic_requirements,
@@ -93,7 +109,7 @@ def revise_task_spec_version(
             "preferences": preferences,
             "classification": classification,
             "capability_requirements": capabilities,
-            "output_actions": infer_output_actions(capabilities),
+            "output_actions": output_actions,
             "ambiguities": ambiguities,
             "confirmed": False,
         }

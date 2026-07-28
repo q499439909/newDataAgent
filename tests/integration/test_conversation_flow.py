@@ -7,6 +7,7 @@ from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.conversation import ConversationService
 from dataagent.application.conversation_actions import parse_conversation_action
 from dataagent.config import Settings
+from dataagent.domain.specs import ConstraintContract, RequirementDraft
 from dataagent.gateway import ModelGatewayError
 
 
@@ -81,6 +82,25 @@ class MalformedAfterStartGateway:
             "Expecting ',' delimiter",
             '{"intent":"QUERY_CONTROL_FACTS" "facets":["task_spec"]}',
             38,
+        )
+
+
+class StaticRequirementPlanner:
+    def plan(self, request):
+        return RequirementDraft(
+            objective=request.requirement,
+            constraints=(
+                ConstraintContract(
+                    id="constraint_min_width",
+                    source_text="图片宽度不少于64像素",
+                    scope="asset",
+                    field="image.width",
+                    operator="gte",
+                    value=64,
+                    unit="pixel",
+                    required_evidence_type="image_metadata",
+                ),
+            ),
         )
 
 
@@ -203,6 +223,41 @@ def test_common_system_questions_get_model_replies(tmp_path) -> None:
     assert len(responses[-1]["messages"]) == 6
     with pytest.raises(PermissionError):
         service.get(conversation["id"], "user_2")
+
+
+def test_created_work_order_reply_includes_task_spec_draft_immediately(
+    tmp_path,
+) -> None:
+    source = tmp_path / "images"
+    source.mkdir()
+    runtime = AgentRuntime(
+        tmp_path / "runtime",
+        requirement_planner=StaticRequirementPlanner(),
+    )
+    assert runtime.conversation_store is not None
+    service = ConversationService(
+        store=runtime.conversation_store,
+        agent_runtime=runtime,
+        settings=_settings(tmp_path),
+        gateway=FakeConversationGateway(
+            [_start_work_order(source, "筛选满足条件的图片")]
+        ),
+    )
+    conversation = service.create("user_1")
+
+    created = service.send(
+        thread_id=conversation["id"],
+        owner_id="user_1",
+        content=f"{source} 筛选满足条件的图片",
+    )
+
+    assert created["work_order_id"]
+    assert "当前 TaskSpec 草案" in created["reply"]
+    assert "筛选满足条件的图片" in created["reply"]
+    assert "图片宽度不少于64像素" in created["reply"]
+    assert str(source) in created["reply"]
+    assert "直接回复“确认”" in created["reply"]
+    assert "先问我草案内容" not in created["reply"]
 
 
 def test_natural_conversation_creates_approves_and_submits_work_order(tmp_path) -> None:

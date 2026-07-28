@@ -1040,16 +1040,20 @@ class ConversationService:
             )
             response["turn"] = turn
             task_spec = turn["state"].get("task_spec", {})
+            draft_details = self._task_spec_details_reply(task_spec)
             if task_spec.get("ambiguities"):
                 response["reply"] = (
-                    f"已创建工单 {turn['work_order_id']}。"
-                    "在确认 TaskSpec 前，还需要你补充以下信息：\n\n"
+                    f"已创建工单 {turn['work_order_id']}。\n\n"
+                    + draft_details
+                    + "\n\n在确认 TaskSpec 前，还需要你补充以下信息：\n\n"
                     + self._clarification_reply(task_spec, include_intro=False)
                 )
             else:
                 response["reply"] = (
-                    f"已创建工单 {turn['work_order_id']}。我生成了 TaskSpec 草案，"
-                    "现在等你确认；你可以先问我草案内容，也可以直接说“确认”。"
+                    f"已创建工单 {turn['work_order_id']}。\n\n"
+                    + draft_details
+                    + "\n\n如果以上内容无误，请直接回复“确认”；"
+                    "需要修改时，直接说明要改哪一项。"
                 )
             return response
         self.store.update(
@@ -1542,29 +1546,48 @@ class ConversationService:
             str(item.get("capability", item.get("id", "-")))
             for item in task_spec.get("capability_requirements", [])
         ]
+        constraints = list(task_spec.get("constraints") or ())
         lines = [
-            "### 当前 TaskSpec",
+            "### 当前 TaskSpec 草案",
             f"- 版本：`{task_spec.get('version', '-')}`",
             f"- 目标：{task_spec.get('objective', '-')}",
             f"- 数据源：`{sources}`",
             "- 输出动作："
             + (", ".join(task_spec.get("output_actions", [])) or "无"),
             "- 能力需求：" + (", ".join(capabilities) or "无"),
-            "- 硬约束：`"
+        ]
+        if constraints:
+            lines.append("- 用户约束：")
+            lines.extend(
+                (
+                    f"  {index}. {item.get('source_text', '-')}"
+                    f"（`{item.get('field', '-')}` "
+                    f"`{item.get('operator', '-')}` "
+                    f"`{item.get('value', '-')}` "
+                    f"`{item.get('unit', '-')}`）"
+                )
+                for index, item in enumerate(constraints, start=1)
+            )
+        else:
+            lines.append("- 用户约束：无")
+        lines.extend(
+            [
+                "- 结构化硬约束：`"
             + json.dumps(
                 task_spec.get("hard_constraints", {}),
                 ensure_ascii=False,
                 sort_keys=True,
             )
             + "`",
-            "- 语义需求："
-            + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
-            "- 排除需求："
-            + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
-            "- 待澄清："
-            + ("；".join(task_spec.get("ambiguities", [])) or "无"),
-            f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
-        ]
+                "- 语义需求："
+                + ("；".join(task_spec.get("semantic_requirements", [])) or "无"),
+                "- 排除需求："
+                + ("；".join(task_spec.get("exclusion_requirements", [])) or "无"),
+                "- 待澄清："
+                + ("；".join(task_spec.get("ambiguities", [])) or "无"),
+                f"- 已确认：{'是' if task_spec.get('confirmed') else '否'}",
+            ]
+        )
         return "\n".join(lines)
 
     def _clarification_reply(

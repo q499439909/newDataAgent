@@ -52,6 +52,17 @@ class QualityEvaluator:
         ]
         failed_assets = [asset for asset in dataset.assets if asset.decision == "failed"]
         kept = [asset for asset in dataset.assets if asset.decision == "keep"]
+        missing_constraint_evidence = [
+            asset
+            for asset in kept
+            if any(
+                code.startswith("MISSING_CONSTRAINT_EVIDENCE:")
+                for code in self._hard_rule_failures(asset, spec)
+            )
+        ]
+        dataset_constraint_failures = self._dataset_constraint_failures(
+            dataset, spec
+        )
         required_capabilities = {
             *spec.required_capabilities,
             *(
@@ -65,6 +76,12 @@ class QualityEvaluator:
             for asset in kept
             if self._missing_required_semantics(asset, required_capabilities)
         ]
+        unresolved_semantic_review = [
+            asset
+            for asset in kept
+            if asset.labels.get("visual_semantic_review_required") is True
+            or asset.labels.get("visual_semantic_selection") == "uncertain"
+        ]
         source_count = max(1, dataset.source_count)
         checked_count = max(1, len(kept))
         violation_rate = len(hard_violations) / checked_count
@@ -75,7 +92,7 @@ class QualityEvaluator:
             _SEMANTIC_CAPABILITIES
         )
         semantic_quality_verified = bool(semantic_capabilities) and not (
-            semantic_missing or failed_assets
+            semantic_missing or unresolved_semantic_review or failed_assets
         )
         selection_counts = {
             value: sum(
@@ -94,6 +111,16 @@ class QualityEvaluator:
         if violation_rate > threshold:
             reasons.append("HARD_RULE_VIOLATION_RATE_EXCEEDED")
             recommendations.append("Review failed assets and revise the responsible pipeline node")
+        if missing_constraint_evidence:
+            reasons.append("REQUIRED_CONSTRAINT_EVIDENCE_MISSING")
+            recommendations.append(
+                "Produce the missing Constraint evidence before publication"
+            )
+        if dataset_constraint_failures:
+            reasons.append("DATASET_CONSTRAINT_VIOLATION")
+            recommendations.append(
+                "Repair dataset-level duplicate or source-integrity constraints"
+            )
         if dataset.failed_count:
             reasons.append("EXECUTION_FAILURES_PRESENT")
             recommendations.append("Retry failed assets after diagnosing operator errors")
@@ -102,17 +129,28 @@ class QualityEvaluator:
             recommendations.append(
                 "Inspect the model-operator response contract and retry before publication"
             )
+        if unresolved_semantic_review:
+            reasons.append("UNRESOLVED_SEMANTIC_REVIEW")
+            recommendations.append(
+                "Resolve every semantic ReviewSet item before publication"
+            )
         passed = (
             bool(kept)
             and violation_rate <= threshold
             and dataset.failed_count == 0
+            and not missing_constraint_evidence
+            and not dataset_constraint_failures
             and not semantic_missing
+            and not unresolved_semantic_review
         )
         metrics = {
             "hard_rule_violation_rate": round(violation_rate, 6),
             "retention_rate": round(retention_rate, 6),
             "execution_failure_rate": round(failure_rate, 6),
             "semantic_output_missing_rate": round(semantic_missing_rate, 6),
+            "dataset_constraint_failure_count": len(
+                dataset_constraint_failures
+            ),
         }
         if selection_total:
             metrics.update(
@@ -142,7 +180,12 @@ class QualityEvaluator:
             failed_asset_uris=tuple(
                 dict.fromkeys(
                     asset.source_uri
-                    for asset in (*hard_violations, *failed_assets, *semantic_missing)
+                    for asset in (
+                        *hard_violations,
+                        *failed_assets,
+                        *semantic_missing,
+                        *unresolved_semantic_review,
+                    )
                 )
             ),
             reason_codes=tuple(reasons),
@@ -224,4 +267,98 @@ class QualityEvaluator:
         if maximum := constraints.get("aspect_ratio_max"):
             if ratio > float(maximum):
                 failures.append("ASPECT_RATIO_MAX")
+        failures.extend(QualityEvaluator._constraint_failures(asset, spec))
         return tuple(failures)
+
+    @staticmethod
+    def _constraint_failures(
+        asset: DatasetAsset, spec: TaskSpecVersion
+    ) -> tuple[str, ...]:
+        failures: list[str] = []
+        metric_fields = {
+            "width_px": "width",
+            "height_px": "height",
+            "aspect_ratio": "aspect_ratio",
+            "file_size_bytes": "file_size_bytes",
+            "face_count": "face_count",
+        }
+        for constraint in spec.constraints:
+            if constraint.scope != "asset":
+                continue
+            if constraint.field == "primary_subject_garment_color":
+                present = (
+                    asset.labels.get("visual_semantic_selection")
+                    in {"match", "mismatch", "uncertain"}
+                )
+                value = (
+                    "black"
+                    if asset.labels.get("visual_semantic_selection") == "match"
+                    else "not_black"
+                )
+            else:
+                metric_name = metric_fields.get(constraint.field)
+                present = bool(metric_name) and metric_name in asset.metrics
+                value = asset.metrics.get(metric_name) if metric_name else None
+            if not present:
+                failures.append(
+                    f"MISSING_CONSTRAINT_EVIDENCE:{constraint.id}"
+                )
+                continue
+            if not QualityEvaluator._matches_constraint(
+                value, constraint.operator, constraint.value
+            ):
+                failures.append(f"CONSTRAINT_FAILED:{constraint.id}")
+        return tuple(failures)
+
+    @staticmethod
+    def _dataset_constraint_failures(
+        dataset: DatasetVersion, spec: TaskSpecVersion
+    ) -> tuple[str, ...]:
+        kept = [asset for asset in dataset.assets if asset.decision == "keep"]
+        failures: list[str] = []
+        for constraint in spec.constraints:
+            if constraint.scope != "dataset":
+                continue
+            present = True
+            if constraint.field == "exact_duplicate_count":
+                value = len(kept) - len(
+                    {asset.source_sha256 for asset in kept}
+                )
+            elif constraint.field == "perceptual_duplicate_policy_applied":
+                present = all(
+                    "duplicate_group_id" in asset.labels
+                    and asset.labels.get("duplicate") is False
+                    for asset in kept
+                )
+                value = present
+            elif constraint.field == "source_assets_immutable":
+                value = dataset.original_files_unchanged
+            else:
+                present = False
+                value = None
+            if not present:
+                failures.append(
+                    f"MISSING_CONSTRAINT_EVIDENCE:{constraint.id}"
+                )
+                continue
+            if not QualityEvaluator._matches_constraint(
+                value, constraint.operator, constraint.value
+            ):
+                failures.append(f"CONSTRAINT_FAILED:{constraint.id}")
+        return tuple(failures)
+
+    @staticmethod
+    def _matches_constraint(
+        value: object, operator: str, expected: object
+    ) -> bool:
+        if operator == "eq":
+            return value == expected
+        if operator == "lt":
+            return value < expected
+        if operator == "lte":
+            return value <= expected
+        if operator == "gt":
+            return value > expected
+        if operator == "gte":
+            return value >= expected
+        return False

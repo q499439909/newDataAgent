@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 from typing import Any
 
 from ...domain.operators import (
@@ -146,6 +147,7 @@ class QualityFilterOperator:
 
 class PerceptualDedupOperator:
     parallel_safe = False  # mutates context.shared["seen_dhash"]; first-seen-wins must stay serial
+    supports_dataset_batch = True
     spec = _spec(
         operator_id="builtin.perceptual_dedup:1",
         name="感知哈希去重",
@@ -172,6 +174,26 @@ class PerceptualDedupOperator:
     def execute(
         self, context: OperatorContext, input_data: OperatorInput, parameters: dict[str, Any]
     ) -> OperatorResult:
+        node_id = str(context.shared.get("active_node_id", ""))
+        prepared = context.shared.get("dataset_operator_results", {}).get(
+            node_id, {}
+        )
+        if input_data.source_path in prepared:
+            result = prepared[input_data.source_path]
+            return result.model_copy(
+                update={
+                    "metrics": {**input_data.metrics, **result.metrics},
+                    "labels": {**input_data.labels, **result.labels},
+                    "artifacts": [
+                        *input_data.artifacts,
+                        *(
+                            item
+                            for item in result.artifacts
+                            if item not in input_data.artifacts
+                        ),
+                    ],
+                }
+            )
         seen = context.shared.setdefault("seen_dhash", set())
         dhash = input_data.metrics.get("dhash")
         threshold = parameters["distance_threshold"]
@@ -195,6 +217,75 @@ class PerceptualDedupOperator:
             reason_codes=["PERCEPTUAL_DUPLICATE"] if duplicate else [],
             confidence=1.0,
         )
+
+    def prepare_dataset(
+        self,
+        *,
+        node_id: str,
+        context: OperatorContext,
+        inputs: tuple[OperatorInput, ...],
+        parameters: dict[str, Any],
+        runtime_backend: RuntimeBackend,
+    ) -> None:
+        threshold = int(parameters["distance_threshold"])
+        canonicals: list[tuple[str, str, str]] = []
+        prepared: dict[str, OperatorResult] = {}
+        upstream_results = tuple(
+            results
+            for prepared_node_id, results in context.shared.get(
+                "dataset_operator_results", {}
+            ).items()
+            if prepared_node_id != node_id and isinstance(results, dict)
+        )
+        for item in inputs:
+            if any(
+                (
+                    upstream_result := results.get(item.source_path)
+                ) is not None
+                and upstream_result.decision in {"reject", "failed"}
+                for results in upstream_results
+            ):
+                continue
+            metrics = analyze_image(Path(item.current_path)).model_dump(mode="json")
+            dhash = str(metrics.get("dhash") or "")
+            match = next(
+                (
+                    candidate
+                    for candidate in canonicals
+                    if dhash
+                    and (
+                        int(dhash, 16) ^ int(candidate[0], 16)
+                    ).bit_count()
+                    <= threshold
+                ),
+                None,
+            )
+            if match is None:
+                group_id = "duplicate_group_" + hashlib.sha256(
+                    f"{item.source_path}|{dhash}".encode("utf-8")
+                ).hexdigest()[:16]
+                canonical_path = item.source_path
+                if dhash:
+                    canonicals.append((dhash, canonical_path, group_id))
+                duplicate = False
+            else:
+                _, canonical_path, group_id = match
+                duplicate = True
+            prepared[item.source_path] = OperatorResult(
+                output_path=item.current_path,
+                metrics=metrics,
+                labels={
+                    "duplicate": duplicate,
+                    "duplicate_group_id": group_id,
+                    "canonical_asset_path": canonical_path,
+                },
+                decision="reject" if duplicate else "continue",
+                reason_codes=["PERCEPTUAL_DUPLICATE"] if duplicate else [],
+                confidence=1.0,
+            )
+        context.shared.setdefault("dataset_operator_results", {})[
+            node_id
+        ] = prepared
 
 
 class ManifestOperator:

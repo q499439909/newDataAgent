@@ -40,6 +40,13 @@ class PipelineEdge(DomainModel):
     condition: str | None = None
 
 
+class ConstraintCoverage(DomainModel):
+    constraint_id: str
+    node_id: str
+    operator_version_id: str
+    evidence_type: str
+
+
 class PipelineVersion(VersionedModel):
     family_id: str
     strategy: PipelineStrategy
@@ -51,6 +58,8 @@ class PipelineVersion(VersionedModel):
     run_id: str | None = None
     metrics: dict[str, float] = Field(default_factory=dict)
     approved: bool = False
+    required_constraint_ids: tuple[str, ...] = ()
+    constraint_coverage: tuple[ConstraintCoverage, ...] = ()
 
     @model_validator(mode="after")
     def validate_graph(self) -> "PipelineVersion":
