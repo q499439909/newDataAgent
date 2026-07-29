@@ -149,3 +149,13 @@ export async function submitDatasetRun(
   });
   return parseJsonResponse<Record<string, any>>(response);
 }
+
+export async function listRunEvents(
+  ownerId: string,
+  runId: string,
+): Promise<Record<string, any>[]> {
+  const response = await fetch(`${API_BASE}/api/runs/${runId}/events`, {
+    headers: ownerHeaders(ownerId),
+  });
+  return parseJsonResponse<Record<string, any>[]>(response);
+}

@@ -483,6 +483,37 @@ class RunStore:
                     row.updated_at = now
                     return self._run_dict(row)
 
+    def pending_outcome_notifications(self) -> list[dict[str, Any]]:
+        terminal_statuses = ("SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED")
+        with self.database.session() as session:
+            rows = session.scalars(
+                select(RunRow)
+                .where(RunRow.status.in_(terminal_statuses))
+                .order_by(RunRow.updated_at)
+            ).all()
+            pending: list[dict[str, Any]] = []
+            for row in rows:
+                requested = session.scalar(
+                    select(RunEventRow.id)
+                    .where(
+                        RunEventRow.run_id == row.id,
+                        RunEventRow.event_type
+                        == "run_outcome_notification_requested",
+                    )
+                    .limit(1)
+                )
+                notified = session.scalar(
+                    select(RunEventRow.id)
+                    .where(
+                        RunEventRow.run_id == row.id,
+                        RunEventRow.event_type == "run_outcome_notified",
+                    )
+                    .limit(1)
+                )
+                if requested is not None and notified is None:
+                    pending.append(self._run_dict(row))
+            return pending
+
     def recover_interrupted(self) -> None:
         """Return runs left by a dead worker to a controllable durable state."""
         now = datetime.now(UTC)
@@ -633,6 +664,35 @@ class RunStore:
             session.add(row)
             session.flush()
             return self._event_dict(row)
+
+    def request_outcome_notification(
+        self,
+        run_id: str,
+        *,
+        work_order_id: str,
+    ) -> None:
+        with self.database.write_lock, self.database.session() as session, session.begin():
+            existing = session.scalar(
+                select(RunEventRow.id)
+                .where(
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.event_type
+                    == "run_outcome_notification_requested",
+                )
+                .limit(1)
+            )
+            if existing is not None:
+                return
+            session.add(
+                RunEventRow(
+                    run_id=run_id,
+                    event_type="run_outcome_notification_requested",
+                    details_json=json.dumps(
+                        {"work_order_id": work_order_id},
+                        ensure_ascii=False,
+                    ),
+                )
+            )
 
     def events(self, run_id: str, owner_id: str | None = None) -> list[dict[str, Any]]:
         self.get(run_id, owner_id)

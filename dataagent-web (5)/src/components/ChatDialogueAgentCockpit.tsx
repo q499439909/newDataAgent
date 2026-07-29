@@ -1,11 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { ArtifactKind } from './ArtifactPanel';
+import { WorkOrderChatMessage } from '../types';
 import {
   Activity,
+  AlertCircle,
   ArrowRight,
   Bot,
   CheckCircle2,
-  FileCheck,
+  FileText,
+  GitBranch,
+  ListChecks,
   Play,
   RefreshCw,
   Send,
@@ -13,24 +18,26 @@ import {
 } from 'lucide-react';
 
 interface ChatDialogueAgentCockpitProps {
-  onSelectPipelineComparison: () => void;
-  onSelectBoundaryReview: () => void;
+  onOpenArtifact: (kind: ArtifactKind) => void;
 }
 
-type ChatMessage = {
-  sender: 'user' | 'agent';
-  agentName?: string;
-  text: string;
-  time: string;
-  actionType?: 'task_spec' | 'pipeline';
-};
+const nowTime = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const messageId = () => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> = ({
-  onSelectPipelineComparison,
-  onSelectBoundaryReview,
-}) => {
+const createWelcomeMessage = (): WorkOrderChatMessage => ({
+  id: messageId(),
+  sender: 'agent',
+  agentName: '数据任务规划 Agent（主 Agent）',
+  text: '请描述数据源路径、处理目标、约束和验收标准。我会先形成 TaskSpec；如有语义缺口，会在这里继续向你澄清。',
+  time: nowTime(),
+});
+
+export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> = ({ onOpenArtifact }) => {
   const {
     activeWorkOrder,
+    activeWorkOrderChatMessages,
+    setActiveWorkOrderChatMessages,
+    setWorkOrderChatMessages,
     createNewWorkOrder,
     sendMainAgentMessage,
     approveCurrentTaskSpec,
@@ -41,30 +48,40 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
 
   const [inputPrompt, setInputPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      sender: 'agent',
-      agentName: '数据任务规划 Agent（主 Agent）',
-      text: '请描述数据源路径、处理目标、约束和验收标准。我会先形成 TaskSpec；如有歧义会要求澄清，再调度检索 Agent 与数据处理 Agent 生成候选 Pipeline。',
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    },
-  ]);
+  const messages = activeWorkOrderChatMessages;
+
+  useEffect(() => {
+    if (activeWorkOrder && activeWorkOrderChatMessages.length === 0) {
+      setActiveWorkOrderChatMessages([createWelcomeMessage()]);
+    }
+  }, [activeWorkOrder?.id, activeWorkOrderChatMessages.length]);
 
   if (!activeWorkOrder) return null;
 
   const spec = activeWorkOrder.currentTaskSpec;
   const hasAmbiguities = Boolean(spec?.ambiguities?.length);
+  const requirementQuestions = activeWorkOrder.requirementClarification?.questions || [];
   const waitingForPipeline = activeWorkOrder.waitingFor === 'pipeline_approval';
   const canSubmitRun = activeWorkOrder.agentTurn?.state?.next_action === 'submit_dataset_run';
+  const latestRun = activeWorkOrder.latestRunObservation || activeWorkOrder.agentTurn?.state?.latest_run_observation;
+  const hasPipelineArtifact = Boolean(activeWorkOrder.candidatePipelines?.length || waitingForPipeline);
+  const hasQualityArtifact = Boolean(activeWorkOrder.nodePreviews?.length || activeWorkOrder.qcReport || latestRun?.qc_report_id || latestRun?.qc_status);
+  const hasRunArtifact = Boolean(latestRun || activeWorkOrder.activeRunId || activeWorkOrder.agentTurn?.state?.active_run_id || activeWorkOrder.agentTurn?.state?.next_action?.includes?.('run'));
+  const hasFileArtifact = Boolean(latestRun?.dataset_version_id || latestRun?.failed_asset_uris?.length || latestRun?.repair_candidate_uris?.length || latestRun?.evidence_refs?.length);
 
-  const appendAgentMessage = (text: string, actionType?: ChatMessage['actionType']) => {
-    setMessages(prev => [
-      ...prev,
+  const setMessages = (next: WorkOrderChatMessage[], workOrderId = activeWorkOrder.id) => {
+    setWorkOrderChatMessages(workOrderId, next);
+  };
+
+  const appendAgentMessage = (text: string, baseMessages = messages, actionType?: ArtifactKind) => {
+    setMessages([
+      ...baseMessages,
       {
+        id: messageId(),
         sender: 'agent',
         agentName: '数据任务规划 Agent（主 Agent）',
         text,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        time: nowTime(),
         actionType,
       },
     ]);
@@ -75,15 +92,17 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
     if (!inputPrompt.trim()) return;
 
     const userText = inputPrompt.trim();
+    const targetWorkOrder = activeWorkOrder.conversationId
+      ? activeWorkOrder
+      : await createNewWorkOrder('新的数据任务对话', '通过主 Agent 对话创建的任务');
+    const initialWorkOrderId = targetWorkOrder.id;
     setInputPrompt('');
-    setMessages(prev => [
-      ...prev,
-      {
-        sender: 'user',
-        text: userText,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      },
-    ]);
+
+    const messagesWithUser: WorkOrderChatMessage[] = [
+      ...(targetWorkOrder.id === activeWorkOrder.id ? messages : []),
+      { id: messageId(), sender: 'user', text: userText, time: nowTime() },
+    ];
+    setMessages(messagesWithUser, initialWorkOrderId);
     setIsGenerating(true);
 
     try {
@@ -91,78 +110,111 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
         if (streamEvent.type === 'action' && streamEvent.action) {
           showToast(streamEvent.action.summary || streamEvent.action.stage_label || '主 Agent 正在处理当前请求。');
         }
-      });
-      appendAgentMessage(
-        reply || '后端已完成本轮处理。',
-        workOrder?.waitingFor === 'task_spec_confirmation'
-          ? 'task_spec'
-          : workOrder?.waitingFor === 'pipeline_approval'
-            ? 'pipeline'
-            : undefined,
-      );
+      }, targetWorkOrder);
+
+      const nextActionType: ArtifactKind | undefined = workOrder?.waitingFor === 'task_spec_confirmation'
+        ? 'task_spec'
+        : workOrder?.waitingFor === 'pipeline_approval'
+          ? 'pipeline'
+          : workOrder?.waitingFor === 'run_outcome_resolution'
+            ? 'run'
+            : undefined;
+      const targetWorkOrderId = workOrder?.id || initialWorkOrderId;
+      const messagesWithReply: WorkOrderChatMessage[] = [
+        ...messagesWithUser,
+        {
+          id: messageId(),
+          sender: 'agent',
+          agentName: '数据任务规划 Agent（主 Agent）',
+          text: reply || '后端已完成本轮处理。',
+          time: nowTime(),
+          actionType: nextActionType,
+        },
+      ];
+      setMessages(messagesWithReply, initialWorkOrderId);
+      setMessages(messagesWithReply, targetWorkOrderId);
       showToast('主 Agent 本轮状态已同步。');
     } catch (error) {
-      appendAgentMessage(
-        `后端连接失败，本轮没有写入真实控制面。请确认 Python API 已启动。错误：${error instanceof Error ? error.message : String(error)}`,
-      );
+      setMessages([
+        ...messagesWithUser,
+        {
+          id: messageId(),
+          sender: 'agent',
+          agentName: '数据任务规划 Agent（主 Agent）',
+          text: `后端连接失败，本轮没有写入真实控制面。请确认 Python API 已启动。错误：${error instanceof Error ? error.message : String(error)}`,
+          time: nowTime(),
+        },
+      ], initialWorkOrderId);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const handleQuickCreateNewTask = () => {
-    createNewWorkOrder('新的数据任务对话', '通过主 Agent 对话创建的任务');
+  const handleQuickCreateNewTask = async () => {
+    await createNewWorkOrder('新的数据任务对话', '通过主 Agent 对话创建的任务');
+  };
+
+  const sendClarificationSeed = () => {
+    setInputPrompt(requirementQuestions.length
+      ? requirementQuestions.map((question, index) => `${index + 1}. ${question}\n答：`).join('\n')
+      : '请逐条列出当前需求中仍需我澄清的问题。');
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm flex flex-col h-[760px] overflow-hidden">
-      <div className="p-4 bg-slate-50 border-b border-slate-200/80 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-sm">
-            <Bot className="w-5 h-5" />
+    <div className="flex h-full min-h-[760px] flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+      <div className="flex items-center justify-between border-b border-slate-200/80 bg-slate-50 p-4">
+        <div className="flex min-w-0 items-center space-x-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm">
+            <Bot className="h-5 w-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center space-x-2">
-              <span className="font-bold text-slate-900 text-sm">主 Agent 工作台</span>
-              <span className="px-2 py-0.5 text-[10px] bg-emerald-100 text-emerald-800 rounded-full font-semibold">
+              <span className="truncate text-sm font-bold text-slate-900">主 Agent 工作台</span>
+              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
                 LangGraph
               </span>
             </div>
-            <p className="text-[11px] text-slate-500">自然语言需求 → TaskSpec → 检索/处理/策略 Agent → Pipeline 审批</p>
+            <p className="truncate text-[11px] text-slate-500">自然语言需求 → TaskSpec → 检索/处理/策略 Agent → Pipeline 审批 → Run/QC 反馈</p>
           </div>
         </div>
       </div>
 
-      <div className="flex-1 p-6 overflow-y-auto space-y-4 bg-slate-50/40">
-        <div className="bg-white p-4 rounded-xl border border-slate-200/80 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-emerald-900 flex items-center space-x-1.5">
-              <Activity className="w-4 h-4 text-emerald-600" />
-              <span>当前任务: {activeWorkOrder.name}</span>
+      <div className="flex-1 space-y-4 overflow-y-auto bg-slate-50/40 p-4 sm:p-6">
+        <div className="space-y-3 rounded-xl border border-slate-200/80 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex min-w-0 items-center space-x-1.5 text-xs font-bold text-emerald-900">
+              <Activity className="h-4 w-4 shrink-0 text-emerald-600" />
+              <span className="truncate">当前任务: {activeWorkOrder.name}</span>
             </span>
-            <span className="text-[10px] font-mono text-slate-400">ID: {activeWorkOrder.id}</span>
+            <span className="shrink-0 font-mono text-[10px] text-slate-400">ID: {activeWorkOrder.id}</span>
           </div>
-          <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+
+          <p className="rounded-lg border border-slate-100 bg-slate-50 p-2.5 text-xs leading-relaxed text-slate-600">
             {activeWorkOrder.targetDescription}
           </p>
 
           <div className="flex flex-wrap items-center gap-2 text-[11px]">
             {activeWorkOrder.mainAgentAction && (
-              <span className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold">
+              <span className="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 font-semibold text-emerald-800">
                 主 Agent 动作: {activeWorkOrder.mainAgentAction}
               </span>
             )}
             {activeWorkOrder.waitingFor && (
-              <span className="px-2 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 font-semibold">
+              <span className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 font-semibold text-amber-800">
                 等待: {activeWorkOrder.waitingFor}
+              </span>
+            )}
+            {activeWorkOrder.activeRunId && (
+              <span className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 font-semibold text-sky-800">
+                Active Run: {activeWorkOrder.activeRunId}
               </span>
             )}
           </div>
 
           {activeWorkOrder.taskPlan?.length ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-              {activeWorkOrder.taskPlan.slice(0, 6).map(item => (
-                <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-100 px-2.5 py-1.5 text-[11px]">
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {activeWorkOrder.taskPlan.slice(0, 8).map(item => (
+                <div key={item.id} className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 px-2.5 py-1.5 text-[11px]">
                   <span className="truncate text-slate-600">{item.label}</span>
                   <span className={`ml-2 shrink-0 font-bold ${
                     item.status === 'completed' ? 'text-emerald-700' :
@@ -176,27 +228,31 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
             </div>
           ) : null}
 
+          {requirementQuestions.length ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              <div className="mb-2 flex items-center gap-1.5 font-bold">
+                <AlertCircle className="h-4 w-4" />
+                主 Agent 需要你澄清需求
+              </div>
+              <div className="space-y-1">
+                {requirementQuestions.map((question, index) => <div key={index}>{index + 1}. {question}</div>)}
+              </div>
+            </div>
+          ) : null}
+
           {spec && (
-            <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 text-[11px] text-slate-700 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-emerald-900 flex items-center gap-1.5">
-                  <FileCheck className="w-3.5 h-3.5" />
+            <div className="space-y-2 rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 text-[11px] text-slate-700">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 font-bold text-emerald-900">
+                  <FileText className="h-3.5 w-3.5" />
                   TaskSpec {spec.version}
                 </span>
-                <span className={hasAmbiguities ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}>
+                <span className={hasAmbiguities ? 'font-bold text-amber-700' : 'font-bold text-emerald-700'}>
                   {hasAmbiguities ? '待澄清' : spec.status === 'confirmed' ? '已确认' : '待确认'}
                 </span>
               </div>
-              <div>硬约束: {spec.hardConstraints.length ? spec.hardConstraints.join('; ') : '暂无'}</div>
-              <div>验收指标: {spec.acceptanceCriteria.length ? spec.acceptanceCriteria.join('; ') : '暂无'}</div>
-              {hasAmbiguities && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 text-amber-800 space-y-1">
-                  <div className="font-bold">需要你补充确认：</div>
-                  {spec.ambiguities.map((item, index) => (
-                    <div key={index}>{index + 1}. {item}</div>
-                  ))}
-                </div>
-              )}
+              <div>硬约束: {spec.hardConstraints.length ? spec.hardConstraints.join('; ') : '后端未返回'}</div>
+              <div>验收指标: {spec.acceptanceCriteria.length ? spec.acceptanceCriteria.join('; ') : '后端未返回'}</div>
             </div>
           )}
 
@@ -206,121 +262,181 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
                 type="button"
                 onClick={approveCurrentTaskSpec}
                 disabled={hasAmbiguities}
-                className="flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-emerald-700 disabled:opacity-50"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>确认 TaskSpec</span>
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                确认 TaskSpec
               </button>
             )}
+
             {waitingForPipeline && (activeWorkOrder.candidatePipelines || []).slice(0, 3).map(pipe => (
               <button
                 key={pipe.id}
                 type="button"
                 onClick={() => approveCurrentPipeline(pipe.id)}
-                className="flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-emerald-700"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>批准 {pipe.name}</span>
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                批准 {pipe.name}
               </button>
             ))}
+
             {canSubmitRun && (
               <button
                 type="button"
                 onClick={submitCurrentDatasetRun}
-                className="flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-emerald-700"
               >
-                <Play className="w-3.5 h-3.5" />
-                <span>提交全量数据运行</span>
+                <Play className="h-3.5 w-3.5" />
+                提交全量执行
               </button>
             )}
-            <button
-              type="button"
-              onClick={onSelectPipelineComparison}
-              className="flex items-center space-x-1 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
-            >
-              <span>查看候选方案状态</span>
-              <ArrowRight className="w-3 h-3" />
-            </button>
-            <button
-              type="button"
-              onClick={onSelectBoundaryReview}
-              className="flex items-center space-x-1 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
-            >
-              <span>边界样本复核</span>
-            </button>
+
+            {requirementQuestions.length ? (
+              <button
+                type="button"
+                onClick={sendClarificationSeed}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 transition-all hover:bg-amber-50"
+              >
+                回答澄清问题
+              </button>
+            ) : null}
+
+            {spec && (
+              <button
+                type="button"
+                onClick={() => onOpenArtifact('task_spec')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+              >
+                <FileText className="h-3.5 w-3.5" />
+                查看 TaskSpec
+              </button>
+            )}
+
+            {hasPipelineArtifact && (
+              <button
+                type="button"
+                onClick={() => onOpenArtifact('pipeline')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+              >
+                <GitBranch className="h-3.5 w-3.5" />
+                查看 Pipeline
+                <ArrowRight className="h-3 w-3" />
+              </button>
+            )}
+
+            {hasQualityArtifact && (
+              <button
+                type="button"
+                onClick={() => onOpenArtifact('quality')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+              >
+                <ListChecks className="h-3.5 w-3.5" />
+                查看边界/QC
+              </button>
+            )}
+
+            {hasRunArtifact && (
+              <button
+                type="button"
+                onClick={() => onOpenArtifact('run')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                查看运行产物
+              </button>
+            )}
+
+            {hasFileArtifact && (
+              <button
+                type="button"
+                onClick={() => onOpenArtifact('files')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+              >
+                查看文件
+              </button>
+            )}
           </div>
         </div>
 
-        {messages.map((msg, index) => (
-          <div key={index} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] rounded-2xl p-4 text-xs leading-relaxed space-y-3 ${
+        {messages.map((msg) => (
+          <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] space-y-3 rounded-2xl p-4 text-xs leading-relaxed ${
               msg.sender === 'user'
-                ? 'bg-emerald-600 text-white rounded-br-none shadow-sm'
-                : 'bg-white text-slate-800 border border-slate-200/80 rounded-bl-none shadow-sm'
+                ? 'rounded-br-none bg-emerald-600 text-white shadow-sm'
+                : 'rounded-bl-none border border-slate-200/80 bg-white text-slate-800 shadow-sm'
             }`}>
               {msg.sender === 'agent' && (
-                <div className="flex items-center justify-between text-[11px] text-emerald-700 font-semibold border-b border-slate-100 pb-2 mb-1">
+                <div className="mb-1 flex items-center justify-between border-b border-slate-100 pb-2 text-[11px] font-semibold text-emerald-700">
                   <span className="flex items-center space-x-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                    <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
                     <span>{msg.agentName}</span>
                   </span>
-                  <span className="text-[10px] text-slate-400 font-normal">{msg.time}</span>
+                  <span className="text-[10px] font-normal text-slate-400">{msg.time}</span>
                 </div>
               )}
               <p className="whitespace-pre-wrap">{msg.text}</p>
-              {msg.sender === 'user' && (
-                <div className="text-[10px] text-emerald-100 text-right">{msg.time}</div>
+              {msg.actionType && (
+                <button
+                  type="button"
+                  onClick={() => onOpenArtifact(msg.actionType as ArtifactKind)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-bold text-emerald-800 hover:bg-emerald-100"
+                >
+                  查看 {msg.actionType === 'task_spec' ? 'TaskSpec' : msg.actionType === 'pipeline' ? 'Pipeline' : msg.actionType === 'run' ? '运行产物' : '产物'}
+                  <ArrowRight className="h-3 w-3" />
+                </button>
               )}
+              {msg.sender === 'user' && <div className="text-right text-[10px] text-emerald-100">{msg.time}</div>}
             </div>
           </div>
         ))}
 
         {isGenerating && (
           <div className="flex justify-start">
-            <div className="bg-white p-3.5 rounded-2xl border border-slate-200 text-xs text-slate-500 flex items-center space-x-2 shadow-sm">
-              <RefreshCw className="w-4 h-4 text-emerald-600 animate-spin" />
+            <div className="flex items-center space-x-2 rounded-2xl border border-slate-200 bg-white p-3.5 text-xs text-slate-500 shadow-sm">
+              <RefreshCw className="h-4 w-4 animate-spin text-emerald-600" />
               <span>主 Agent 正在分析本轮输入并同步后端状态...</span>
             </div>
           </div>
         )}
       </div>
 
-      <div className="px-4 py-2 bg-slate-50 border-t border-slate-100 flex items-center space-x-2 overflow-x-auto text-[11px]">
-        <span className="text-slate-400 font-medium shrink-0">快捷建议:</span>
+      <div className="flex items-center space-x-2 overflow-x-auto border-t border-slate-100 bg-slate-50 px-4 py-2 text-[11px]">
+        <span className="shrink-0 font-medium text-slate-400">快捷建议:</span>
         <button
-          onClick={() => setInputPrompt('请根据当前 TaskSpec 中的待澄清项逐条提问，不要直接默认确认。')}
-          className="bg-white hover:bg-emerald-50 text-slate-600 hover:text-emerald-800 border border-slate-200 rounded-lg px-2.5 py-1 shrink-0 transition-colors"
+          onClick={() => setInputPrompt('请逐条澄清当前 TaskSpec 中的待确认项，不要直接默认确认。')}
+          className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-slate-600 transition-colors hover:bg-emerald-50 hover:text-emerald-800"
         >
           要求逐条澄清
         </button>
         <button
-          onClick={() => setInputPrompt('请查看当前候选 Pipeline 是否已有真实试跑 metrics；没有的话不要展示估算值。')}
-          className="bg-white hover:bg-emerald-50 text-slate-600 hover:text-emerald-800 border border-slate-200 rounded-lg px-2.5 py-1 shrink-0 transition-colors"
+          onClick={() => setInputPrompt('请查看当前候选 Pipeline 是否已有后端真实试跑 metrics；没有的话不要展示估算值。')}
+          className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-slate-600 transition-colors hover:bg-emerald-50 hover:text-emerald-800"
         >
           检查试跑指标
         </button>
       </div>
 
-      <form onSubmit={handleSendMessage} className="p-3 bg-white border-t border-slate-200 flex items-center space-x-2">
+      <form onSubmit={handleSendMessage} className="flex items-center space-x-2 border-t border-slate-200 bg-white p-3">
         <input
           type="text"
           value={inputPrompt}
           onChange={(event) => setInputPrompt(event.target.value)}
           placeholder="输入需求、补充澄清答案，或要求主 Agent 继续规划..."
-          className="flex-1 bg-slate-50 border border-slate-200 focus:border-emerald-500 rounded-xl px-4 py-2.5 text-xs text-slate-800 focus:outline-none"
+          className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-800 focus:border-emerald-500 focus:outline-none"
         />
         <button
           type="submit"
           disabled={isGenerating || !inputPrompt.trim()}
-          className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center space-x-1"
+          className="inline-flex items-center space-x-1 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-emerald-700 disabled:opacity-50"
         >
-          <Send className="w-3.5 h-3.5" />
+          <Send className="h-3.5 w-3.5" />
           <span>发送</span>
         </button>
         <button
           type="button"
           onClick={handleQuickCreateNewTask}
-          className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-3 py-2.5 rounded-xl text-xs font-semibold"
+          className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
         >
           新会话
         </button>

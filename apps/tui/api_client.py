@@ -16,7 +16,7 @@ class ControlPlaneClient:
         *,
         base_url: str,
         owner_id: str,
-        timeout: float = 30.0,
+        timeout: float = 600.0,
     ) -> None:
         self.owner_id = owner_id
         self._client = httpx.Client(

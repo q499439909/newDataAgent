@@ -62,6 +62,12 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
             "answer": "Use a similarity threshold of 0.8.",
         }
     )
+    run_resolution = parse_conversation_action(
+        {
+            "intent": "RESOLVE_RUN_OUTCOME",
+            "action": "recompile_pipeline",
+        }
+    )
     start = parse_conversation_action(
         {
             "intent": "START_WORK_ORDER",
@@ -82,6 +88,7 @@ def test_valid_actions_have_intent_specific_required_fields() -> None:
     assert pipeline.strategy == "balanced"
     assert facts.facets == ("run", "pipeline")
     assert clarification.answer == "Use a similarity threshold of 0.8."
+    assert run_resolution.action == "recompile_pipeline"
     assert start.task_spec_patch is not None
     assert start.task_spec_patch.classification is not None
     assert start.task_spec_patch.classification.labels[0].id == "pig"

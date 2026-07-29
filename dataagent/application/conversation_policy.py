@@ -40,6 +40,8 @@ def allowed_conversation_actions(context: dict[str, Any]) -> tuple[str, ...]:
     actions = [ConversationIntent.CHAT, ConversationIntent.QUERY_CONTROL_FACTS]
     if waiting == "requirement_clarification":
         actions.append(ConversationIntent.CLARIFY_REQUIREMENT)
+    elif waiting == "run_outcome_resolution":
+        actions.append(ConversationIntent.RESOLVE_RUN_OUTCOME)
     elif waiting == "task_spec_confirmation":
         actions.extend(
             [

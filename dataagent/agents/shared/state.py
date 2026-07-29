@@ -32,13 +32,22 @@ class WorkOrderGraphState(TypedDict, total=False):
     sampling_plan: dict[str, Any]
     current_agent: str
     next_action: str
+    waiting: str | None
     terminated: bool
     trace: list[str]
+    requirement_agent_action: str
+    requirement_agent_decisions: list[dict[str, Any]]
+    agent_action: dict[str, Any]
+    # Deprecated checkpoint compatibility fields.
     main_agent_action: str
     main_agent_decisions: list[dict[str, Any]]
     agent_observations: list[dict[str, Any]]
     task_plan: list[dict[str, str]]
     latest_run_feedback: dict[str, Any]
+    latest_run_observation: dict[str, Any]
+    observed_run_ids: list[str]
+    resolved_run_ids: list[str]
+    active_run_id: str
 
 
 def append_trace(state: WorkOrderGraphState, event: str) -> list[str]:

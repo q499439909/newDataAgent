@@ -23,52 +23,102 @@ from .protocol import (
 )
 
 
+_CATALOG_SCHEMA_VERSION = 5
+
+
+def _split_annotation_union(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(value):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth = max(0, depth - 1)
+        elif character in {"|", ","} and depth == 0:
+            parts.append(value[start:index])
+            start = index + 1
+    parts.append(value[start:])
+    return [item for item in parts if item]
+
+
+def _string_annotation_types(value: str) -> list[str]:
+    normalized = value.lower().replace("typing.", "").replace(" ", "")
+    if normalized.startswith("optional[") and normalized.endswith("]"):
+        inner = normalized[len("optional[") : -1]
+        return list(dict.fromkeys([*_string_annotation_types(inner), "null"]))
+    if normalized.startswith("union[") and normalized.endswith("]"):
+        normalized = normalized[len("union[") : -1]
+    union = _split_annotation_union(normalized)
+    if len(union) > 1:
+        return list(
+            dict.fromkeys(
+                item_type
+                for item in union
+                for item_type in _string_annotation_types(item)
+            )
+        )
+    if normalized in {"none", "nonetype", "null"}:
+        return ["null"]
+    if normalized.startswith(("dict", "mapping", "mutablemapping")):
+        return ["object"]
+    if normalized.startswith(("list", "tuple", "set", "sequence")):
+        return ["array"]
+    if normalized in {"bool", "boolean"}:
+        return ["boolean"]
+    if normalized in {"int", "integer"}:
+        return ["integer"]
+    if normalized in {"float", "number"}:
+        return ["number"]
+    if normalized.endswith("bool"):
+        return ["boolean"]
+    if normalized.endswith("int"):
+        return ["integer"]
+    if normalized.endswith(("float", "decimal")):
+        return ["number"]
+    return ["string"]
+
+
 def _json_type(annotation: Any, default: Any) -> str | list[str]:
     candidate = annotation if annotation is not inspect.Signature.empty else type(default)
     if isinstance(candidate, str):
-        simple = {
-            "bool": "boolean",
-            "int": "integer",
-            "float": "number",
-            "list": "array",
-            "tuple": "array",
-            "dict": "object",
-            "None": "null",
-            "NoneType": "null",
-        }.get(candidate)
-        if simple is not None:
-            return simple
-        normalized = candidate.lower().replace("typing.", "").replace(" ", "")
-        if normalized.startswith(("dict", "mapping", "mutablemapping")):
-            return "object"
-        if normalized.startswith(("list", "tuple", "set", "sequence")):
-            return "array"
-        return "string"
+        resolved = _string_annotation_types(candidate)
+        if default is None and "null" not in resolved:
+            resolved.append("null")
+        return resolved[0] if len(resolved) == 1 else resolved
     origin = get_origin(candidate)
     if origin is not None:
         if origin is dict:
-            return "object"
-        if origin in {list, tuple, set, frozenset}:
-            return "array"
-        resolved = [_json_type(item, inspect.Signature.empty) for item in get_args(candidate)]
-        flattened = [
-            item
-            for value in resolved
-            for item in (value if isinstance(value, list) else [value])
-        ]
-        return list(dict.fromkeys(flattened)) or _json_type(origin, default)
+            resolved = ["object"]
+        elif origin in {list, tuple, set, frozenset}:
+            resolved = ["array"]
+        else:
+            nested = [
+                _json_type(item, inspect.Signature.empty)
+                for item in get_args(candidate)
+            ]
+            resolved = [
+                item
+                for value in nested
+                for item in (value if isinstance(value, list) else [value])
+            ]
+        if default is None and "null" not in resolved:
+            resolved.append("null")
+        return list(dict.fromkeys(resolved)) or _json_type(origin, default)
     if candidate is bool:
-        return "boolean"
+        return ["boolean", "null"] if default is None else "boolean"
     if candidate is int:
-        return "integer"
+        return ["integer", "null"] if default is None else "integer"
     if candidate is float:
-        return "number"
+        return ["number", "null"] if default is None else "number"
     if candidate in (list, tuple):
         return "array"
     if candidate is dict:
         return "object"
     if candidate is type(None):
         return "null"
+    if candidate is str and default is None:
+        return ["string", "null"]
     return "string"
 
 
@@ -246,8 +296,6 @@ class DataJuicerOperatorProvider:
             errors.append(
                 f"Data-Juicer executor does not provide {runtime_backend.value} workers"
             )
-        if "image" not in descriptor.tags:
-            errors.append("The current DataAgent executor accepts image operators only")
         if errors:
             return ProviderValidationResult(ok=False, errors=tuple(errors))
         schema_parameters = dict(parameters)
@@ -300,7 +348,13 @@ class DataJuicerOperatorProvider:
                 message="; ".join(validation.errors),
             )
         normalized_request = request.model_copy(
-            update={"parameters": validation.normalized_parameters}
+            update={
+                "parameters": validation.normalized_parameters,
+                "context": self._execution_context(
+                    request.context,
+                    request.provider_operator_ref,
+                ),
+            }
         )
         return self._executor(normalized_request)
 
@@ -325,9 +379,34 @@ class DataJuicerOperatorProvider:
                 message="; ".join(validation.errors),
             )
         normalized = request.model_copy(
-            update={"parameters": validation.normalized_parameters}
+            update={
+                "parameters": validation.normalized_parameters,
+                "context": self._execution_context(
+                    request.context,
+                    request.provider_operator_ref,
+                ),
+            }
         )
         return self._executor.execute_dataset(normalized)
+
+    def _execution_context(
+        self,
+        context: Any,
+        provider_operator_ref: str,
+    ) -> Any:
+        descriptor = self._admitted_descriptors.get(
+            provider_operator_ref
+        ) or self._normalized_descriptors.get(provider_operator_ref)
+        if descriptor is None:
+            descriptor = self.describe(provider_operator_ref)
+        return context.model_copy(
+            update={
+                "shared": {
+                    **context.shared,
+                    "provider_operator_tags": sorted(descriptor.tags),
+                }
+            }
+        )
 
     def admit(self, descriptors: list[ProviderOperatorDescriptor]) -> None:
         """Store frozen release descriptors without changing discovery catalog results."""
@@ -352,7 +431,10 @@ class DataJuicerOperatorProvider:
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("provider_version") != self.provider_version:
+            if (
+                payload.get("provider_version") != self.provider_version
+                or payload.get("schema_version") != _CATALOG_SCHEMA_VERSION
+            ):
                 return None
             descriptors = [
                 ProviderOperatorDescriptor.model_validate(item)
@@ -370,6 +452,7 @@ class DataJuicerOperatorProvider:
         payload = {
             "provider_id": self.provider_id,
             "provider_version": self.provider_version,
+            "schema_version": _CATALOG_SCHEMA_VERSION,
             "operators": [item.model_dump(mode="json") for item in descriptors],
         }
         temporary = path.with_suffix(path.suffix + ".tmp")

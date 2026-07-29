@@ -176,6 +176,9 @@ class DataJuicerProcessExecutor:
                 "operator": request.provider_operator_ref,
                 "assets": [item.asset_id for item in request.items],
                 "sources": [str(item) for item in sources],
+                "records": [
+                    item.input_data.record_fields for item in request.items
+                ],
                 "parameters": request.parameters,
             },
             ensure_ascii=False,
@@ -191,14 +194,34 @@ class DataJuicerProcessExecutor:
             f"asset_{index:08d}": (item, source)
             for index, (item, source) in enumerate(zip(request.items, sources, strict=True))
         }
-        records = [
-            {
-                "_dataagent_asset_id": internal_id,
-                "images": [str(source)],
-                "text": "<__dj__image>",
-            }
-            for internal_id, (_, source) in internal_ids.items()
-        ]
+        operator_tags = frozenset(
+            str(item)
+            for item in request.context.shared.get(
+                "provider_operator_tags",
+                (),
+            )
+        )
+        if (
+            not operator_tags
+            and all(not item.input_data.record_fields for item in request.items)
+        ):
+            operator_tags = frozenset({"image"})
+        try:
+            records = [
+                self._input_record(
+                    internal_id=internal_id,
+                    source=source,
+                    input_data=item.input_data,
+                    operator_tags=operator_tags,
+                )
+                for internal_id, (item, source) in internal_ids.items()
+            ]
+        except (OSError, UnicodeError, ValueError) as exc:
+            return ProviderDatasetExecuteResult(
+                ok=False,
+                error_type="input_contract_mismatch",
+                message=str(exc),
+            )
         input_path.write_text(
             "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
             encoding="utf-8",
@@ -375,11 +398,12 @@ except ImportError:
             }
 
         output_fields_by_id: dict[str, dict[str, Any]] = {}
+        transport_fields = self._transport_fields(operator_tags)
         for internal_id, row in rows_by_id.items():
             output_fields = {
                 key: value
                 for key, value in row.items()
-                if key not in {"_dataagent_asset_id", "images", "text"}
+                if key not in {"_dataagent_asset_id", *transport_fields}
             }
             stats_meta = stats_by_id.get(internal_id, {}).get("__dj__meta__", {})
             if isinstance(stats_meta, dict):
@@ -439,9 +463,9 @@ except ImportError:
             kept = rows_by_id.get(internal_id)
             output_fields = output_fields_by_id.get(internal_id, {})
             output_path = str(source)
-            images = (kept or {}).get("images", [])
-            if isinstance(images, list) and images:
-                candidate = Path(str(images[0])).expanduser()
+            output_uris = self._output_uris(kept or {}, operator_tags)
+            if output_uris:
+                candidate = Path(str(output_uris[0])).expanduser()
                 if not candidate.is_absolute():
                     candidate = (execution_root / candidate).resolve()
                 if candidate.is_file():
@@ -497,6 +521,59 @@ except ImportError:
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
         )
+
+    @staticmethod
+    def _input_record(
+        *,
+        internal_id: str,
+        source: Path,
+        input_data: OperatorInput,
+        operator_tags: frozenset[str],
+    ) -> dict[str, Any]:
+        record = {
+            "_dataagent_asset_id": internal_id,
+            **input_data.record_fields,
+        }
+        if "image" in operator_tags:
+            record.setdefault("images", [str(source)])
+            record.setdefault("text", "<__dj__image>")
+        elif "audio" in operator_tags:
+            record.setdefault("audios", [str(source)])
+        elif "video" in operator_tags:
+            record.setdefault("videos", [str(source)])
+        elif "text" in operator_tags:
+            record.setdefault("text", source.read_text(encoding="utf-8-sig"))
+        elif len(record) == 1:
+            raise ValueError(
+                "Provider record operators require record_fields when no "
+                "text, image, audio, or video modality is declared"
+            )
+        return record
+
+    @staticmethod
+    def _transport_fields(operator_tags: frozenset[str]) -> set[str]:
+        if "image" in operator_tags:
+            return {"images", "text"}
+        if "audio" in operator_tags:
+            return {"audios"}
+        if "video" in operator_tags:
+            return {"videos"}
+        return set()
+
+    @staticmethod
+    def _output_uris(
+        row: dict[str, Any],
+        operator_tags: frozenset[str],
+    ) -> list[Any]:
+        for tag, field in (
+            ("image", "images"),
+            ("audio", "audios"),
+            ("video", "videos"),
+        ):
+            if tag in operator_tags:
+                value = row.get(field)
+                return value if isinstance(value, list) else []
+        return []
 
     @staticmethod
     def _emit(event_sink: Any, event_type: str, **details: Any) -> None:

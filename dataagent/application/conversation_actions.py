@@ -21,6 +21,7 @@ class ConversationIntent(StrEnum):
     START_WORK_ORDER = "START_WORK_ORDER"
     PROVIDE_SOURCE = "PROVIDE_SOURCE"
     CLARIFY_REQUIREMENT = "CLARIFY_REQUIREMENT"
+    RESOLVE_RUN_OUTCOME = "RESOLVE_RUN_OUTCOME"
     EDIT_TASK_SPEC = "EDIT_TASK_SPEC"
     APPROVE = "APPROVE"
     REJECT = "REJECT"
@@ -33,6 +34,7 @@ class ConversationIntent(StrEnum):
     CONTROL_RUN = "CONTROL_RUN"
     QUERY_CONTROL_FACTS = "QUERY_CONTROL_FACTS"
     RESOLVE_GAP = "RESOLVE_GAP"
+    CONTINUE_EXECUTION = "CONTINUE_EXECUTION"
 
 
 class ConversationActionError(ValueError):
@@ -87,6 +89,17 @@ class ProvideSourceAction(_ActionBase):
 class ClarifyRequirementAction(_ActionBase):
     intent: Literal[ConversationIntent.CLARIFY_REQUIREMENT]
     answer: str = Field(min_length=1)
+
+
+class ResolveRunOutcomeAction(_ActionBase):
+    intent: Literal[ConversationIntent.RESOLVE_RUN_OUTCOME]
+    action: Literal[
+        "retry_failed_assets",
+        "rerun_pipeline",
+        "reretrieve_candidates",
+        "recompile_pipeline",
+        "terminate",
+    ]
 
 
 class EditTaskSpecAction(_ActionBase):
@@ -173,11 +186,18 @@ class ResolveGapAction(_ActionBase):
     runtime_backend: Literal["cpu", "cuda", "remote"] | None = None
 
 
+class ContinueExecutionAction(_ActionBase):
+    intent: Literal[ConversationIntent.CONTINUE_EXECUTION] = (
+        ConversationIntent.CONTINUE_EXECUTION
+    )
+
+
 ConversationAction = Annotated[
     ChatAction
     | StartWorkOrderAction
     | ProvideSourceAction
     | ClarifyRequirementAction
+    | ResolveRunOutcomeAction
     | EditTaskSpecAction
     | ApproveAction
     | RejectAction
@@ -189,7 +209,8 @@ ConversationAction = Annotated[
     | RunStatusAction
     | ControlRunAction
     | QueryControlFactsAction
-    | ResolveGapAction,
+    | ResolveGapAction
+    | ContinueExecutionAction,
     Field(discriminator="intent"),
 ]
 

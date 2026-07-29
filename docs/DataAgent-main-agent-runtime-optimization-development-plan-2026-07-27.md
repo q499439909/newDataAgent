@@ -1602,3 +1602,145 @@ Requirement Agent，而不是由 Conversation 修改 TaskSpec。
 本批的停止边界仍是 TaskSpec 确认。下一纵向切片不得把“需求阶段通过”扩大解释成
 端到端成功；应继续实现 Approved Pipeline 到正式 Run、独立 QC Observation、主 Agent
 根据失败证据决定回到检索、重新编排、重跑或请求用户。
+
+## 22. 2026-07-28 第三批 B：正式 Run Outcome 与主 Agent 全局返工
+
+### 22.1 单一根因
+
+正式 `DatasetRunExecutor` 和 `QualityEvaluator` 原本都已存在，但 Run/QC 终态只写入
+RunStore、DatasetVersion 和 QCReport，没有投影回 WorkOrder Graph。主 Agent 的动作集合
+也只覆盖规划阶段，因此无法观察正式执行结果并继续决策。
+
+本批增加的深模块为：
+
+```text
+RunOutcomeObserver.observe(RunSnapshot, QCReport, repair candidates)
+  -> RunOutcomeObservation
+```
+
+Observation 只包含持久化事实：
+
+```text
+run status
+pipeline / TaskSpec / DatasetVersion / QCReport references
+QC status and metrics
+reason codes
+failed assets and repair candidates
+retryability
+error and evidence references
+```
+
+Observer 不根据错误码选择修复动作，不修改 Pipeline，也不静默排除资产。
+
+### 22.2 后台闭环
+
+```text
+Worker 完成正式 Run 与 QC
+  -> run_outcome_handler
+  -> 幂等写入 latest_run_observation / observed_run_ids
+  -> 唤醒 Main Agent
+  -> complete | retry_failed_assets | rerun_pipeline
+     | reretrieve_candidates | recompile_pipeline | ask_user | terminate
+```
+
+模型决定动作，LangGraph 的确定性门禁只限制合法性：
+
+- 非终态 Run 不得形成终态 Observation；
+- QC 未通过或不存在时不能选择完成；
+- 没有失败资产时不开放 `retry_failed_assets`；
+- 同一个 Run 只写入一次 Observation；
+- Observation 已写入但模型临时失败时，可以恢复继续决策；
+- 达到修复上限后不再开放自动失败资产重试。
+
+选择重新检索时清空检索及下游产物并进入检索 Agent；选择重新编排时保留检索候选，
+只清空 Pipeline 及下游产物并进入数据处理 Agent。两者没有合并，也没有由错误码自动路由。
+
+### 22.3 HITL 与进度契约
+
+Main Agent 可以产生 `run_outcome_resolution` interrupt。Conversation 新增
+`RESOLVE_RUN_OUTCOME`，只把用户选择送回 LangGraph，不自行解释或修改运行结果。
+
+WorkOrder state 新增：
+
+```text
+latest_run_observation
+observed_run_ids
+resolved_run_ids
+active_run_id
+```
+
+任务计划新增：
+
+```text
+execute_dataset
+evaluate_quality
+resolve_run_outcome
+```
+
+Worker Run events 新增：
+
+```text
+run_outcome_notification_requested
+run_outcome_notified
+run_outcome_notification_failed
+```
+
+`run_outcome_notification_requested` 是持久化交接标记。Worker 只重试带此标记且
+尚未 `notified` 的终态 Run，避免版本升级后把历史失败 Run 误当作新 Observation。
+若 Agent 模型在通知时暂时不可用，失败事件会保留，后续 Worker 轮询从持久化状态
+重新唤醒同一个 WorkOrder；相同请求事件以 Run 为单位幂等。
+
+### 22.4 泛化验证
+
+- 当前断链：正式终态 Run 原本不会进入 Agent Observation；
+- 异语义案例 A：文档 OCR Evidence 失败，模型选择重新编排；
+- 异语义案例 B：车辆计数 Provider 不可用，模型选择重新检索；
+- 音频失败资产案例：只把失败音频加入 Repair Scope；
+- 反例：活动 Run 不得提前观察；
+- 反例：QC PASSED 才能完成；
+- 边界：重复通知幂等、模型恢复后可继续消费、取消后可重新提交正式 Run；
+- 后台：Worker 使用独立 AgentRuntime 连接同一持久化状态并主动通知；
+- 耐久性：通知失败后可重试，未带交接标记的历史终态 Run 不会被误唤醒。
+
+这些测试中的音频、文档和车辆词汇只存在于测试输入，生产代码没有任务关键词分支。
+
+最终全量自动化回归为 `320` 项通过；Python 编译与差异格式检查通过。
+
+## 23. 2026-07-28 非 GPU 多模态 Provider Runtime
+
+Data-Juicer Catalog 可以发现文本、图像、音频、视频和 Dataset 级 CPU 算子，但
+DataAgent Provider Adapter 原先强制要求 `image` 标签，执行器也固定生成图片记录。
+因此 Catalog 的 `local_cpu` 只代表 Provider 环境候选，不能代表 DataAgent 已完成
+端到端接入。
+
+本批改为：
+
+```text
+OperatorInput.record_fields
+  + Provider Catalog modality tags
+  -> text / images / audios / videos / structured record
+  -> Data-Juicer JSONL
+  -> normalized OperatorResult
+```
+
+正式 `DatasetRunExecutor` 根据已批准 Pipeline 中 Operator 的模态标签扫描资产；
+模态扩展名知识集中在 `scan_dataset_assets(root, modalities)`，Agent、检索和
+Pipeline 编排不包含文件名或任务关键词规则。CPU Provider Filter 的批处理也不再
+限定图片。
+
+隔离 Provider Worker 的 Python 注解转换同步支持 Optional、Union、容器和命名数值
+类型；Catalog 缓存增加 Schema 版本，旧缓存自动失效并重新发现。
+
+当前验收：
+
+- 真实 Catalog 本地 CPU 候选 `146`，统一参数与运行门禁 `146/146` 通过；
+- 11 个 CPU 图像算子完成真实隔离进程烟测；
+- `text_length_filter` 完成真实隔离进程烟测；
+- 音频与视频完成输入契约、隔离进程适配和正式资产发现自动化测试；
+- 本机没有音频/视频样本，因此尚未完成真实 FFmpeg 数据烟测；
+- S3、下载、上传及远程 API 等外部副作用算子没有未经授权批量执行。
+
+“参数门禁通过”不得表述为“所有算子结果正确”。每个 Operator Contract Family
+仍需独立真实 Fixture、输出 Evidence 和 QC 验收。
+
+本批完成后全量自动化回归为 `328` 项通过；Python 编译与差异格式检查通过。

@@ -151,7 +151,7 @@ export const AuthPage: React.FC = () => {
               数据工程与大模型评测专有工作台
             </h1>
             <p className="text-xs text-slate-600 leading-relaxed">
-              登录后即可体验完整的工单试跑、自定义算子上传、3套 Candidate 方案比对以及 Golden Set 争议质检全流程。
+              登录后即可体验完整的主 Agent 对话工作台、对话内产物面板、自定义算子上传以及运行/QC 状态追踪。
             </p>
           </div>
 

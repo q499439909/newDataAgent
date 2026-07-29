@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, UserRole, OperatorSpec, PipelineVersion, WorkOrder, AuditLog } from '../types';
+import { User, UserRole, OperatorSpec, PipelineVersion, WorkOrder, AuditLog, WorkOrderChatMessage } from '../types';
 import { INITIAL_OPERATORS } from '../data/initialOperators';
 import { INITIAL_PIPELINES, MOCK_NODE_PREVIEWS } from '../data/initialPipelines';
 import { INITIAL_WORK_ORDERS } from '../data/initialWorkOrders';
@@ -43,11 +43,15 @@ interface AppContextType {
   workOrders: WorkOrder[];
   activeWorkOrder: WorkOrder | null;
   setActiveWorkOrder: (wo: WorkOrder | null) => void;
+  activeWorkOrderChatMessages: WorkOrderChatMessage[];
+  setActiveWorkOrderChatMessages: (messages: WorkOrderChatMessage[]) => void;
+  setWorkOrderChatMessages: (workOrderId: string, messages: WorkOrderChatMessage[]) => void;
   updateWorkOrderStage: (woId: string, stage: WorkOrder['currentStage']) => void;
   createNewWorkOrder: (name: string, description: string) => Promise<WorkOrder>;
   sendMainAgentMessage: (
     content: string,
     onStreamEvent?: (event: StreamEvent) => void,
+    targetWorkOrder?: WorkOrder,
   ) => Promise<{ reply: string; workOrder: WorkOrder | null }>;
   approveCurrentTaskSpec: () => Promise<void>;
   approveCurrentPipeline: (pipelineId?: string) => Promise<void>;
@@ -97,6 +101,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [pipelines, setPipelines] = useState<PipelineVersion[]>(INITIAL_PIPELINES);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>(INITIAL_WORK_ORDERS);
   const [activeWorkOrder, setActiveWorkOrder] = useState<WorkOrder | null>(INITIAL_WORK_ORDERS[0]);
+  const [chatMessagesByWorkOrder, setChatMessagesByWorkOrder] = useState<Record<string, WorkOrderChatMessage[]>>({});
+  const [hasLoadedWorkspaceState, setHasLoadedWorkspaceState] = useState(false);
 
   // Modals & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -108,6 +114,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Toast & Audit
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+
+  const chatStorageKey = currentUser.id && currentUser.id !== 'guest'
+    ? `dataagent_chat_messages_${currentUser.id}`
+    : '';
+  const workOrdersStorageKey = currentUser.id && currentUser.id !== 'guest'
+    ? `dataagent_work_orders_${currentUser.id}`
+    : '';
+  const activeWorkOrderStorageKey = currentUser.id && currentUser.id !== 'guest'
+    ? `dataagent_active_work_order_${currentUser.id}`
+    : '';
 
   // Initialize store and restore session on boot
   useEffect(() => {
@@ -124,6 +140,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     bootAuth();
   }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !chatStorageKey) return;
+    try {
+      const saved = localStorage.getItem(chatStorageKey);
+      setChatMessagesByWorkOrder(saved ? JSON.parse(saved) : {});
+    } catch (error) {
+      setChatMessagesByWorkOrder({});
+    }
+  }, [isAuthenticated, chatStorageKey]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !workOrdersStorageKey || !activeWorkOrderStorageKey) return;
+    try {
+      const savedWorkOrders = localStorage.getItem(workOrdersStorageKey);
+      const savedActiveId = localStorage.getItem(activeWorkOrderStorageKey);
+      if (savedWorkOrders) {
+        const parsed = JSON.parse(savedWorkOrders) as WorkOrder[];
+        if (Array.isArray(parsed) && parsed.length) {
+          setWorkOrders(parsed);
+          setActiveWorkOrder(parsed.find(item => item.id === savedActiveId) || parsed[0]);
+        }
+      }
+    } catch (error) {
+      // keep initial prototype work orders
+    } finally {
+      setHasLoadedWorkspaceState(true);
+    }
+  }, [activeWorkOrderStorageKey, isAuthenticated, workOrdersStorageKey]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !chatStorageKey) return;
+    try {
+      localStorage.setItem(chatStorageKey, JSON.stringify(chatMessagesByWorkOrder));
+    } catch (error) {
+      // ignore local storage quota or privacy mode failures
+    }
+  }, [chatMessagesByWorkOrder, chatStorageKey, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !hasLoadedWorkspaceState || !workOrdersStorageKey) return;
+    try {
+      localStorage.setItem(workOrdersStorageKey, JSON.stringify(workOrders));
+    } catch (error) {
+      // ignore local storage quota or privacy mode failures
+    }
+  }, [hasLoadedWorkspaceState, isAuthenticated, workOrders, workOrdersStorageKey]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !hasLoadedWorkspaceState || !activeWorkOrderStorageKey || !activeWorkOrder) return;
+    try {
+      localStorage.setItem(activeWorkOrderStorageKey, activeWorkOrder.id);
+    } catch (error) {
+      // ignore local storage quota or privacy mode failures
+    }
+  }, [activeWorkOrder, activeWorkOrderStorageKey, hasLoadedWorkspaceState, isAuthenticated]);
 
   const loadUserFavorites = (userId: string) => {
     try {
@@ -165,6 +237,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return exists ? prev.map(wo => (wo.id === next.id ? next : wo)) : [next, ...prev];
     });
     setActiveWorkOrder(next);
+  };
+
+  const activeWorkOrderChatMessages = activeWorkOrder
+    ? chatMessagesByWorkOrder[activeWorkOrder.id] || []
+    : [];
+
+  const setActiveWorkOrderChatMessages = (messages: WorkOrderChatMessage[]) => {
+    if (!activeWorkOrder) return;
+    const workOrderId = activeWorkOrder.id;
+    setWorkOrderChatMessages(workOrderId, messages);
+  };
+
+  const setWorkOrderChatMessages = (workOrderId: string, messages: WorkOrderChatMessage[]) => {
+    setChatMessagesByWorkOrder(prev => ({
+      ...prev,
+      [workOrderId]: messages,
+    }));
   };
 
   useEffect(() => {
@@ -403,8 +492,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sendMainAgentMessage = async (
     content: string,
     onStreamEvent?: (event: StreamEvent) => void,
+    targetWorkOrder?: WorkOrder,
   ): Promise<{ reply: string; workOrder: WorkOrder | null }> => {
-    let target = activeWorkOrder;
+    let target = targetWorkOrder || activeWorkOrder;
     if (!target?.conversationId) {
       target = await createNewWorkOrder('新的数据任务对话', '通过主 Agent 对话创建的任务');
     }
@@ -465,6 +555,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
     const run = await submitDatasetRun(currentUser.id, activeWorkOrder.id);
+    const runId = String(run.id || run.run_id || '');
+    if (runId) {
+      const updated = { ...activeWorkOrder, activeRunId: runId };
+      setWorkOrders(prev => prev.map(wo => (wo.id === activeWorkOrder.id ? updated : wo)));
+      setActiveWorkOrder(updated);
+    }
     showToast(`全量数据运行已提交：${run.id || run.run_id}`);
     addAuditLog('SUBMIT_DATASET_RUN', 'WorkOrder', activeWorkOrder.id, `Run: ${run.id || run.run_id}`);
   };
@@ -568,6 +664,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         workOrders,
         activeWorkOrder,
         setActiveWorkOrder,
+        activeWorkOrderChatMessages,
+        setActiveWorkOrderChatMessages,
+        setWorkOrderChatMessages,
         updateWorkOrderStage,
         createNewWorkOrder,
         sendMainAgentMessage,

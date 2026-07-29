@@ -571,3 +571,18 @@ def test_control_plane_client_parses_ndjson_conversation_stream() -> None:
     assert [event["type"] for event in events] == ["action", "final"]
     assert events[1]["response"]["reply"] == "完成"
     client.close()
+
+
+def test_control_plane_client_default_timeout_is_ten_minutes() -> None:
+    client = ControlPlaneClient(
+        base_url="http://dataagent.test",
+        owner_id="user_1",
+    )
+
+    timeout = client._client.timeout
+
+    assert timeout.connect == 600.0
+    assert timeout.read == 600.0
+    assert timeout.write == 600.0
+    assert timeout.pool == 600.0
+    client.close()

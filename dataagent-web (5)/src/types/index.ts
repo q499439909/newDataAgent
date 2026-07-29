@@ -181,6 +181,42 @@ export interface TaskSpec {
   ambiguities: string[];
   status: 'draft' | 'confirmed' | 'revision_requested';
   targetMetrics: { metric: string; targetValue: string; baselineValue: string }[];
+  clauseTraces?: ClauseTrace[];
+}
+
+export interface ClauseTrace {
+  source_text: string;
+  role: 'constraint' | 'definition' | 'preference' | 'output' | 'context' | string;
+  constraint_refs: string[];
+  normalized_effect: Record<string, any>;
+}
+
+export interface RunOutcomeObservation {
+  observation_id: string;
+  work_order_id: string;
+  run_id: string;
+  run_status: string;
+  pipeline_version_id: string;
+  task_spec_version_id: string;
+  dataset_version_id?: string;
+  qc_report_id?: string;
+  qc_status?: string;
+  reason_codes: string[];
+  metrics: Record<string, any>;
+  failed_asset_uris: string[];
+  repair_candidate_uris: string[];
+  retryable: boolean;
+  error?: string;
+  evidence_refs: string[];
+  observed_at: string;
+}
+
+export interface AgentObservation {
+  agent?: string;
+  status?: string;
+  summary?: string;
+  tool_observations?: any[];
+  [key: string]: any;
 }
 
 export interface RetrievalPlan {
@@ -247,6 +283,27 @@ export interface WorkOrder {
   taskPlan?: { id: string; label: string; status: string }[];
   mainAgentAction?: string;
   waitingFor?: string | null;
+  latestRunObservation?: RunOutcomeObservation | null;
+  observedRunIds?: string[];
+  resolvedRunIds?: string[];
+  activeRunId?: string | null;
+  agentObservations?: AgentObservation[];
+  requirementClarification?: {
+    questions: string[];
+    summary?: string;
+    allowedActions?: string[];
+  } | null;
+}
+
+export type WorkOrderChatArtifactKind = 'task_spec' | 'pipeline' | 'quality' | 'run' | 'files';
+
+export interface WorkOrderChatMessage {
+  id: string;
+  sender: 'user' | 'agent';
+  agentName?: string;
+  text: string;
+  time: string;
+  actionType?: WorkOrderChatArtifactKind;
 }
 
 export interface AuditLog {

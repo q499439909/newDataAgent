@@ -17,6 +17,7 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..agents.requirement import RequirementPlanner
+from ..agents.main import build_task_plan
 from ..agents.runtime import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
@@ -41,6 +42,7 @@ from .dataset_versions import (
     exclude_abandoned_assets_version,
     write_dataset_manifest,
 )
+from .run_outcomes import RunOutcomeObserver, latest_qc_report_for_run
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class AgentRuntime:
         self.version_store: DomainVersionStore | None = None
         self.run_store: RunStore | None = None
         self.conversation_store: ConversationStore | None = None
+        self.agent_planner = agent_planner
         if home is None:
             self.checkpointer = InMemorySaver()
         else:
@@ -229,7 +232,11 @@ class AgentRuntime:
                 )
         result = self.graph.invoke(Command(resume=decision), self._config(record))
         self._capture_versions(record, result)
-        return self._public_result(record, result)
+        return self._apply_run_control_decision(
+            record=record,
+            result=result,
+            owner_id=owner_id,
+        )
 
     def state(self, *, work_order_id: str, owner_id: str) -> dict[str, Any]:
         record = self._get_authorized(work_order_id, owner_id)
@@ -421,6 +428,39 @@ class AgentRuntime:
         record = self._get_authorized(work_order_id, owner_id)
         if self.run_store is None or self.version_store is None:
             raise RuntimeError("Persistent runtime is required for dataset runs")
+        existing_runs = self.run_store.list_for_work_order(
+            work_order_id,
+            owner_id,
+        )
+        repeated = next(
+            (
+                item
+                for item in existing_runs
+                if item["idempotency_key"] == idempotency_key
+            ),
+            None,
+        )
+        if repeated is not None:
+            self.run_store.request_outcome_notification(
+                repeated["id"],
+                work_order_id=work_order_id,
+            )
+            return self._run_payload(repeated)
+        active = [
+            item
+            for item in existing_runs
+            if item["status"]
+            in {
+                "QUEUED",
+                "RUNNING",
+                "PAUSING",
+                "PAUSED",
+                "CANCELLING",
+                "EVALUATING",
+            }
+        ]
+        if active:
+            raise ValueError("WorkOrder already has an active dataset Run")
         snapshot = self.graph.get_state(self._config(record))
         if snapshot.interrupts:
             raise ValueError("Agent workflow still requires approval")
@@ -429,7 +469,7 @@ class AgentRuntime:
             raise ValueError("Terminated work orders cannot submit dataset runs")
         pipeline_id = state.get("selected_pipeline_id")
         spec_payload = state.get("task_spec")
-        if not pipeline_id or not spec_payload or state.get("next_action") != "submit_dataset_run":
+        if not pipeline_id or not spec_payload:
             raise ValueError("Work order is not ready to submit a dataset run")
         pipeline = PipelineVersion.model_validate(
             self.version_store.get(
@@ -448,7 +488,205 @@ class AgentRuntime:
             task_spec_version_id=spec.id,
             idempotency_key=idempotency_key,
         )
+        self.run_store.request_outcome_notification(
+            run["id"],
+            work_order_id=work_order_id,
+        )
+        updates = {
+            "active_run_id": run["id"],
+            "next_action": "await_run_outcome",
+            "trace": [
+                *state.get("trace", ()),
+                "run:production_scheduled",
+            ],
+        }
+        self.graph.update_state(
+            self._config(record),
+            {
+                **updates,
+                "task_plan": build_task_plan({**state, **updates}),
+            },
+            as_node="complete_work_order",
+        )
         return self._run_payload(run)
+
+    def observe_run_outcome(
+        self,
+        *,
+        work_order_id: str,
+        run_id: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        record = self._get_authorized(work_order_id, owner_id)
+        if self.run_store is None or self.version_store is None:
+            raise RuntimeError(
+                "Persistent runtime is required for Run observations"
+            )
+        run = RunSnapshot.model_validate(
+            self._run_payload(self.run_store.get(run_id, owner_id))
+        )
+        if run.work_order_id != work_order_id:
+            raise ValueError("Run does not belong to the WorkOrder")
+        snapshot = self.graph.get_state(self._config(record))
+        state = dict(snapshot.values)
+        observed_run_ids = list(state.get("observed_run_ids", ()))
+        if run_id in observed_run_ids:
+            if (
+                self.agent_planner is not None
+                and run_id not in state.get("resolved_run_ids", ())
+                and not snapshot.interrupts
+            ):
+                result = self.graph.invoke(None, self._config(record))
+                self._capture_versions(record, result)
+                return self._apply_run_control_decision(
+                    record=record,
+                    result=result,
+                    owner_id=owner_id,
+                )
+            return self._public_result(record, state)
+        report = latest_qc_report_for_run(
+            self.version_store.list_for_owner(
+                kind="qc_report",
+                owner_id=owner_id,
+            ),
+            run_id,
+        )
+        outcome = RunOutcomeObserver().observe(
+            run=run,
+            qc_report=report,
+            repair_candidate_uris=tuple(
+                item["source_uri"]
+                for item in self.run_store.items(run_id)
+                if item["decision"] == "failed"
+            ),
+        ).model_dump(mode="json")
+        observation = {
+            "agent": "requirement",
+            "status": "run_outcome_observed",
+            "summary": (
+                f"Formal Run {run.id} reached {run.status.value}."
+            ),
+            **outcome,
+        }
+        outcome_updates = {
+            "latest_run_observation": outcome,
+            "observed_run_ids": [*observed_run_ids, run_id],
+            "agent_observations": [
+                *state.get("agent_observations", ()),
+                observation,
+            ],
+            "current_agent": "requirement",
+            "next_action": "resolve_run_outcome",
+            "trace": [
+                *state.get("trace", ()),
+                "run:outcome_observed",
+            ],
+        }
+        self.graph.update_state(
+            self._config(record),
+            {
+                **outcome_updates,
+                "task_plan": build_task_plan(
+                    {**state, **outcome_updates}
+                ),
+            },
+            as_node="strategy_agent",
+        )
+        if self.agent_planner is None:
+            return self.state(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+        result = self.graph.invoke(None, self._config(record))
+        self._capture_versions(record, result)
+        return self._apply_run_control_decision(
+            record=record,
+            result=result,
+            owner_id=owner_id,
+        )
+
+    def _apply_run_control_decision(
+        self,
+        *,
+        record: AgentThread,
+        result: dict[str, Any],
+        owner_id: str,
+    ) -> dict[str, Any]:
+        if self.run_store is None:
+            return self._public_result(record, result)
+        outcome = result.get("latest_run_observation") or {}
+        run_id = str(outcome.get("run_id") or "")
+        if result.get("next_action") == "retry_failed_assets":
+            if not run_id:
+                raise ValueError("Repair decision requires a Run observation")
+            repair = self.retry_failed_assets(
+                previous_run_id=run_id,
+                owner_id=owner_id,
+                idempotency_key=f"agent-repair:{run_id}",
+            )
+            updates = {
+                "active_run_id": repair["id"],
+                "next_action": "await_run_outcome",
+                "trace": [
+                    *result.get("trace", ()),
+                    "run:repair_scheduled",
+                ],
+            }
+            self.graph.update_state(
+                self._config(record),
+                {
+                    **updates,
+                    "task_plan": build_task_plan(
+                        {**result, **updates}
+                    ),
+                },
+                as_node="complete_work_order",
+            )
+            return self.state(
+                work_order_id=record.work_order_id,
+                owner_id=owner_id,
+            )
+        if result.get("next_action") == "rerun_pipeline":
+            if not run_id:
+                raise ValueError("Rerun decision requires a Run observation")
+            run = RunSnapshot.model_validate(
+                self._run_payload(self.run_store.get(run_id, owner_id))
+            )
+            rerun = self.run_store.create(
+                run_id=new_id("run"),
+                work_order_id=record.work_order_id,
+                owner_id=owner_id,
+                pipeline_version_id=run.pipeline_version_id,
+                task_spec_version_id=run.task_spec_version_id,
+                idempotency_key=f"agent-rerun:{run_id}",
+            )
+            self.run_store.request_outcome_notification(
+                rerun["id"],
+                work_order_id=record.work_order_id,
+            )
+            updates = {
+                "active_run_id": rerun["id"],
+                "next_action": "await_run_outcome",
+                "trace": [
+                    *result.get("trace", ()),
+                    "run:rerun_scheduled",
+                ],
+            }
+            self.graph.update_state(
+                self._config(record),
+                {
+                    **updates,
+                    "task_plan": build_task_plan(
+                        {**result, **updates}
+                    ),
+                },
+                as_node="complete_work_order",
+            )
+            return self.state(
+                work_order_id=record.work_order_id,
+                owner_id=owner_id,
+            )
+        return self._public_result(record, result)
 
     def retry_failed_assets(
         self,
@@ -515,6 +753,10 @@ class AgentRuntime:
                 "asset_count": len(retry_plan),
                 "source_uris": [item["source_uri"] for item in retry_plan],
             },
+        )
+        self.run_store.request_outcome_notification(
+            new_run["id"],
+            work_order_id=previous["work_order_id"],
         )
         return self._run_payload(self.run_store.get(new_run["id"], owner_id))
 
@@ -941,7 +1183,7 @@ class AgentRuntime:
             snapshot = self.graph.get_state(self._config(record))
             state = dict(snapshot.values)
             feedback_observation = {
-                "agent": "main",
+                "agent": "requirement",
                 "status": "feedback_received",
                 "summary": "Negative run feedback requires Pipeline replanning.",
                 "run_id": run_id,
@@ -959,7 +1201,7 @@ class AgentRuntime:
                     "pipeline_approval": {},
                     "sampling_plan": {},
                     "next_action": "generate_pipeline_candidates",
-                    "current_agent": "main",
+                    "current_agent": "requirement",
                     "latest_run_feedback": feedback_observation,
                     "agent_observations": [
                         *state.get("agent_observations", ()),

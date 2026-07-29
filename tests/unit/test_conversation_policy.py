@@ -22,6 +22,21 @@ def test_requirement_clarification_is_allowed_only_at_its_interrupt() -> None:
     assert "APPROVE" not in allowed
 
 
+def test_run_outcome_resolution_is_allowed_only_at_its_interrupt() -> None:
+    context = {
+        "work_order_id": "work_order_1",
+        "agent_state": {
+            "waiting": "run_outcome_resolution",
+            "next_action": "ask_user",
+        },
+    }
+
+    allowed = allowed_conversation_actions(context)
+
+    assert "RESOLVE_RUN_OUTCOME" in allowed
+    assert "APPROVE" not in allowed
+
+
 def test_semantically_unverified_pipeline_requires_recompilation() -> None:
     context = {
         "work_order_id": "work_order_1",

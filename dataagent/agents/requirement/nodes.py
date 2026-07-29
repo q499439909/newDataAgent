@@ -135,7 +135,7 @@ def _generate_agent_task_spec(
         return {"ok": True}
 
     loop = AgentDecisionLoop(
-        agent_name="requirement",
+        agent_name="requirement_planning",
         planner=planner,
         tools=(
             AgentTool(

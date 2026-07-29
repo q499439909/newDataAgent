@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from apps.api.main import create_app
+from dataagent.agents.runtime import AgentDecision
 from dataagent.application.agent_runtime import AgentRuntime
 from dataagent.application.dataset_versions import (
     build_logical_dataset_version,
@@ -326,6 +327,283 @@ def test_worker_marks_run_failed_when_dataset_qc_fails(tmp_path) -> None:
     assert completed["status"] == "FAILED"
     assert completed["dataset_version_id"]
     assert "REQUIRED_SEMANTIC_OUTPUT_MISSING" in completed["error"]
+
+
+def test_terminal_run_outcome_becomes_an_idempotent_agent_observation(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(
+        source / "sample.png"
+    )
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(
+        client,
+        source,
+        work_order_id="observed_run_work_order",
+    )
+    submitted = client.post(
+        "/api/work-orders/observed_run_work_order/runs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "observed-run",
+        },
+    ).json()
+
+    assert runtime.run_store is not None
+    runtime.run_store.mark_failed(
+        submitted["id"],
+        "audio loudness evidence was not produced",
+    )
+
+    first = runtime.observe_run_outcome(
+        work_order_id="observed_run_work_order",
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+    repeated = runtime.observe_run_outcome(
+        work_order_id="observed_run_work_order",
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+
+    observation = first["state"]["latest_run_observation"]
+    assert observation["run_id"] == submitted["id"]
+    assert observation["run_status"] == "FAILED"
+    assert observation["error"] == (
+        "audio loudness evidence was not produced"
+    )
+    assert observation["qc_status"] is None
+    assert first["state"]["observed_run_ids"] == [submitted["id"]]
+    assert repeated["state"]["agent_observations"] == first["state"][
+        "agent_observations"
+    ]
+    assert repeated["state"]["observed_run_ids"] == [submitted["id"]]
+
+
+def test_worker_notifies_agent_runtime_after_terminal_run(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(
+        source / "sample.png"
+    )
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(
+        client,
+        source,
+        work_order_id="background_observation_work_order",
+    )
+    submitted = client.post(
+        "/api/work-orders/background_observation_work_order/runs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "background-observation-run",
+        },
+    ).json()
+    outcome_runtime = AgentRuntime(home)
+    worker = LocalRunWorker(
+        home,
+        run_outcome_handler=lambda run: outcome_runtime.observe_run_outcome(
+            work_order_id=run["work_order_id"],
+            run_id=run["id"],
+            owner_id=run["owner_id"],
+        ),
+    )
+
+    completed = worker.process_next()
+    state = runtime.state(
+        work_order_id="background_observation_work_order",
+        owner_id="user_1",
+    )["state"]
+
+    assert completed is not None
+    assert completed["id"] == submitted["id"]
+    assert state["latest_run_observation"]["run_id"] == submitted["id"]
+    assert state["observed_run_ids"] == [submitted["id"]]
+    events = runtime.get_run_events(
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+    assert events[-1]["event_type"] == "run_outcome_notified"
+
+
+def test_active_run_cannot_be_reported_as_a_terminal_observation(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(
+        source / "sample.png"
+    )
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(
+        client,
+        source,
+        work_order_id="active_run_work_order",
+    )
+    submitted = client.post(
+        "/api/work-orders/active_run_work_order/runs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "active-run",
+        },
+    ).json()
+
+    with pytest.raises(ValueError, match="not terminal"):
+        runtime.observe_run_outcome(
+            work_order_id="active_run_work_order",
+            run_id=submitted["id"],
+            owner_id="user_1",
+        )
+
+    state = runtime.state(
+        work_order_id="active_run_work_order",
+        owner_id="user_1",
+    )["state"]
+    assert state.get("observed_run_ids", []) == []
+
+
+def test_recorded_outcome_can_be_resumed_when_agent_decision_recovers(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(
+        source / "sample.png"
+    )
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(
+        client,
+        source,
+        work_order_id="recoverable_observation_work_order",
+    )
+    submitted = client.post(
+        "/api/work-orders/recoverable_observation_work_order/runs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "recoverable-observation-run",
+        },
+    ).json()
+    assert runtime.run_store is not None
+    runtime.run_store.mark_failed(submitted["id"], "temporary model outage")
+    recorded = runtime.observe_run_outcome(
+        work_order_id="recoverable_observation_work_order",
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+    assert recorded["state"]["next_action"] == "resolve_run_outcome"
+
+    class AskUserPlanner:
+        def decide(self, request):
+            return AgentDecision(
+                action="tool",
+                reason_summary="The recovered Agent needs a human decision.",
+                tool_name="ask_user",
+            )
+
+    recovered_runtime = AgentRuntime(home, agent_planner=AskUserPlanner())
+    recovered = recovered_runtime.observe_run_outcome(
+        work_order_id="recoverable_observation_work_order",
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+
+    assert recovered["interrupts"][0]["value"]["kind"] == (
+        "run_outcome_resolution"
+    )
+
+
+def test_worker_retries_a_failed_outcome_notification_from_durable_state(
+    tmp_path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (640, 480), (120, 130, 140)).save(
+        source / "sample.png"
+    )
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    client = TestClient(create_app(runtime))
+    _ready_work_order(
+        client,
+        source,
+        work_order_id="durable_notification_work_order",
+    )
+    submitted = client.post(
+        "/api/work-orders/durable_notification_work_order/runs",
+        headers={
+            "X-Owner-ID": "user_1",
+            "Idempotency-Key": "durable-notification-run",
+        },
+    ).json()
+    attempts = 0
+
+    def flaky_handler(run):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary Agent model outage")
+        return runtime.observe_run_outcome(
+            work_order_id=run["work_order_id"],
+            run_id=run["id"],
+            owner_id=run["owner_id"],
+        )
+
+    worker = LocalRunWorker(home, run_outcome_handler=flaky_handler)
+
+    completed = worker.process_next()
+    retried = worker.process_next()
+
+    assert completed is not None
+    assert completed["id"] == submitted["id"]
+    assert retried is not None
+    assert retried["id"] == submitted["id"]
+    assert attempts == 2
+    events = runtime.get_run_events(
+        run_id=submitted["id"],
+        owner_id="user_1",
+    )
+    assert [item["event_type"] for item in events[-2:]] == [
+        "run_outcome_notification_failed",
+        "run_outcome_notified",
+    ]
+
+
+def test_worker_does_not_awaken_historical_terminal_run_without_request(
+    tmp_path,
+) -> None:
+    home = tmp_path / "runtime"
+    runtime = AgentRuntime(home)
+    assert runtime.run_store is not None
+    historical = runtime.run_store.create(
+        run_id="historical_run",
+        work_order_id="historical_work_order",
+        owner_id="user_1",
+        pipeline_version_id="pipeline_1",
+        task_spec_version_id="task_spec_1",
+        idempotency_key="historical-run",
+    )
+    runtime.run_store.mark_failed(
+        historical["id"],
+        "failure recorded before Agent outcome handoff existed",
+    )
+    awakened: list[str] = []
+    worker = LocalRunWorker(
+        home,
+        run_outcome_handler=lambda run: awakened.append(run["id"]),
+    )
+
+    assert worker.process_next() is None
+    assert awakened == []
 
 
 def test_worker_resumes_from_asset_checkpoint_without_reprocessing(tmp_path) -> None:

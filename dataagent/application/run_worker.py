@@ -28,11 +28,13 @@ class LocalRunWorker:
         vision_api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         vlm_gateway: Callable[..., dict[str, Any]] | None = None,
         worker_concurrency: int = 1,
+        run_outcome_handler: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self.home = home.expanduser().resolve()
         database = SqliteDatabase(self.home / "control.db")
         self.run_store = RunStore(database)
         self.version_store = DomainVersionStore(database)
+        self.run_outcome_handler = run_outcome_handler
         if recover_interrupted:
             self.run_store.recover_interrupted()
         self.executor = DatasetRunExecutor(
@@ -58,11 +60,44 @@ class LocalRunWorker:
     def process_next(self) -> dict[str, Any] | None:
         run = self.run_store.claim_next()
         if run is None:
-            return None
+            if self.run_outcome_handler is None:
+                return None
+            pending = self.run_store.pending_outcome_notifications()
+            if not pending:
+                return None
+            return (
+                pending[0]
+                if self._notify_run_outcome(pending[0])
+                else None
+            )
         try:
-            return self.executor.execute(run["id"])
+            completed = self.executor.execute(run["id"])
         except Exception:
-            return self.run_store.get(run["id"])
+            completed = self.run_store.get(run["id"])
+        self._notify_run_outcome(completed)
+        return completed
+
+    def _notify_run_outcome(self, completed: dict[str, Any]) -> bool:
+        if self.run_outcome_handler is None:
+            return True
+        try:
+            self.run_outcome_handler(completed)
+        except Exception as exc:
+            self.run_store.add_event(
+                completed["id"],
+                "run_outcome_notification_failed",
+                {
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return False
+        self.run_store.add_event(
+            completed["id"],
+            "run_outcome_notified",
+            {"work_order_id": completed["work_order_id"]},
+        )
+        return True
 
     def run_forever(self, poll_interval: float = 1.0) -> None:
         while True:

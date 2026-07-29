@@ -8,7 +8,7 @@ from dataagent.agents.runtime import (
     AgentPlanningRequest,
     AgentTool,
 )
-from dataagent.agents.main.runtime import decide_main_agent_turn
+from dataagent.agents.requirement import decide_requirement_agent_turn
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
 from dataagent.agents.processing.nodes import generate_pipeline_variants
 from dataagent.agents.strategy.nodes import generate_sampling_plan
@@ -167,7 +167,7 @@ def test_agent_tool_can_compact_large_inputs_in_model_observations() -> None:
     assert planner.requests[1].observations[0].tool_input == {"item_count": 20}
 
 
-def test_main_agent_model_selects_the_next_specialist_from_current_state() -> None:
+def test_requirement_root_selects_the_next_specialist_from_state() -> None:
     planner = ScriptedPlanner(
         [
             AgentDecision(
@@ -178,11 +178,11 @@ def test_main_agent_model_selects_the_next_specialist_from_current_state() -> No
         ]
     )
 
-    result = decide_main_agent_turn(
+    result = decide_requirement_agent_turn(
         {
             "task_spec": {"id": "spec_1"},
             "task_spec_confirmed": True,
-            "main_agent_decisions": [],
+            "requirement_agent_decisions": [],
             "agent_observations": [
                 {
                     "agent": "requirement",
@@ -194,9 +194,164 @@ def test_main_agent_model_selects_the_next_specialist_from_current_state() -> No
         planner=planner,
     )
 
-    assert result["main_agent_action"] == "run_retrieval_agent"
-    assert result["main_agent_decisions"][0]["source"] == "model"
+    assert result["requirement_agent_action"] == "run_retrieval_agent"
+    assert result["requirement_agent_decisions"][0]["source"] == "model"
     assert planner.requests[0].context["observations"][0]["agent"] == "requirement"
+
+
+@pytest.mark.parametrize(
+    "case_state",
+    [
+        pytest.param(
+            {
+                "task_spec": {
+                    "id": "spec_image_visual_filter",
+                    "constraints": [
+                        {
+                            "id": "C08",
+                            "field": "image.subject_clothing_color",
+                        }
+                    ],
+                },
+                "retrieval_plan": {"id": "retrieval_plan_image"},
+            },
+            id="current_image_visual_filter",
+        ),
+        pytest.param(
+            {
+                "task_spec": {
+                    "id": "spec_text_filter",
+                    "constraints": [
+                        {
+                            "id": "C01",
+                            "field": "document.character_count",
+                        }
+                    ],
+                },
+                "retrieval_plan": {"id": "retrieval_plan_text"},
+            },
+            id="generalized_text_filter",
+        ),
+        pytest.param(
+            {
+                "task_spec": {
+                    "id": "spec_audio_filter",
+                    "constraints": [
+                        {
+                            "id": "C01",
+                            "field": "audio.duration",
+                        }
+                    ],
+                },
+                "retrieval_plan": {"id": "retrieval_plan_audio"},
+            },
+            id="generalized_audio_filter",
+        ),
+    ],
+)
+def test_requirement_root_rejects_finish_before_pipeline_compilation(
+    case_state: dict,
+) -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="finish",
+                reason_summary="Retrieval is complete, so planning can finish.",
+                output={"action": "finish_planning"},
+            ),
+            AgentDecision(
+                action="tool",
+                reason_summary="Pipeline variants still need compilation.",
+                tool_name="run_processing_agent",
+            ),
+        ]
+    )
+
+    result = decide_requirement_agent_turn(
+        {
+            "task_spec": case_state["task_spec"],
+            "task_spec_confirmed": True,
+            "retrieval_plan": case_state["retrieval_plan"],
+            "candidate_sufficient": True,
+            "representative_pipelines": [],
+            "requirement_agent_decisions": [],
+            "agent_observations": [
+                {
+                    "agent": "retrieval",
+                    "status": "finished",
+                    "summary": "All requested constraints have candidates.",
+                }
+            ],
+        },
+        planner=planner,
+    )
+
+    assert result["requirement_agent_action"] == "run_processing_agent"
+    assert "finish_planning" not in planner.requests[0].context["allowed_actions"]
+    assert planner.requests[1].context["policy_observations"] == [
+        {
+            "error": "FINISH_BEFORE_COMPLETION_GATES",
+            "proposed": "finish_planning",
+            "required_next_action": "run_processing_agent",
+            "message": "Candidate coverage is sufficient for Pipeline compilation.",
+        }
+    ]
+
+
+def test_requirement_root_does_not_process_insufficient_candidates() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Coverage gaps must be resolved first.",
+                tool_name="resolve_capability_gaps",
+            )
+        ]
+    )
+
+    result = decide_requirement_agent_turn(
+        {
+            "task_spec": {"id": "spec_1"},
+            "task_spec_confirmed": True,
+            "retrieval_plan": {"id": "retrieval_plan_1"},
+            "candidate_sufficient": False,
+            "representative_pipelines": [],
+            "requirement_agent_decisions": [],
+        },
+        planner=planner,
+    )
+
+    assert result["requirement_agent_action"] == "resolve_capability_gaps"
+    assert "run_processing_agent" not in planner.requests[0].context["allowed_actions"]
+    assert "finish_planning" not in planner.requests[0].context["allowed_actions"]
+
+
+def test_requirement_root_routes_to_approval_after_compilation() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Compiled variants need user approval.",
+                tool_name="approve_pipeline",
+            )
+        ]
+    )
+
+    result = decide_requirement_agent_turn(
+        {
+            "task_spec": {"id": "spec_1"},
+            "task_spec_confirmed": True,
+            "retrieval_plan": {"id": "retrieval_plan_1"},
+            "candidate_sufficient": True,
+            "representative_pipelines": [{"id": "pipeline_1"}],
+            "selected_pipeline_id": "",
+            "requirement_agent_decisions": [],
+        },
+        planner=planner,
+    )
+
+    assert result["requirement_agent_action"] == "approve_pipeline"
+    assert "finish_planning" not in planner.requests[0].context["allowed_actions"]
 
 
 def test_retrieval_agent_maps_constraints_to_catalog_evidence_without_fake_capability() -> None:

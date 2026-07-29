@@ -1234,3 +1234,39 @@ roles = context + constraint + definition
 Constraint，没有生成伪 capability。模型同时显式保留了“感知去重阈值依赖已注册算子
 默认策略”的歧义。该结果只证明 Requirement Agent 已能生成可追踪 TaskSpec 并进入确认，
 不代表 Retrieval、三 Pipeline Trial、正式执行或 QC 已在本次验证中通过。
+
+## 17. 第三批 B：正式环境反馈进入 Agent 规划
+
+本批将泛化规划闭环扩展到正式执行之后。正式 Run 和 QC 的持久化结果由
+`RunOutcomeObserver` 转换为与业务词汇无关的结构化 Observation，再由主 Agent选择：
+
+```text
+complete_work_order
+retry_failed_assets
+rerun_pipeline
+reretrieve_candidates
+recompile_pipeline
+ask_user
+terminate
+```
+
+生产代码不包含“哪种错误必须重新检索/重新编排”的映射。Run status、QC status、
+是否存在失败资产、修复次数等只决定哪些动作合法；具体选择由模型根据 Observation、
+TaskSpec、当前候选和历史决策完成。
+
+重新检索和重新编排保持不同状态边界：
+
+- `reretrieve_candidates` 清空 Retrieval 及全部下游产物；
+- `recompile_pipeline` 保留当前 Retrieval 候选，只清空 Pipeline 及下游产物；
+- 两条路径分别回到检索 Agent 和数据处理 Agent。
+
+Worker 终态通知使用同一持久化 WorkOrder，不依赖 Web/TUI 轮询。无模型兼容模式只保存
+Observation 并显示 `resolve_run_outcome`，不会使用确定性规则冒充主 Agent决策。
+
+为保证后台回环可恢复，每个由当前 Agent Runtime 创建的正式 Run、Repair Run 和
+Rerun 都幂等写入 `run_outcome_notification_requested`。Worker 仅消费“已请求但未通知”
+的终态 Run：模型暂时不可用时可以稍后重试，升级前遗留且没有请求标记的历史终态 Run
+不会被误唤醒。该机制只负责可靠交接 Observation，不替模型选择修复动作。
+
+本批通过 `320` 项全量自动化回归；测试同时覆盖不同模态语义、活动 Run 反例、
+通知恢复、重复通知幂等以及历史 Run 隔离。

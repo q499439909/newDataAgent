@@ -7,12 +7,12 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
+from ..assets import scan_dataset_assets
 from ..domain.pipelines import PipelineVersion
 from ..domain.operators import AnnotationRef, AssetRef, EmbeddingRef, ExecutionScope, OperatorCategory
 from ..domain.runs import DatasetAsset, DatasetVersion
 from ..domain.specs import TaskSpecVersion
 from ..evaluation import QualityEvaluator
-from ..imaging import scan_images
 from ..infrastructure import DomainVersionStore, RunStore
 from ..operators import OperatorRuntime
 from ..operators.protocol import OperatorContext, OperatorInput
@@ -643,6 +643,15 @@ class DatasetRunExecutor:
         )
         if not spec.confirmed:
             raise ValueError("Dataset runs require a confirmed TaskSpecVersion")
+        ordered_nodes = _ordered_nodes(pipeline)
+        modalities = frozenset(
+            modality
+            for node in ordered_nodes
+            for modality in self.operator_runtime.get(
+                node.operator_version_id
+            ).spec.capability_tags
+            if modality in {"image", "text", "audio", "video"}
+        )
         roots = [
             Path(item.uri).expanduser().resolve()
             for item in spec.data_sources
@@ -656,7 +665,10 @@ class DatasetRunExecutor:
         if not planned:
             discovered: list[dict[str, Any]] = []
             for root_index, root in enumerate(roots, start=1):
-                for source in scan_images(root):
+                for source in scan_dataset_assets(
+                    root,
+                    modalities=modalities,
+                ):
                     prefix = Path(f"source_{root_index}") if len(roots) > 1 else Path()
                     discovered.append(
                         {
@@ -668,11 +680,14 @@ class DatasetRunExecutor:
                     )
             planned = self.run_store.initialize_plan(run["id"], discovered)
         if not planned:
-            raise ValueError("No supported images found in the approved data sources")
+            declared = ", ".join(sorted(modalities or {"image"}))
+            raise ValueError(
+                "No supported dataset assets found for modalities: "
+                + declared
+            )
         self._validate_repair_scope(run, planned)
         self.run_store.set_total(run["id"], len(planned))
         self.operator_runtime.validate_pipeline(pipeline)
-        ordered_nodes = _ordered_nodes(pipeline)
         encountered_asset_processing = False
         for node in ordered_nodes:
             operator_spec = self.operator_runtime.get(node.operator_version_id).spec
@@ -827,7 +842,9 @@ class DatasetRunExecutor:
             source = Path(planned_source["source_uri"])
             source_hash = _sha256(source)
             if source_hash != planned_source["source_sha256"]:
-                raise RuntimeError("Source image changed after the run plan was frozen")
+                raise RuntimeError(
+                    "Source asset changed after the run plan was frozen"
+                )
             if sequence < len(existing):
                 checkpoint = existing[sequence]
                 if checkpoint["source_uri"] != str(source) or checkpoint["source_sha256"] != source_hash:

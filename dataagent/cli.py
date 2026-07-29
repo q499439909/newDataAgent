@@ -211,7 +211,7 @@ def provider_report(
         table.add_column("Operator", overflow="fold")
         table.add_column("Status")
         table.add_column("Runtime")
-        table.add_column("Executable now")
+        table.add_column("Provider environment ready")
         table.add_column("Blocked reason", overflow="fold")
         for item in operators[:limit]:
             table.add_row(
@@ -225,6 +225,10 @@ def provider_report(
         console.print(
             f"Catalog digest: {report['catalog_digest']} · "
             f"showing {min(limit, len(operators))}/{len(operators)}"
+        )
+        console.print(
+            "Provider environment readiness does not by itself prove "
+            "DataAgent input, output, Pipeline, or QC compatibility."
         )
     except Exception as exc:
         fail(exc)

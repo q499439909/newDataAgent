@@ -130,6 +130,7 @@ export function mapAgentTurnToWorkOrder(
 ): WorkOrder {
   const state = turn.state || {};
   const specPayload = state.task_spec || {};
+  const interrupt = turn.interrupts?.[0]?.value;
   const objective = String(specPayload.objective || state.requirement || existing?.name || '新的数据生产任务');
   const pipelines = asArray(state.representative_pipelines || state.pipeline_variants).map(mapBackendPipeline);
   const taskSpec: TaskSpec | undefined = specPayload.id ? {
@@ -154,6 +155,7 @@ export function mapAgentTurnToWorkOrder(
       baselineValue: '-',
       targetValue: String(value),
     })),
+    clauseTraces: asArray(specPayload.clause_traces),
   } : existing?.currentTaskSpec;
 
   return {
@@ -179,7 +181,19 @@ export function mapAgentTurnToWorkOrder(
     agentTurn: turn,
     taskPlan: state.task_plan || existing?.taskPlan,
     mainAgentAction: state.main_agent_action || existing?.mainAgentAction,
-    waitingFor: turn.interrupts?.[0]?.value?.kind || null,
+    waitingFor: interrupt?.kind || null,
+    latestRunObservation: state.latest_run_observation || existing?.latestRunObservation || null,
+    observedRunIds: asArray(state.observed_run_ids || existing?.observedRunIds).map(String),
+    resolvedRunIds: asArray(state.resolved_run_ids || existing?.resolvedRunIds).map(String),
+    activeRunId: state.active_run_id || existing?.activeRunId || null,
+    agentObservations: asArray(state.agent_observations || existing?.agentObservations),
+    requirementClarification: interrupt?.kind === 'requirement_clarification'
+      ? {
+          questions: asArray(interrupt.questions).map(String),
+          summary: interrupt.summary ? String(interrupt.summary) : undefined,
+          allowedActions: asArray(interrupt.allowed_actions).map(String),
+        }
+      : existing?.requirementClarification || null,
   };
 }
 

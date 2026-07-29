@@ -336,6 +336,102 @@ def test_parallel_safe_assets_execute_concurrently_and_publish_dataset(
     assert [item["sequence"] for item in run_store.items("run_parallel")] == [0, 1]
 
 
+def test_dataset_run_discovers_text_assets_for_text_pipeline(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "first.txt").write_text("alpha beta", encoding="utf-8")
+    (source / "second.md").write_text("gamma delta", encoding="utf-8")
+    base_spec = build_operator_library(
+        include_datajuicer=False
+    ).registry.get("builtin.manifest:1")
+    operator = TrackingOperator(
+        operator_id="test.text_passthrough:1",
+        parallel_safe=True,
+    )
+    operator.spec = base_spec.model_copy(
+        update={
+            "id": "test.text_passthrough:1",
+            "family_id": "test.text_passthrough",
+            "display_name": "Text passthrough",
+            "capability_tags": frozenset({"cpu", "text"}),
+            "input_schema": "ProviderDatasetRecord",
+            "supported_runtime_profiles": (
+                RuntimeProfile(backend=RuntimeBackend.CPU),
+            ),
+        }
+    )
+    home = tmp_path / "runtime"
+    database = SqliteDatabase(home / "control.db")
+    run_store = RunStore(database)
+    version_store = DomainVersionStore(database)
+    task_spec = TaskSpecVersion(
+        id="spec_text_assets",
+        version=1,
+        created_by="user_1",
+        change_reason="text dataset execution test",
+        work_order_id="work_order_text_assets",
+        objective="Process text records.",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri=str(source)),
+        ),
+        confirmed=True,
+    )
+    pipeline = PipelineVersion(
+        id="pipeline_text_assets",
+        family_id="pipeline_text_assets",
+        version=1,
+        created_by="user_1",
+        change_reason="text dataset execution test",
+        strategy=PipelineStrategy.BALANCED,
+        task_spec_version_id=task_spec.id,
+        nodes=(
+            PipelineNode(
+                id="text_passthrough",
+                operator_version_id=operator.spec.id,
+                name="Text passthrough",
+                category=OperatorCategory.TRANSFORMATION,
+                runtime_backend=RuntimeBackend.CPU,
+            ),
+        ),
+        created_from="test",
+        approved=True,
+    )
+    version_store.save_if_absent(
+        kind="task_spec",
+        owner_id="user_1",
+        payload=task_spec.model_dump(mode="json"),
+    )
+    version_store.save_if_absent(
+        kind="pipeline",
+        owner_id="user_1",
+        payload=pipeline.model_dump(mode="json"),
+    )
+    run_store.create(
+        run_id="run_text_assets",
+        work_order_id=task_spec.work_order_id,
+        owner_id="user_1",
+        pipeline_version_id=pipeline.id,
+        task_spec_version_id=task_spec.id,
+        idempotency_key="text-assets",
+    )
+    assert run_store.claim_next()["id"] == "run_text_assets"
+    executor = DatasetRunExecutor(
+        home=home,
+        run_store=run_store,
+        version_store=version_store,
+        operator_runtime=OperatorRuntime((operator,)),
+        quality_evaluator=QualityEvaluator(version_store),
+    )
+
+    completed = executor.execute("run_text_assets")
+
+    assert completed["status"] == "SUCCEEDED"
+    assert completed["total"] == 2
+    assert sorted(operator.calls) == ["first.txt", "second.md"]
+
+
 def test_parallel_resume_uses_sequence_checkpoint_instead_of_list_position(
     tmp_path: Path,
 ) -> None:

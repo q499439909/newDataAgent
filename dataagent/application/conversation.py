@@ -683,6 +683,37 @@ class ConversationService:
                     or "还需要你继续补充需求信息。"
                 )
             return base
+        if decision.intent == ConversationIntent.RESOLVE_RUN_OUTCOME:
+            turn = self.agent_runtime.state(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+            if (
+                not turn["interrupts"]
+                or turn["interrupts"][0]["value"].get("kind")
+                != "run_outcome_resolution"
+            ):
+                base["reply"] = "当前没有等待处理的正式运行结果。"
+                base["turn"] = turn
+                return base
+            turn = self.agent_runtime.resume(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision={
+                    "action": decision.action,
+                    "channel": "conversation",
+                },
+            )
+            base["turn"] = turn
+            if turn["interrupts"]:
+                kind = turn["interrupts"][0]["value"].get("kind")
+                base["reply"] = (
+                    "已按你的选择继续处理，当前等待："
+                    + str(kind)
+                )
+            else:
+                base["reply"] = "已按你的选择继续处理正式运行结果。"
+            return base
         if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
             facts_context = control_context or context
             facets = set(decision.facets)

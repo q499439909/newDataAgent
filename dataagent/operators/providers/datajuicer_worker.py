@@ -10,40 +10,99 @@ from pathlib import Path
 from typing import Any, get_args, get_origin
 
 
+def _split_annotation_union(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(value):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth = max(0, depth - 1)
+        elif character in {"|", ","} and depth == 0:
+            parts.append(value[start:index])
+            start = index + 1
+    parts.append(value[start:])
+    return [item for item in parts if item]
+
+
+def _string_annotation_types(value: str) -> list[str]:
+    normalized = value.lower().replace("typing.", "").replace(" ", "")
+    if normalized.startswith("optional[") and normalized.endswith("]"):
+        inner = normalized[len("optional[") : -1]
+        return list(dict.fromkeys([*_string_annotation_types(inner), "null"]))
+    if normalized.startswith("union[") and normalized.endswith("]"):
+        normalized = normalized[len("union[") : -1]
+    union = _split_annotation_union(normalized)
+    if len(union) > 1:
+        return list(
+            dict.fromkeys(
+                item_type
+                for item in union
+                for item_type in _string_annotation_types(item)
+            )
+        )
+    if normalized in {"none", "nonetype", "null"}:
+        return ["null"]
+    if normalized.startswith(("dict", "mapping", "mutablemapping")):
+        return ["object"]
+    if normalized.startswith(("list", "tuple", "set", "sequence")):
+        return ["array"]
+    if normalized in {"bool", "boolean"}:
+        return ["boolean"]
+    if normalized in {"int", "integer"}:
+        return ["integer"]
+    if normalized in {"float", "number"}:
+        return ["number"]
+    if normalized.endswith("bool"):
+        return ["boolean"]
+    if normalized.endswith("int"):
+        return ["integer"]
+    if normalized.endswith(("float", "decimal")):
+        return ["number"]
+    return ["string"]
+
+
 def _json_type(annotation: Any, default: Any) -> str | list[str]:
     candidate = annotation if annotation is not inspect.Signature.empty else type(default)
     if isinstance(candidate, str):
-        return {
-            "bool": "boolean",
-            "int": "integer",
-            "float": "number",
-            "list": "array",
-            "tuple": "array",
-            "dict": "object",
-            "None": "null",
-            "NoneType": "null",
-        }.get(candidate, "string")
+        resolved = _string_annotation_types(candidate)
+        if default is None and "null" not in resolved:
+            resolved.append("null")
+        return resolved[0] if len(resolved) == 1 else resolved
     origin = get_origin(candidate)
     if origin is not None:
-        resolved = [_json_type(item, inspect.Signature.empty) for item in get_args(candidate)]
-        flattened = [
-            item
-            for value in resolved
-            for item in (value if isinstance(value, list) else [value])
-        ]
-        return list(dict.fromkeys(flattened))
+        if origin is dict:
+            resolved = ["object"]
+        elif origin in {list, tuple, set, frozenset}:
+            resolved = ["array"]
+        else:
+            nested = [
+                _json_type(item, inspect.Signature.empty)
+                for item in get_args(candidate)
+            ]
+            resolved = [
+                item
+                for value in nested
+                for item in (value if isinstance(value, list) else [value])
+            ]
+        if default is None and "null" not in resolved:
+            resolved.append("null")
+        return list(dict.fromkeys(resolved))
     if candidate is bool:
-        return "boolean"
+        return ["boolean", "null"] if default is None else "boolean"
     if candidate is int:
-        return "integer"
+        return ["integer", "null"] if default is None else "integer"
     if candidate is float:
-        return "number"
+        return ["number", "null"] if default is None else "number"
     if candidate in (list, tuple):
         return "array"
     if candidate is dict:
         return "object"
     if candidate is type(None):
         return "null"
+    if candidate is str and default is None:
+        return ["string", "null"]
     return "string"
 
 

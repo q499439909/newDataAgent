@@ -24,6 +24,16 @@ def initial_state() -> dict:
     }
 
 
+def test_requirement_agent_is_the_root_graph_agent() -> None:
+    graph = build_main_graph()
+
+    nodes = graph.get_graph().nodes
+
+    assert "requirement_agent" in nodes
+    assert "requirement_planning_agent" in nodes
+    assert "main_agent" not in nodes
+
+
 def test_four_agent_graph_interrupts_and_resumes() -> None:
     graph = build_main_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_1"}}
@@ -61,7 +71,9 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
     assert final["approved_pipeline"]["version"] == 2
     assert final["sampling_plan"]["random_seed"] == 42
     assert final["next_action"] == "submit_dataset_run"
-    assert [item["action"] for item in final["main_agent_decisions"]] == [
+    assert [
+        item["action"] for item in final["requirement_agent_decisions"]
+    ] == [
         "run_requirement_agent",
         "confirm_task_spec",
         "run_retrieval_agent",
@@ -70,11 +82,23 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
         "run_strategy_agent",
         "finish_planning",
     ]
-    assert final["task_plan"][-1] == {
+    assert final["main_agent_decisions"] == (
+        final["requirement_agent_decisions"]
+    )
+    assert next(
+        item
+        for item in final["task_plan"]
+        if item["id"] == "submit_dataset_run"
+    ) == {
         "id": "submit_dataset_run",
         "label": "Submit the approved dataset run",
         "status": "ready",
     }
+    assert [item["id"] for item in final["task_plan"][-3:]] == [
+        "execute_dataset",
+        "evaluate_quality",
+        "resolve_run_outcome",
+    ]
     assert final["trace"] == [
         "requirement:task_spec_generated",
         "requirement:task_spec_validated",

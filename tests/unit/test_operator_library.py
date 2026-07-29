@@ -248,6 +248,57 @@ class _MixedCatalogSearcher:
         ]
 
 
+class _TextCatalogSearcher:
+    def search(self):
+        return [
+            {
+                "name": "text_length_filter",
+                "desc": "Filters text records by length",
+                "type": "filter",
+                "tags": ["cpu", "text"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+
+class _AudioCatalogSearcher:
+    def search(self):
+        return [
+            {
+                "name": "audio_duration_filter",
+                "desc": "Filters audio records by duration",
+                "type": "filter",
+                "tags": ["cpu", "audio"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+
+class _VideoCatalogSearcher:
+    def search(self):
+        return [
+            {
+                "name": "video_resolution_filter",
+                "desc": "Filters video records by resolution",
+                "type": "filter",
+                "tags": ["cpu", "video"],
+                "parameter_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+
 class _PlanningCatalogSearcher:
     def search(self):
         return [
@@ -817,6 +868,38 @@ def test_datajuicer_discovery_maps_unparameterized_container_annotations() -> No
     assert properties["sampling_params"]["type"] == "array"
 
 
+def test_datajuicer_discovery_preserves_optional_and_union_container_types() -> None:
+    def sample(
+        output_path: str | None = None,
+        values: str | list[str] = (),
+        duration: float = None,
+    ):
+        return None
+
+    class TypedContainerSearcher:
+        def search(self):
+            return [
+                {
+                    "name": "typed_container_mapper",
+                    "desc": "Typed container schema test",
+                    "type": "mapper",
+                    "tags": ["cpu", "text"],
+                    "sig": inspect.signature(sample),
+                }
+            ]
+
+    descriptor = DataJuicerOperatorProvider(
+        searcher_factory=TypedContainerSearcher,
+        provider_version="test-version",
+    ).discover()[0]
+
+    properties = descriptor.parameter_schema["properties"]
+    assert properties["output_path"]["type"] == ["string", "null"]
+    assert properties["values"]["type"] == ["string", "array"]
+    assert properties["duration"]["type"] == ["number", "null"]
+    assert descriptor.parameter_schema["additionalProperties"] is False
+
+
 def test_datajuicer_discovery_cache_and_admission_registry_are_separate(tmp_path) -> None:
     _FakeSearcher.calls = 0
     cache_path = tmp_path / "catalog.json"
@@ -842,6 +925,34 @@ def test_datajuicer_discovery_cache_and_admission_registry_are_separate(tmp_path
         catalog_cache_path=cache_path,
     )
     assert cached_provider.discover() == discovered
+
+
+def test_datajuicer_discovery_refreshes_legacy_schema_cache(tmp_path) -> None:
+    cache_path = tmp_path / "catalog.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "provider_id": "datajuicer",
+                "provider_version": "test-version",
+                "operators": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _FakeSearcher.calls = 0
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=_FakeSearcher,
+        provider_version="test-version",
+        catalog_cache_path=cache_path,
+    )
+
+    assert provider.discover()[0].provider_operator_ref == (
+        "image_aesthetic_filter"
+    )
+    assert _FakeSearcher.calls == 1
+    assert json.loads(cache_path.read_text(encoding="utf-8"))[
+        "schema_version"
+    ] == 5
 
 
 def test_datajuicer_catalog_exposes_provider_operators_without_dataagent_admission() -> None:
@@ -871,7 +982,8 @@ def test_datajuicer_catalog_exposes_provider_operators_without_dataagent_admissi
     text_filter = by_ref["text_length_filter"]
     assert text_filter.spec.status == OperatorStatus.PROVIDER_AVAILABLE
     assert text_filter.spec.input_schema == "ProviderDatasetRecord"
-    assert not provider.validate("text_length_filter", {}, RuntimeBackend.CPU).ok
+    assert provider.validate("text_length_filter", {}, RuntimeBackend.CPU).ok
+    assert text_filter.supports_dataset_batch is True
 
 
 def test_task_requirement_matches_executable_and_blocked_datajuicer_candidates() -> None:
@@ -1113,6 +1225,189 @@ else:
     assert proxy_result.labels["datajuicer_output"]["fake_score"] == 0.8
 
 
+def test_cpu_text_operator_executes_through_provider_dataset_interface(
+    tmp_path,
+) -> None:
+    fake_process = tmp_path / "fake_text_dj_process.py"
+    fake_process.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+
+recipe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+dataset_path = Path(recipe["dataset"]["configs"][0]["path"])
+rows = [
+    json.loads(line)
+    for line in dataset_path.read_text(encoding="utf-8").splitlines()
+]
+assert rows[0]["text"] == "alpha beta"
+assert "images" not in rows[0]
+rows[0]["text_length"] = len(rows[0]["text"])
+Path(recipe["export_path"]).write_text(
+    json.dumps(rows[0]) + "\\n",
+    encoding="utf-8",
+)
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / "record.txt"
+    source.write_text("alpha beta", encoding="utf-8")
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=_TextCatalogSearcher,
+        executor=DataJuicerProcessExecutor(
+            (sys.executable, fake_process),
+            runtime_root=tmp_path / "provider-runtime",
+            timeout_seconds=10,
+        ),
+        provider_version="test-version",
+    )
+
+    validation = provider.validate(
+        "text_length_filter",
+        {},
+        RuntimeBackend.CPU,
+    )
+    result = provider.execute(
+        ProviderExecuteRequest(
+            provider_operator_ref="text_length_filter",
+            runtime_backend=RuntimeBackend.CPU,
+            context=OperatorContext(
+                run_id="run_text",
+                work_order_id="work_order_text",
+                owner_id="user_1",
+                purpose="development",
+            ),
+            input_data=OperatorInput(
+                source_path=str(source),
+                current_path=str(source),
+                record_fields={"text": "alpha beta"},
+            ),
+            parameters={},
+        )
+    )
+
+    assert validation.ok
+    assert result.ok
+    assert result.result is not None
+    assert result.result.decision == "continue"
+    assert result.result.labels["datajuicer_output"]["text_length"] == 10
+
+
+@pytest.mark.parametrize(
+    ("operator_ref", "media_field", "suffix", "searcher_factory"),
+    [
+        (
+            "audio_duration_filter",
+            "audios",
+            ".wav",
+            _AudioCatalogSearcher,
+        ),
+        (
+            "video_resolution_filter",
+            "videos",
+            ".mp4",
+            _VideoCatalogSearcher,
+        ),
+    ],
+)
+def test_cpu_media_operator_uses_declared_modality_record(
+    tmp_path,
+    operator_ref,
+    media_field,
+    suffix,
+    searcher_factory,
+) -> None:
+    fake_process = tmp_path / "fake_media_dj_process.py"
+    fake_process.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+
+expected_field = sys.argv[1]
+recipe = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+dataset_path = Path(recipe["dataset"]["configs"][0]["path"])
+row = json.loads(dataset_path.read_text(encoding="utf-8"))
+assert row[expected_field] == [sys.argv[2]]
+assert "images" not in row
+row["media_checked"] = True
+Path(recipe["export_path"]).write_text(
+    json.dumps(row) + "\\n",
+    encoding="utf-8",
+)
+""".strip(),
+        encoding="utf-8",
+    )
+    source = tmp_path / f"sample{suffix}"
+    source.write_bytes(b"provider-fixture")
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=searcher_factory,
+        executor=DataJuicerProcessExecutor(
+            (sys.executable, fake_process, media_field, str(source)),
+            runtime_root=tmp_path / "provider-runtime",
+            timeout_seconds=10,
+        ),
+        provider_version="test-version",
+    )
+
+    result = provider.execute(
+        ProviderExecuteRequest(
+            provider_operator_ref=operator_ref,
+            runtime_backend=RuntimeBackend.CPU,
+            context=OperatorContext(
+                run_id=f"run_{media_field}",
+                work_order_id="work_order_media",
+                owner_id="user_1",
+                purpose="development",
+            ),
+            input_data=OperatorInput(
+                source_path=str(source),
+                current_path=str(source),
+            ),
+            parameters={},
+        )
+    )
+
+    assert result.ok
+    assert result.result is not None
+    assert result.result.labels["datajuicer_output"]["media_checked"] is True
+
+
+def test_text_operator_rejects_binary_input_without_text_record(tmp_path) -> None:
+    source = tmp_path / "not-text.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe")
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=_TextCatalogSearcher,
+        executor=DataJuicerProcessExecutor(
+            (sys.executable, tmp_path / "must-not-run.py"),
+            runtime_root=tmp_path / "provider-runtime",
+            timeout_seconds=10,
+        ),
+        provider_version="test-version",
+    )
+
+    result = provider.execute(
+        ProviderExecuteRequest(
+            provider_operator_ref="text_length_filter",
+            runtime_backend=RuntimeBackend.CPU,
+            context=OperatorContext(
+                run_id="run_binary_text",
+                work_order_id="work_order_text",
+                owner_id="user_1",
+            ),
+            input_data=OperatorInput(
+                source_path=str(source),
+                current_path=str(source),
+            ),
+            parameters={},
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_type == "input_contract_mismatch"
+
+
 def test_datajuicer_executor_batches_multiple_images_in_one_process(tmp_path) -> None:
     fake_process = tmp_path / "fake_batch_dj_process.py"
     marker = tmp_path / "invocations.txt"
@@ -1283,3 +1578,48 @@ def test_production_pipeline_can_execute_provider_available_cpu_operator() -> No
     assert candidate.status == OperatorStatus.PROVIDER_AVAILABLE
     runtime.allow_datajuicer_candidate_execution = False
     runtime._validate_production_pipeline(pipeline)
+
+
+def test_production_pipeline_accepts_provider_available_cpu_text_operator() -> None:
+    base = build_operator_library(include_datajuicer=False)
+    provider = DataJuicerOperatorProvider(
+        searcher_factory=_MixedCatalogSearcher,
+        provider_version="1.5.3",
+    )
+    proxies = build_datajuicer_proxy_operators(provider, provider.discover())
+    operators = (*base.operators, *proxies)
+    base.providers.register(provider)
+    library = OperatorLibrary(
+        operators=operators,
+        registry=OperatorRegistry(item.spec for item in operators),
+        runtime=OperatorRuntime(operators),
+        providers=base.providers,
+    )
+    runtime = AgentRuntime(include_datajuicer=False)
+    runtime.operator_library = library
+    runtime.operator_registry = library.registry
+    runtime.builtin_operators = library.operators
+    node = PipelineNode(
+        id="text_length",
+        operator_version_id="datajuicer.text_length_filter:1",
+        name="Text Length",
+        category=OperatorCategory.FILTERING,
+        runtime_backend=RuntimeBackend.CPU,
+    )
+    pipeline = PipelineVersion(
+        id="pipeline_text_candidate",
+        family_id="pipeline_text_candidate",
+        version=1,
+        created_by="user_1",
+        change_reason="test",
+        strategy=PipelineStrategy.BALANCED,
+        task_spec_version_id="spec_text",
+        nodes=(node,),
+        created_from="test",
+        approved=True,
+    )
+
+    assert runtime.pipeline_execution_eligibility(pipeline) == {
+        "eligible": True,
+        "violations": [],
+    }

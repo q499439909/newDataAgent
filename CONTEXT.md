@@ -1,6 +1,9 @@
 # DataAgent Context
 
-DataAgent is an Agent control plane for image data production. This glossary fixes the domain language used when discussing dataset versions, runs, repairs, and delivery status.
+DataAgent is an Agent control plane for multimodal data production, including
+text, image, audio, video, and structured dataset records. This glossary fixes
+the domain language used when discussing dataset versions, runs, repairs, and
+delivery status.
 
 ## Language
 
@@ -55,6 +58,18 @@ _Avoid_: Present field, Operator output
 **Requirement Draft**:
 The Data Task Planning Agent's implementation-neutral interpretation of a user request. It contains the objective, atomic Constraint Contracts, ambiguities, assumptions, and acceptance intent, but never concrete Operators, models, parameters, or Pipeline order.
 _Avoid_: Pipeline proposal, Operator selection
+
+**Requirement Agent**:
+The root user-facing Agent that owns the requirement goal, reads WorkOrder facts, delegates specialist planning through LangGraph, and replans from Observations. Requirement planning is one internal phase of this Agent, not a separate Main Agent.
+_Avoid_: Requirement parser, Main Agent, Conversation intent router
+
+**Agent Action**:
+A structured Requirement Agent decision to respond, delegate through LangGraph, call a Control Tool, ask the user, or finish.
+_Avoid_: Conversation keyword, free-form route name
+
+**WorkOrder Liveness**:
+The structural classification of a WorkOrder as runnable, waiting for an explicit user decision, or terminal. A runnable WorkOrder must have a required next action.
+_Avoid_: Continue keyword, chat intent
 
 **Constraint Contract**:
 An atomic, source-traceable statement of one observable target, comparator, value, unit, hardness, and required Evidence type. Constraint identifiers and targets are task-generated and must not be tied to one regression dataset.

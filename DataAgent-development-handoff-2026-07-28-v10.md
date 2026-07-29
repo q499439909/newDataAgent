@@ -1480,3 +1480,80 @@ Approved Pipeline
 
 仍然遵守 `AGENTS.md`：失败由 Observation 暴露，修复决定属于模型；Tool 不读取任务关键词
 决定方案，不在 Validator 中写补丁，不用固定 yifu Pipeline 伪造成功。
+
+## 13. 第三批 B：正式执行结果回到主 Agent（2026-07-28）
+
+第三批 B 已连接原本断开的正式执行链：
+
+```text
+Approved Pipeline
+  -> Dataset Run
+  -> Worker execution
+  -> QCReport
+  -> RunOutcomeObservation
+  -> Main Agent decision
+  -> complete / repair / rerun / reretrieve / recompile / HITL
+```
+
+关键边界：
+
+- `RunOutcomeObserver` 只投影 Run、DatasetVersion、QCReport 和失败资产事实；
+- Main Agent 模型保留修复选择权；
+- 检索 Agent 仍负责候选，数据处理 Agent 仍负责 Pipeline；
+- Worker 在后台主动通知，不依赖前端刷新；
+- 无模型模式只记录 Observation，不伪装成模型决策；
+- 相同 Run 通知幂等，模型暂时失败后仍能恢复消费；
+- 非终态 Run、QC 未通过、无失败资产重试等均由确定性门禁保护。
+
+前端需要识别：
+
+```text
+state.latest_run_observation
+state.observed_run_ids
+state.resolved_run_ids
+state.active_run_id
+interrupt.kind = run_outcome_resolution
+Conversation intent = RESOLVE_RUN_OUTCOME
+task_plan: execute_dataset / evaluate_quality / resolve_run_outcome
+Run events: run_outcome_notification_requested /
+            run_outcome_notified /
+            run_outcome_notification_failed
+```
+
+本批没有修复具体人脸或黑衣模型质量，也没有接入同事负责的数据库检索。完整 yifu
+端到端和人工 Golden Set 验收仍需单独执行，不能用自动化控制流通过代替结果正确性。
+
+后台交接采用持久化请求标记：Worker 只重试带
+`run_outcome_notification_requested` 且尚未成功通知的终态 Run。这样 Agent 模型
+临时失败后仍可恢复，同时不会在升级后把历史终态 Run 全部重新唤醒。相同 Run 的
+请求标记幂等，Repair Run 在修复计划完整落盘后才登记通知。
+
+本批最终验证：
+
+- 主流程整组 `48` 项通过；
+- 全量自动化 `320` 项通过；
+- Python 编译与差异格式检查通过；
+- 仅有既存 Starlette `httpx` 弃用警告。
+
+## 14. 非 GPU 多模态 Provider Runtime（2026-07-28）
+
+原实现只允许 Data-Juicer 图像算子进入 Provider 执行。现已改为由 Catalog 模态标签
+驱动通用记录序列化，支持 text、image、audio、video 和显式 structured
+`record_fields`。正式 Run 也按 Pipeline 模态扫描数据源，不再固定扫描图片。
+
+真实 Catalog 验证结果：
+
+- 本地 CPU 候选 `146`；
+- 统一参数与运行门禁通过 `146`；
+- CPU 图像真实烟测 `11/11`；
+- CPU 文本 `text_length_filter` 真实烟测通过；
+- 音频/视频契约测试通过，但因本机没有真实样本，不能标记为真实 FFmpeg 验收。
+
+需要牢记：
+
+- Provider 环境可用不等于 DataAgent 端到端已验收；
+- 不得为了批测而执行 S3 上传、下载或付费远程 API；
+- 后续按 Operator Contract Family 准备真实 Fixture，而不是为 146 个名字写分支；
+- Catalog Schema 变化必须提升缓存版本，否则生产仍会读取旧参数类型。
+
+本批完成后全量自动化回归为 `328` 项通过；Python 编译与差异格式检查通过。

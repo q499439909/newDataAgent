@@ -253,7 +253,6 @@ class ProviderProxyOperator:
             or (
                 provider_operator_type == "filter"
                 and "cpu" in self.spec.capability_tags
-                and "image" in self.spec.capability_tags
             )
         )
 

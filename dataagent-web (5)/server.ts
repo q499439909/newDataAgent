@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { Readable } from 'stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -148,8 +149,21 @@ Format in Markdown.`;
       const contentType = response.headers.get('content-type');
       if (contentType) res.setHeader('content-type', contentType);
 
-      const payload = Buffer.from(await response.arrayBuffer());
-      res.send(payload);
+      if (!response.body) {
+        res.end();
+        return;
+      }
+
+      Readable.fromWeb(response.body as any).on('error', (streamError) => {
+        console.error('DataAgent backend stream failed:', streamError);
+        if (!res.headersSent) {
+          res.status(502).json({
+            detail: `DataAgent backend stream failed: ${streamError instanceof Error ? streamError.message : String(streamError)}`,
+          });
+        } else {
+          res.destroy(streamError instanceof Error ? streamError : undefined);
+        }
+      }).pipe(res);
     } catch (err: any) {
       res.status(502).json({
         detail: `DataAgent backend proxy failed: ${err.message}`,

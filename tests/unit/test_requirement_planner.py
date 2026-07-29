@@ -58,7 +58,7 @@ class RequirementLoopPlanner:
 class ClarificationWorkOrderPlanner:
     def __init__(self) -> None:
         self.steps = {
-            "main": iter(
+            "requirement": iter(
                 (
                     AgentDecision(
                         action="finish",
@@ -72,7 +72,7 @@ class ClarificationWorkOrderPlanner:
                     ),
                 )
             ),
-            "requirement": iter(
+            "requirement_planning": iter(
                 (
                     AgentDecision(
                         action="ask_user",

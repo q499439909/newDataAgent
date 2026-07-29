@@ -12,6 +12,7 @@ class OperatorInput(BaseModel):
 
     source_path: str
     current_path: str
+    record_fields: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     labels: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[AssetRef] = Field(default_factory=list)
