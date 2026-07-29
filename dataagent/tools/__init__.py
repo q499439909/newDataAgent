@@ -2,9 +2,8 @@ from .artifacts import (
     compile_pipeline_artifact_spec,
     validate_pipeline_artifact_spec,
 )
-from .control import propose_control_action_spec
 from .inspection import query_control_facts_spec
-from .executor import ControlToolExecutor, GovernedToolLoop
+from .executor import ControlToolExecutor
 from .observations import ToolEvidence, ToolResult, ToolStatus
 from .planning import retrieve_operators_spec
 from .registry import FORBIDDEN_TOOL_NAMES, ToolRegistry
@@ -24,7 +23,6 @@ def build_p0_tool_registry() -> ToolRegistry:
             compile_pipeline_artifact_spec(),
             validate_pipeline_artifact_spec(),
             query_control_facts_spec(),
-            propose_control_action_spec(),
         )
     )
 
@@ -32,7 +30,6 @@ def build_p0_tool_registry() -> ToolRegistry:
 __all__ = [
     "FORBIDDEN_TOOL_NAMES",
     "ControlToolExecutor",
-    "GovernedToolLoop",
     "ToolConfirmation",
     "ToolContext",
     "ToolEffect",

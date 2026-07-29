@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from apps.api.main import create_app
-from dataagent.agents.runtime import AgentDecision
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.agents.runner import AgentDecision
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.application.dataset_versions import (
     build_logical_dataset_version,
     merge_repaired_dataset_version,
@@ -155,7 +155,7 @@ def test_worker_publishes_immutable_dataset_and_preserves_sources(tmp_path) -> N
     source_hashes = {path.name: _sha256(path) for path in (first, duplicate)}
 
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     final = _ready_work_order(client, source)
     approved = final["state"]["approved_pipeline"]
@@ -265,7 +265,7 @@ def test_queued_run_can_pause_resume_cancel_and_is_owner_isolated(tmp_path) -> N
     source.mkdir()
     Image.new("RGB", (640, 480), (120, 130, 140)).save(source / "sample.png")
     home = tmp_path / "runtime"
-    client = TestClient(create_app(AgentRuntime(home)))
+    client = TestClient(create_app(WorkOrderRuntime(home)))
     _ready_work_order(client, source, work_order_id="controlled_work_order")
     headers = {"X-Owner-ID": "user_1", "Idempotency-Key": "controlled-run"}
     run = client.post(
@@ -302,7 +302,7 @@ def test_worker_marks_run_failed_when_dataset_qc_fails(tmp_path) -> None:
     source.mkdir()
     Image.new("RGB", (640, 480), (120, 130, 140)).save(source / "sample.png")
     home = tmp_path / "runtime"
-    client = TestClient(create_app(AgentRuntime(home)))
+    client = TestClient(create_app(WorkOrderRuntime(home)))
     _ready_work_order(client, source, work_order_id="qc_failed_work_order")
     submitted = client.post(
         "/api/work-orders/qc_failed_work_order/runs",
@@ -338,7 +338,7 @@ def test_terminal_run_outcome_becomes_an_idempotent_agent_observation(
         source / "sample.png"
     )
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(
         client,
@@ -391,7 +391,7 @@ def test_worker_notifies_agent_runtime_after_terminal_run(tmp_path) -> None:
         source / "sample.png"
     )
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(
         client,
@@ -405,7 +405,7 @@ def test_worker_notifies_agent_runtime_after_terminal_run(tmp_path) -> None:
             "Idempotency-Key": "background-observation-run",
         },
     ).json()
-    outcome_runtime = AgentRuntime(home)
+    outcome_runtime = WorkOrderRuntime(home)
     worker = LocalRunWorker(
         home,
         run_outcome_handler=lambda run: outcome_runtime.observe_run_outcome(
@@ -441,7 +441,7 @@ def test_active_run_cannot_be_reported_as_a_terminal_observation(
         source / "sample.png"
     )
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(
         client,
@@ -479,7 +479,7 @@ def test_recorded_outcome_can_be_resumed_when_agent_decision_recovers(
         source / "sample.png"
     )
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(
         client,
@@ -510,7 +510,7 @@ def test_recorded_outcome_can_be_resumed_when_agent_decision_recovers(
                 tool_name="ask_user",
             )
 
-    recovered_runtime = AgentRuntime(home, agent_planner=AskUserPlanner())
+    recovered_runtime = WorkOrderRuntime(home, agent_planner=AskUserPlanner())
     recovered = recovered_runtime.observe_run_outcome(
         work_order_id="recoverable_observation_work_order",
         run_id=submitted["id"],
@@ -531,7 +531,7 @@ def test_worker_retries_a_failed_outcome_notification_from_durable_state(
         source / "sample.png"
     )
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(
         client,
@@ -582,7 +582,7 @@ def test_worker_does_not_awaken_historical_terminal_run_without_request(
     tmp_path,
 ) -> None:
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     assert runtime.run_store is not None
     historical = runtime.run_store.create(
         run_id="historical_run",
@@ -614,7 +614,7 @@ def test_worker_resumes_from_asset_checkpoint_without_reprocessing(tmp_path) -> 
     Image.new("RGB", (640, 480), (120, 130, 140)).save(first)
     second.write_bytes(first.read_bytes())
     home = tmp_path / "runtime"
-    client = TestClient(create_app(AgentRuntime(home)))
+    client = TestClient(create_app(WorkOrderRuntime(home)))
     _ready_work_order(client, source, work_order_id="resumable_work_order")
     run = client.post(
         "/api/work-orders/resumable_work_order/runs",
@@ -687,7 +687,7 @@ def test_retry_failed_assets_creates_a_new_run_with_only_failed_sources(tmp_path
     Image.new("RGB", (64, 64), "white").save(first)
     Image.new("RGB", (64, 64), "black").save(second)
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     client = TestClient(create_app(runtime))
     _ready_work_order(client, source, work_order_id="retry_work_order")
     previous = client.post(
@@ -766,7 +766,7 @@ def test_repair_attempt_increments_and_scope_never_includes_parent_success(
     failed = source / "failed.png"
     Image.new("RGB", (64, 64), "white").save(kept)
     Image.new("RGB", (64, 64), "black").save(failed)
-    runtime = AgentRuntime(tmp_path / "runtime")
+    runtime = WorkOrderRuntime(tmp_path / "runtime")
     assert runtime.run_store is not None
     original = runtime.run_store.create(
         run_id="run_original",
@@ -877,7 +877,7 @@ def test_executor_persists_repaired_dataset_before_quality_evaluation(
     tmp_path,
 ) -> None:
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     assert runtime.version_store is not None
     assert runtime.run_store is not None
     source_root = tmp_path / "source"
@@ -994,7 +994,7 @@ def test_confirmed_exclusion_promotes_abandoned_dataset_and_allows_export(
     tmp_path,
 ) -> None:
     home = tmp_path / "runtime"
-    runtime = AgentRuntime(home)
+    runtime = WorkOrderRuntime(home)
     assert runtime.version_store is not None
     assert runtime.run_store is not None
     source_root = tmp_path / "source"

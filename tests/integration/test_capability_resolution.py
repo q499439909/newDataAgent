@@ -8,7 +8,7 @@ from dataagent.domain.operators import (
     OperatorCategory,
     RuntimeBackend,
 )
-from dataagent.graph import build_main_graph
+from dataagent.graph import build_work_order_graph
 from dataagent.agents.requirement.clarification import recommended_clarification_patch
 from dataagent.operators import (
     OperatorLibrary,
@@ -69,7 +69,7 @@ def _state(requirement: str) -> dict:
 
 
 def test_resolution_retry_enables_remote_and_reenters_retrieval() -> None:
-    graph = build_main_graph(
+    graph = build_work_order_graph(
         InMemorySaver(),
         operator_library=_library_with_vlm_variants(),
         allow_draft_datajuicer_candidates=True,
@@ -131,7 +131,7 @@ def test_resolution_retry_enables_remote_and_reenters_retrieval() -> None:
 
 
 def test_resolution_can_return_work_order_to_task_spec_revision() -> None:
-    graph = build_main_graph(
+    graph = build_work_order_graph(
         InMemorySaver(),
         operator_library=_library_with_vlm_variants(),
         allow_draft_datajuicer_candidates=True,

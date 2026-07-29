@@ -17,13 +17,17 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..agents.requirement import RequirementPlanner, build_task_plan
-from ..agents.runtime import AgentPlanner
+from ..agents.runner import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
 from ..execution.pipeline_trial import PipelineTrialRunner
 from ..experiences import PipelineExperienceRetriever, PipelineExperienceService
-from ..graph import build_main_graph
+from ..graph import build_work_order_graph
 from ..graph.interrupts import revise_task_spec_version
+from ..graph.state_migrations import (
+    CURRENT_AGENT_STATE_VERSION,
+    migrate_work_order_state,
+)
 from ..infrastructure import (
     AgentThreadStore,
     ConversationStore,
@@ -51,8 +55,8 @@ class AgentThread:
     owner_id: str
 
 
-class AgentRuntime:
-    """Application service exposing one shared graph to Web and TUI clients."""
+class WorkOrderRuntime:
+    """Application service for durable WorkOrder planning and execution state."""
 
     def __init__(
         self,
@@ -131,7 +135,7 @@ class AgentRuntime:
             if enable_pipeline_trials and agent_planner is not None
             else None
         )
-        self.graph = build_main_graph(
+        self.graph = build_work_order_graph(
             self.checkpointer,
             operator_library=self.operator_library,
             allow_draft_datajuicer_candidates=(
@@ -179,6 +183,7 @@ class AgentRuntime:
         )
         self._remember(record)
         state = {
+            "agent_state_version": CURRENT_AGENT_STATE_VERSION,
             "work_order_id": work_order_id,
             "owner_id": owner_id,
             "requirement": requirement,
@@ -240,7 +245,7 @@ class AgentRuntime:
     def state(self, *, work_order_id: str, owner_id: str) -> dict[str, Any]:
         record = self._get_authorized(work_order_id, owner_id)
         snapshot = self.graph.get_state(self._config(record))
-        result = dict(snapshot.values)
+        result = migrate_work_order_state(snapshot.values)
         if snapshot.interrupts:
             result["__interrupt__"] = snapshot.interrupts
         return self._public_result(record, result)
@@ -255,11 +260,11 @@ class AgentRuntime:
         record = self._get_authorized(work_order_id, owner_id)
         snapshot = self.graph.get_state(self._config(record))
         if snapshot.interrupts:
-            result = dict(snapshot.values)
+            result = migrate_work_order_state(snapshot.values)
             result["__interrupt__"] = snapshot.interrupts
             return self._public_result(record, result)
         continued = self.graph.invoke(None, self._config(record))
-        result = dict(continued or snapshot.values)
+        result = migrate_work_order_state(continued or snapshot.values)
         self._capture_versions(record, result)
         return self._public_result(record, result)
 

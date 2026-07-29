@@ -12,7 +12,7 @@ from PIL import Image
 from dataagent.agents.processing.nodes import generate_pipeline_variants
 from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.common import new_id
 from dataagent.domain.operators import (
     ExecutionScope,
@@ -1545,12 +1545,12 @@ def test_production_pipeline_cannot_use_mock_operator() -> None:
     )
 
     with pytest.raises(ValueError, match="not eligible for production"):
-        AgentRuntime()._validate_production_pipeline(pipeline)
+        WorkOrderRuntime()._validate_production_pipeline(pipeline)
 
 
 def test_production_pipeline_can_execute_provider_available_cpu_operator() -> None:
     library = _planning_library()
-    runtime = AgentRuntime(include_datajuicer=False)
+    runtime = WorkOrderRuntime(include_datajuicer=False)
     runtime.operator_library = library
     runtime.operator_registry = library.registry
     runtime.builtin_operators = library.operators
@@ -1595,7 +1595,7 @@ def test_production_pipeline_accepts_provider_available_cpu_text_operator() -> N
         runtime=OperatorRuntime(operators),
         providers=base.providers,
     )
-    runtime = AgentRuntime(include_datajuicer=False)
+    runtime = WorkOrderRuntime(include_datajuicer=False)
     runtime.operator_library = library
     runtime.operator_registry = library.registry
     runtime.builtin_operators = library.operators

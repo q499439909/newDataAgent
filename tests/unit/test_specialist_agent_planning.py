@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from PIL import Image
 
-from dataagent.agents.runtime import (
+from dataagent.agents.runner import (
     AgentDecision,
-    AgentDecisionLoop,
+    AgentRunner,
     AgentPlanningRequest,
     AgentTool,
 )
@@ -45,7 +45,7 @@ def test_agent_uses_tool_observation_before_finishing() -> None:
             ),
         ]
     )
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="retrieval",
         planner=planner,
         tools=(
@@ -103,7 +103,7 @@ def test_agent_observes_an_unavailable_tool_and_can_choose_an_allowed_tool() -> 
             ),
         ]
     )
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="requirement",
         planner=planner,
         tools=(
@@ -145,7 +145,7 @@ def test_agent_tool_can_compact_large_inputs_in_model_observations() -> None:
             ),
         ]
     )
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="requirement",
         planner=planner,
         tools=(

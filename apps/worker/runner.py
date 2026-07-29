@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from dataagent.agents.runtime import GatewayAgentPlanner
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.agents.runner import GatewayAgentPlanner
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.application.run_worker import LocalRunWorker
 from dataagent.config import Settings
 from dataagent.gateway import ModelGateway
@@ -19,7 +19,7 @@ def main() -> None:
     gateway = ModelGateway(settings)
     vlm_gateway = gateway.call_vision_model_json if settings.api_key else None
     platform_home = settings.home / "platform"
-    outcome_runtime = AgentRuntime(
+    outcome_runtime = WorkOrderRuntime(
         platform_home,
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=settings.allow_model_download,

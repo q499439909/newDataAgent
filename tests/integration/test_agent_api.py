@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from apps.api.main import create_app
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.operators.protocol import OperatorResult
 from dataagent.operators.providers import (
     DataJuicerOperatorProvider,
@@ -31,7 +31,7 @@ class _FeedbackRuntime:
 
 
 def test_web_and_tui_can_share_and_resume_one_agent_thread() -> None:
-    client = TestClient(create_app(AgentRuntime()))
+    client = TestClient(create_app(WorkOrderRuntime()))
     headers = {"X-Owner-ID": "user_1"}
     start = client.post(
         "/api/work-orders/agent/start",
@@ -126,7 +126,7 @@ def test_run_feedback_api_validates_rating() -> None:
 
 
 def test_agent_thread_is_owner_isolated() -> None:
-    client = TestClient(create_app(AgentRuntime()))
+    client = TestClient(create_app(WorkOrderRuntime()))
     client.post(
         "/api/work-orders/agent/start",
         headers={"X-Owner-ID": "owner_a"},
@@ -152,7 +152,7 @@ def test_operator_catalog_and_persistent_preview_api(tmp_path) -> None:
     image_path = source / "sample.png"
     Image.new("RGB", (640, 480), (120, 130, 140)).save(image_path)
 
-    client = TestClient(create_app(AgentRuntime(tmp_path / "runtime")))
+    client = TestClient(create_app(WorkOrderRuntime(tmp_path / "runtime")))
     headers = {"X-Owner-ID": "user_1"}
     categories = client.get("/api/operator-categories", headers=headers)
     assert categories.status_code == 200
@@ -236,7 +236,7 @@ def test_provider_execution_api_is_scoped_to_work_order_sources(tmp_path) -> Non
         ),
         provider_version="test",
     )
-    runtime = AgentRuntime(tmp_path / "runtime", include_datajuicer=False)
+    runtime = WorkOrderRuntime(tmp_path / "runtime", include_datajuicer=False)
     runtime.operator_library.providers.register(provider)
     client = TestClient(create_app(runtime))
     headers = {"X-Owner-ID": "user_1"}

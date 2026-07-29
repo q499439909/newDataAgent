@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from dataagent.acceptance import run_remote_vlm_smoke, write_provider_smoke_record
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.config import Settings
 from dataagent.prompts import builtin_prompt_registry
 
@@ -21,7 +21,7 @@ def main() -> int:
     settings = Settings.load(cwd=args.repo)
     if not settings.api_key:
         raise SystemExit("BAILIAN_API_KEY or DASHSCOPE_API_KEY is required")
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         settings.home / "acceptance-provider-smoke",
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=False,

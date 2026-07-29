@@ -3,7 +3,7 @@ from functools import partial
 from langgraph.graph import END, START, StateGraph
 
 from ..shared import WorkOrderGraphState
-from ..runtime import AgentPlanner
+from ..runner import AgentPlanner
 from .nodes import clarify_requirement, generate_task_spec, validate_task_spec
 from .planner import RequirementPlanner
 

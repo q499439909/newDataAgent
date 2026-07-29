@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..runtime import AgentPlanner, AgentPlanningRequest
+from ..runner import AgentPlanner, AgentPlanningRequest
 from ..shared import WorkOrderGraphState
+from ..shared.state import CURRENT_AGENT_STATE_VERSION
 from ..turn import AgentAction
 from .guards import (
     allowed_requirement_actions,
@@ -163,10 +164,7 @@ def decide_requirement_agent_turn(
         model_decision = None
         action = ""
         for _attempt in range(3):
-            prior_decisions = state.get(
-                "requirement_agent_decisions",
-                state.get("main_agent_decisions", ()),
-            )
+            prior_decisions = state.get("requirement_agent_decisions", ())
             model_decision = planner.decide(
                 AgentPlanningRequest(
                     agent_name="requirement",
@@ -246,12 +244,7 @@ def decide_requirement_agent_turn(
         assert model_decision is not None
         reason = model_decision.reason_summary
         source = "model"
-    prior_decisions = list(
-        state.get(
-            "requirement_agent_decisions",
-            state.get("main_agent_decisions", ()),
-        )
-    )
+    prior_decisions = list(state.get("requirement_agent_decisions", ()))
     decision = {
         "sequence": len(prior_decisions) + 1,
         "action": action,
@@ -261,14 +254,11 @@ def decide_requirement_agent_turn(
     decisions = [*prior_decisions, decision]
     agent_action = _to_agent_action(action, reason)
     return {
+        "agent_state_version": CURRENT_AGENT_STATE_VERSION,
         "current_agent": "requirement",
         "requirement_agent_action": action,
         "requirement_agent_decisions": decisions,
         "agent_action": agent_action.model_dump(mode="json"),
-        # Checkpoint compatibility only. No Main Agent implementation consumes
-        # these fields after the Requirement Agent promotion.
-        "main_agent_action": action,
-        "main_agent_decisions": decisions,
         "task_plan": build_task_plan(state),
     }
 

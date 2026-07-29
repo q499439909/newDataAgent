@@ -1,7 +1,7 @@
 import pytest
 
 from dataagent.agents.processing.nodes import select_representative_pipelines
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.operators import OperatorCategory
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 
@@ -42,7 +42,7 @@ def test_pipeline_missing_required_constraint_coverage_is_not_production_eligibl
         ),
     )
 
-    eligibility = AgentRuntime(include_datajuicer=False).pipeline_execution_eligibility(
+    eligibility = WorkOrderRuntime(include_datajuicer=False).pipeline_execution_eligibility(
         pipeline
     )
 

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataagent.application.conversation_actions import ConversationIntent
 from dataagent.domain.operators import OperatorStatus
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 from dataagent.operators import OperatorRegistry, build_operator_library
 from dataagent.tools import (
     ControlToolExecutor,
-    GovernedToolLoop,
     ToolContext,
     ToolRegistry,
     ToolResult,
@@ -70,8 +68,8 @@ def test_tool_input_validation_returns_complete_observation() -> None:
     )
 
 
-def test_governed_tool_loop_redacts_secrets_and_records_evidence() -> None:
-    loop = GovernedToolLoop(build_p0_tool_registry())
+def test_control_tool_executor_records_evidence() -> None:
+    loop = ControlToolExecutor(build_p0_tool_registry())
     result, trace = loop.execute(
         name="query_control_facts",
         stage="inspect_control_facts",
@@ -88,61 +86,6 @@ def test_governed_tool_loop_redacts_secrets_and_records_evidence() -> None:
     assert trace["duration_ms"] >= 0
     assert "thought" not in trace
 
-    _, invalid_trace = loop.execute(
-        name="propose_control_action",
-        stage="validate_control_action",
-        context=_context(control_context={"api_key": "do-not-store"}),
-        raw_input={
-            "action": {
-                "intent": "CHAT",
-                "reply": "",
-                "api_key": "do-not-store",
-            }
-        },
-    )
-    assert "api_key" not in invalid_trace["parameters"]["action"]
-    assert "do-not-store" not in str(invalid_trace)
-
-
-def test_control_action_trace_summarizes_task_patch_instead_of_dumping_it() -> None:
-    loop = GovernedToolLoop(build_p0_tool_registry())
-    _, trace = loop.execute(
-        name="propose_control_action",
-        stage="validate_control_action",
-        context=_context(
-            control_context={
-                "allowed_actions": ["START_WORK_ORDER"],
-            }
-        ),
-        raw_input={
-            "action": {
-                "intent": "START_WORK_ORDER",
-                "source": "D:/images",
-                "requirement": "Filter and classify images",
-                "task_spec_patch": {
-                    "classification": {
-                        "labels": [
-                            {"id": "cat", "display_name": "Cat"},
-                            {"id": "dog", "display_name": "Dog"},
-                        ],
-                        "mixed_label": "mixed",
-                        "unknown_label": "unknown",
-                    },
-                    "semantic_requirements": [
-                        "a detailed private requirement",
-                        "another private requirement",
-                    ],
-                    "hard_constraints": {"preserve_source": True},
-                },
-            }
-        },
-    )
-
-    patch = trace["parameters"]["action"]["task_spec_patch"]
-    assert patch["classification"]["label_ids"] == ["cat", "dog"]
-    assert patch["semantic_requirement_count"] == 2
-    assert patch["hard_constraint_fields"] == ["preserve_source"]
-    assert "a detailed private requirement" not in str(trace)
 
 
 def test_tool_registry_rejects_duplicates_and_forbidden_tools() -> None:
@@ -214,37 +157,6 @@ def test_query_control_facts_returns_only_grounded_requested_facets() -> None:
         "dataset": {"id": "dataset_1", "still_failed": 2},
     }
     assert {item.id for item in result.evidence} == {"run_1", "dataset_1"}
-
-
-def test_propose_control_action_returns_policy_violation_without_execution() -> None:
-    registry = build_p0_tool_registry()
-    context = _context(
-        control_context={
-            "work_order_id": "work_1",
-            "agent_state": {
-                "waiting": "pipeline_approval",
-                "next_action": "approve_pipeline",
-            },
-            "task_spec": {"confirmed": True},
-        }
-    )
-
-    result = registry.execute(
-        "propose_control_action",
-        context,
-        {
-            "action": {
-                "intent": ConversationIntent.SUBMIT_RUN.value,
-                "reply": "",
-            }
-        },
-    )
-
-    assert result.ok is False
-    assert result.status == "policy_violation"
-    assert result.error_type == "ACTION_NOT_ALLOWED_IN_CURRENT_STATE"
-    assert result.data["executed"] is False
-    assert "SELECT_PIPELINE" in result.next_actions
 
 
 def test_pipeline_artifact_tools_compile_and_validate_released_pipeline() -> None:
@@ -367,7 +279,3 @@ def test_pipeline_artifact_validation_accepts_provider_available_operator() -> N
     assert result.data["production_eligible"] is True
     assert result.data["operators"][0]["status"] == "PROVIDER_AVAILABLE"
     assert result.data["blockers"] == []
-
-
-def test_governed_tool_loop_is_a_compatibility_alias() -> None:
-    assert GovernedToolLoop is ControlToolExecutor

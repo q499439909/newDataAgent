@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.application.agent_sessions import (
     ConversationStoreAgentSessionRepository,
 )
@@ -19,7 +19,7 @@ from dataagent.application.agent_turns import WorkOrderRuntimeRootAgent
 from dataagent.application.control_tools import WorkOrderControlTools
 from dataagent.agents.loop import AgentLoop
 from dataagent.agents.requirement import GatewayRequirementPlanner
-from dataagent.agents.runtime import GatewayAgentPlanner
+from dataagent.agents.runner import GatewayAgentPlanner
 from dataagent.local_stack import health_payload
 from dataagent.application.conversation import ConversationService
 from dataagent.config import Settings
@@ -108,7 +108,7 @@ def require_owner(x_owner_id: Annotated[str, Header(min_length=1)]) -> str:
 
 
 def create_app(
-    runtime: AgentRuntime | None = None,
+    runtime: WorkOrderRuntime | None = None,
     conversation_service: ConversationService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DataAgent Control Plane", version="0.3.0")
@@ -126,7 +126,7 @@ def create_app(
     settings = Settings.load()
     gateway = ModelGateway(settings)
     vlm_gateway = gateway.call_vision_model_json if settings.api_key else None
-    app.state.agent_runtime = runtime or AgentRuntime(
+    app.state.work_order_runtime = runtime or WorkOrderRuntime(
         settings.home / "platform",
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=settings.allow_model_download,
@@ -150,33 +150,32 @@ def create_app(
         enable_pipeline_trials=gateway.configured,
     )
     work_order_control_tools = WorkOrderControlTools(
-        app.state.agent_runtime
+        app.state.work_order_runtime
     )
     app.state.work_order_control_tools = work_order_control_tools
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
-    elif app.state.agent_runtime.conversation_store is not None:
+    elif app.state.work_order_runtime.conversation_store is not None:
         agent_loop = AgentLoop(
             root_agent=WorkOrderRuntimeRootAgent(
-                runtime=app.state.agent_runtime,
-                planner=app.state.agent_runtime.agent_planner,
+                runtime=app.state.work_order_runtime,
+                planner=app.state.work_order_runtime.agent_planner,
                 control_tools=work_order_control_tools,
             ),
             sessions=ConversationStoreAgentSessionRepository(
-                app.state.agent_runtime.conversation_store
+                app.state.work_order_runtime.conversation_store
             ),
         )
         app.state.conversation_service = ConversationService(
-            store=app.state.agent_runtime.conversation_store,
-            agent_runtime=app.state.agent_runtime,
-            settings=settings,
+            store=app.state.work_order_runtime.conversation_store,
+            work_order_runtime=app.state.work_order_runtime,
             agent_loop=agent_loop,
         )
     else:
         app.state.conversation_service = None
 
-    def get_runtime() -> AgentRuntime:
-        return app.state.agent_runtime
+    def get_work_order_runtime() -> WorkOrderRuntime:
+        return app.state.work_order_runtime
 
     def get_work_order_control_tools() -> WorkOrderControlTools:
         return app.state.work_order_control_tools
@@ -306,12 +305,12 @@ def create_app(
     @app.get("/api/operator-categories")
     def operator_categories(
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, int]:
         del owner_id
         return {
             category.value: count
-            for category, count in agent_runtime.operator_registry.categories().items()
+            for category, count in work_order_runtime.operator_registry.categories().items()
         }
 
     @app.get("/api/operators")
@@ -321,10 +320,10 @@ def create_app(
         provider_id: str | None = None,
         tag: str | None = None,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         del owner_id
-        operators = agent_runtime.operator_registry.search(
+        operators = work_order_runtime.operator_registry.search(
             category=category,
             tags={tag.lower()} if tag else None,
             include_drafts=include_drafts,
@@ -341,10 +340,10 @@ def create_app(
     @app.get("/api/operator-providers")
     def operator_providers(
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         del owner_id
-        return agent_runtime.provider_health()
+        return work_order_runtime.provider_health()
 
     @app.get("/api/operator-providers/{provider_id}/operators")
     def provider_operators(
@@ -355,11 +354,11 @@ def create_app(
         tag: str | None = None,
         refresh: bool = False,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         del owner_id
         try:
-            return agent_runtime.provider_operators(
+            return work_order_runtime.provider_operators(
                 provider_id=provider_id,
                 query=query,
                 limit=limit,
@@ -380,10 +379,10 @@ def create_app(
         provider_id: str,
         request: ProviderExecuteRequestBody,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.execute_provider_operator(
+            return work_order_runtime.execute_provider_operator(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
                 provider_id=provider_id,
@@ -409,10 +408,10 @@ def create_app(
     def start_agent(
         request: StartAgentRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.start(
+            return work_order_runtime.start(
                 owner_id=owner_id,
                 requirement=request.requirement,
                 data_sources=request.data_sources,
@@ -429,13 +428,13 @@ def create_app(
         work_order_id: str,
         request: ResumeAgentRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
         control_tools: WorkOrderControlTools = Depends(
             get_work_order_control_tools
         ),
     ) -> dict[str, Any]:
         try:
-            agent_runtime.state(
+            work_order_runtime.state(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
             )
@@ -464,10 +463,10 @@ def create_app(
     def get_agent_state(
         work_order_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.state(work_order_id=work_order_id, owner_id=owner_id)
+            return work_order_runtime.state(work_order_id=work_order_id, owner_id=owner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -478,10 +477,10 @@ def create_app(
         work_order_id: str,
         request: BuildPreviewRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.build_node_preview(
+            return work_order_runtime.build_node_preview(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
                 pipeline_version_id=request.pipeline_version_id,
@@ -501,13 +500,13 @@ def create_app(
         work_order_id: str,
         idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
         control_tools: WorkOrderControlTools = Depends(
             get_work_order_control_tools
         ),
     ) -> dict[str, Any]:
         try:
-            agent_runtime.state(
+            work_order_runtime.state(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
             )
@@ -533,10 +532,10 @@ def create_app(
     def list_dataset_runs(
         work_order_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         try:
-            return agent_runtime.list_runs(work_order_id=work_order_id, owner_id=owner_id)
+            return work_order_runtime.list_runs(work_order_id=work_order_id, owner_id=owner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -548,10 +547,10 @@ def create_app(
     def get_dataset_run(
         run_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.get_run(run_id=run_id, owner_id=owner_id)
+            return work_order_runtime.get_run(run_id=run_id, owner_id=owner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -564,10 +563,10 @@ def create_app(
         run_id: str,
         request: RunControlRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.control_run(
+            return work_order_runtime.control_run(
                 run_id=run_id, owner_id=owner_id, action=request.action
             )
         except KeyError as exc:
@@ -582,10 +581,10 @@ def create_app(
         run_id: str,
         request: RunFeedbackRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.record_run_feedback(
+            return work_order_runtime.record_run_feedback(
                 run_id=run_id,
                 owner_id=owner_id,
                 accepted=request.accepted,
@@ -604,10 +603,10 @@ def create_app(
     def get_dataset_run_events(
         run_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         try:
-            return agent_runtime.get_run_events(run_id=run_id, owner_id=owner_id)
+            return work_order_runtime.get_run_events(run_id=run_id, owner_id=owner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -619,10 +618,10 @@ def create_app(
     def get_dataset_run_node_results(
         run_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> list[dict[str, Any]]:
         try:
-            return agent_runtime.get_run_node_results(run_id=run_id, owner_id=owner_id)
+            return work_order_runtime.get_run_node_results(run_id=run_id, owner_id=owner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -634,10 +633,10 @@ def create_app(
     def get_run_repair_candidates(
         run_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.repair_candidates(
+            return work_order_runtime.repair_candidates(
                 reference_id=run_id,
                 owner_id=owner_id,
             )
@@ -653,10 +652,10 @@ def create_app(
         run_id: str,
         idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.retry_failed_assets(
+            return work_order_runtime.retry_failed_assets(
                 previous_run_id=run_id,
                 owner_id=owner_id,
                 idempotency_key=idempotency_key,
@@ -672,10 +671,10 @@ def create_app(
     def get_dataset_version(
         dataset_version_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.get_dataset(
+            return work_order_runtime.get_dataset(
                 dataset_version_id=dataset_version_id, owner_id=owner_id
             )
         except KeyError as exc:
@@ -687,10 +686,10 @@ def create_app(
     def get_dataset_repair_candidates(
         dataset_version_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.repair_candidates(
+            return work_order_runtime.repair_candidates(
                 reference_id=dataset_version_id,
                 owner_id=owner_id,
             )
@@ -706,10 +705,10 @@ def create_app(
         dataset_version_id: str,
         request: DatasetExclusionRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.exclude_abandoned_assets(
+            return work_order_runtime.exclude_abandoned_assets(
                 dataset_version_id=dataset_version_id,
                 owner_id=owner_id,
                 confirmed=request.confirmed,
@@ -726,10 +725,10 @@ def create_app(
         dataset_version_id: str,
         request: DatasetExportRequest,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.export_deliverable_dataset(
+            return work_order_runtime.export_deliverable_dataset(
                 dataset_version_id=dataset_version_id,
                 owner_id=owner_id,
                 destination=Path(request.destination),
@@ -747,10 +746,10 @@ def create_app(
     def get_qc_report(
         qc_report_id: str,
         owner_id: str = Depends(require_owner),
-        agent_runtime: AgentRuntime = Depends(get_runtime),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.get_qc_report(
+            return work_order_runtime.get_qc_report(
                 qc_report_id=qc_report_id, owner_id=owner_id
             )
         except KeyError as exc:

@@ -5,7 +5,7 @@ from langgraph.graph import END, START, StateGraph
 from ...operators import OperatorLibrary
 from ...execution.pipeline_trial import PipelineTrialRunner
 from ...experiences import PipelineExperienceRetriever
-from ..runtime import AgentPlanner
+from ..runner import AgentPlanner
 from ..shared import WorkOrderGraphState
 from .nodes import generate_pipeline_variants, select_representative_pipelines
 

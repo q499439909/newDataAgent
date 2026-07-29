@@ -1,7 +1,7 @@
 # DataAgent Requirement Agent 顶层化与对话执行架构重构方案
 
 > 日期：2026-07-29
-> 状态：阶段 0–6 已实施；阶段 7 尚未实施
+> 状态：阶段 0–7 已实施
 > 范围：对话入口、Agent 推理循环、LangGraph 编排、WorkOrder 运行时和数据 Run 执行之间的职责重构
 
 ## 1. 结论
@@ -36,12 +36,12 @@ Web
 
 - 阶段 0 已完成：稳定复现双动作协议冲突并建立测试基线。
 - 阶段 1 已完成：加入统一 Turn、AgentAction、TurnResult 和 WorkOrder Liveness 类型。
-- 阶段 2 已完成：现有 Requirement Agent 已成为 LangGraph 根 Agent；原需求生成子图改为 `requirement_planning_agent`；原 Main Agent 仅保留 checkpoint 兼容 Adapter。
-- 阶段 3 已完成：`AgentDecisionLoop` 已演进为支持同步/异步、流式事件、消息、取消和明确停止原因的 `AgentRunner`；旧名称仅作兼容 Adapter。
+- 阶段 2 已完成：现有 Requirement Agent 已成为 LangGraph 根 Agent；原需求生成子图改为 `requirement_planning_agent`。
+- 阶段 3 已完成：`AgentRunner` 支持同步/异步、流式事件、消息、取消和明确停止原因。
 - 阶段 4 已完成：实现 `AgentLoop.handle_message()`、AgentSession Interface、内存与 ConversationStore Adapter、显式斜杠命令、自动 continuation、同 session 串行化、活动 Turn 取消和 system observation 入口。
-- 阶段 5 已完成：`ControlToolExecutor` 成为唯一受治理工具执行 Module；`GovernedToolLoop` 仅保留兼容别名；根 Agent 与 Web 的 WorkOrder 恢复和 Run 提交使用同一组 typed Control Tools。
+- 阶段 5 已完成：`ControlToolExecutor` 成为唯一受治理工具执行 Module；根 Agent 与 Web 的 WorkOrder 恢复和 Run 提交使用同一组 typed Control Tools。
 - 阶段 6 已完成：默认 API 构造已将 ConversationService 配置成 AgentLoop Adapter；现有 Web/TUI 继续使用兼容 endpoint 和 SSE/NDJSON 格式，但普通自然语言不再进入 ConversationIntent gateway。
-- 阶段 7 未实施：旧 ConversationIntent、Conversation policy、旧 `_apply()` 和兼容字段仍待删除。
+- 阶段 7 已完成：删除旧 ConversationIntent、Conversation policy、Conversation ReAct/`_apply()`、Main Agent 与旧 ToolLoop 兼容层；`AgentRuntime` 已更名为 `WorkOrderRuntime`；checkpoint state version 与 `main_agent_*` 显式迁移已落地。
 
 ---
 
@@ -505,7 +505,7 @@ inspect_run
 
 ### 5.6 WorkOrderRuntime
 
-这是当前 `dataagent/application/agent_runtime.py` 的更准确概念名称。
+现已落地为 `dataagent/application/work_order_runtime.py`。
 
 它负责：
 
@@ -653,7 +653,7 @@ dataagent/
 │       └── repositories.py
 │
 ├── graph/
-│   ├── main_graph.py                    # 迁移期兼容入口，最终可收窄
+│   ├── work_order_graph.py              # WorkOrder 的 LangGraph 编排入口
 │   ├── interrupts.py
 │   ├── routing.py
 │   └── state_migrations.py
@@ -929,8 +929,8 @@ class TurnResult:
 | `dataagent/agents/requirement/nodes.py` | 接收用户消息、WorkOrder snapshot 和 Observation |
 | `dataagent/agents/requirement/planner.py` | 输出通用结构化 AgentAction |
 | `dataagent/agents/main/runtime.py` | 移除第二个 LLM 决策者，迁出可复用 guard |
-| `dataagent/graph/main_graph.py` | 改为兼容入口或转发到 Requirement 根图 |
-| `dataagent/application/agent_runtime.py` | 收窄为 WorkOrderRuntime，并暂留兼容导出 |
+| `dataagent/graph/main_graph.py` | 更名为 `work_order_graph.py`，由 Requirement Agent 作根节点 |
+| `dataagent/application/agent_runtime.py` | 更名并收窄为 `work_order_runtime.py::WorkOrderRuntime` |
 | `dataagent/application/conversation.py` | 降级为 AgentLoop Adapter |
 | `dataagent/tools/loop.py` | 迁移 trace/脱敏逻辑到 executor |
 | `apps/api/main.py` | 消息入口接入 AgentLoop |
@@ -1016,6 +1016,13 @@ class TurnResult:
 3. 完成文件重命名。
 4. 增加 checkpoint state version。
 5. 显式迁移旧的 `main_agent_action` 等字段。
+
+实施结果：
+
+- `ConversationService` 仅保留 Web conversation id、`TurnInput` 与旧 HTTP/SSE 响应格式转换。
+- checkpoint 当前版本为 `2`；读取旧状态时将 `main_agent_action`、`main_agent_decisions` 迁移为 `requirement_agent_*`，新字段与旧字段冲突时以新字段为准。
+- 唯一循环实现为 `AgentLoop` + `AgentRunner`，唯一受治理工具执行实现为 `ControlToolExecutor`。
+- WorkOrder 应用服务已更名为 `dataagent/application/work_order_runtime.py::WorkOrderRuntime`。
 
 ---
 

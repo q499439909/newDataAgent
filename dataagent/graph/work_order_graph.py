@@ -9,7 +9,7 @@ from langgraph.types import interrupt
 from ..operators import OperatorLibrary, build_operator_library
 from ..domain.operators import RuntimeBackend
 from ..agents.processing import build_processing_graph
-from ..agents.runtime import AgentPlanner
+from ..agents.runner import AgentPlanner
 from ..agents.requirement import (
     RequirementPlanner,
     build_requirement_graph,
@@ -22,10 +22,22 @@ from ..agents.strategy import build_strategy_graph
 from ..experiences import PipelineExperienceRetriever
 from ..execution.pipeline_trial import PipelineTrialRunner
 from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
+from .state_migrations import migrate_work_order_state
 
 
 def _route_requirement_agent(state: WorkOrderGraphState) -> str:
-    return state.get("requirement_agent_action") or state["main_agent_action"]
+    return migrate_work_order_state(state)["requirement_agent_action"]
+
+
+def _decide_requirement_agent(
+    state: WorkOrderGraphState,
+    *,
+    planner: AgentPlanner | None,
+) -> dict:
+    return decide_requirement_agent_turn(
+        migrate_work_order_state(state),
+        planner=planner,
+    )
 
 
 def _resolved_run_ids(state: WorkOrderGraphState) -> list[str]:
@@ -154,8 +166,6 @@ def _ask_user_about_run_outcome(state: WorkOrderGraphState) -> dict:
         )
     return {
         "requirement_agent_action": action,
-        # Checkpoint compatibility for states written before the promotion.
-        "main_agent_action": action,
         "next_action": action,
         "trace": [
             *state.get("trace", ()),
@@ -164,7 +174,7 @@ def _ask_user_about_run_outcome(state: WorkOrderGraphState) -> dict:
     }
 
 
-def build_main_graph(
+def build_work_order_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     *,
     operator_library: OperatorLibrary | None = None,
@@ -185,7 +195,7 @@ def build_main_graph(
     graph = StateGraph(WorkOrderGraphState)
     graph.add_node(
         "requirement_agent",
-        partial(decide_requirement_agent_turn, planner=agent_planner),
+        partial(_decide_requirement_agent, planner=agent_planner),
     )
     graph.add_node(
         "requirement_planning_agent",

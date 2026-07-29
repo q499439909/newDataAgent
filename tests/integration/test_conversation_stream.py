@@ -5,7 +5,7 @@ import json
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 
 
 class FakeStreamingConversationService:
@@ -49,7 +49,7 @@ class FakeStreamingConversationService:
 
 def test_conversation_stream_emits_actions_before_final_response(tmp_path) -> None:
     app = create_app(
-        AgentRuntime(tmp_path / "runtime"),
+        WorkOrderRuntime(tmp_path / "runtime"),
         conversation_service=FakeStreamingConversationService(),
     )
     client = TestClient(app)

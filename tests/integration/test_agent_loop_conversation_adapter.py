@@ -5,7 +5,7 @@ import asyncio
 from dataagent.agents.loop import AgentLoop
 from dataagent.agents.runner import AgentDecision
 from dataagent.agents.turn import TurnInput, TurnResult
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.application.agent_sessions import (
     ConversationStoreAgentSessionRepository,
     InMemoryAgentSessionRepository,
@@ -13,14 +13,6 @@ from dataagent.application.agent_sessions import (
 from dataagent.application.agent_turns import WorkOrderRuntimeRootAgent
 from dataagent.application.conversation import ConversationService
 from apps.api.main import create_app
-from dataagent.config import Settings
-
-
-class FailIfCalledGateway:
-    configured = True
-
-    def conversation_turn(self, **_kwargs):
-        raise AssertionError("legacy ConversationIntent gateway was called")
 
 
 class ReplyingRootAgent:
@@ -41,7 +33,7 @@ class ReplyingRootAgent:
 
 
 def test_conversation_service_is_only_an_agent_loop_adapter(tmp_path) -> None:
-    runtime = AgentRuntime(tmp_path / "runtime", include_datajuicer=False)
+    runtime = WorkOrderRuntime(tmp_path / "runtime", include_datajuicer=False)
     assert runtime.conversation_store is not None
     sessions = ConversationStoreAgentSessionRepository(
         runtime.conversation_store
@@ -49,9 +41,7 @@ def test_conversation_service_is_only_an_agent_loop_adapter(tmp_path) -> None:
     loop = AgentLoop(root_agent=ReplyingRootAgent(), sessions=sessions)
     service = ConversationService(
         store=runtime.conversation_store,
-        agent_runtime=runtime,
-        settings=Settings.load(tmp_path),
-        gateway=FailIfCalledGateway(),
+        work_order_runtime=runtime,
         agent_loop=loop,
     )
     conversation = service.create("owner_1")
@@ -70,7 +60,7 @@ def test_conversation_service_is_only_an_agent_loop_adapter(tmp_path) -> None:
 
 
 def test_default_api_conversation_path_installs_agent_loop(tmp_path) -> None:
-    runtime = AgentRuntime(tmp_path / "runtime", include_datajuicer=False)
+    runtime = WorkOrderRuntime(tmp_path / "runtime", include_datajuicer=False)
 
     app = create_app(runtime=runtime)
 

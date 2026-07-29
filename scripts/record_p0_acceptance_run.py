@@ -7,7 +7,7 @@ from dataagent.acceptance import (
     collect_acceptance_run_record,
     write_provider_smoke_record,
 )
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.config import Settings
 
 
@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     args = parser.parse_args()
     settings = Settings.load(cwd=args.repo)
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         args.runtime_home,
         include_datajuicer=settings.datajuicer_enabled,
         allow_model_download=False,

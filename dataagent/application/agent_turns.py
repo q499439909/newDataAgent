@@ -231,7 +231,7 @@ class WorkOrderRuntimeRootAgent:
             goal=(
                 "Handle the latest user or system message as the root "
                 "Requirement Agent. Use WorkOrder facts and typed tools; do "
-                "not classify the message into a ConversationIntent. Never "
+                "not classify the message into an intermediate intent. Never "
                 "invent data-source references or silently approve an "
                 "interrupt."
             ),

@@ -22,7 +22,7 @@ from ...operators.catalog_matching import (
 from ...operators.catalog_ranking import OperatorCandidateRanker, OperatorRankingPolicy
 from ...operators.registry import OperatorRegistry
 from ...experiences import PipelineExperienceRetriever
-from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
+from ..runner import AgentPlanner, AgentRunner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -828,7 +828,7 @@ def _generate_agent_retrieval_plan(
             )
         return {"ok": not errors, "errors": errors}
 
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="retrieval",
         planner=planner,
         tools=(

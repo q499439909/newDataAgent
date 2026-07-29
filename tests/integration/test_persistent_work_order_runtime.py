@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 
 
 def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None:
-    runtime = AgentRuntime(tmp_path)
+    runtime = WorkOrderRuntime(tmp_path)
     first = runtime.start(
         owner_id="user_1",
         work_order_id="persistent_work_order",
@@ -16,7 +16,7 @@ def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None
     assert first["interrupts"][0]["value"]["kind"] == "task_spec_confirmation"
     thread_id = first["thread_id"]
 
-    restarted = AgentRuntime(tmp_path)
+    restarted = WorkOrderRuntime(tmp_path)
     second = restarted.resume(
         work_order_id="persistent_work_order",
         owner_id="user_1",
@@ -31,7 +31,7 @@ def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None
         for item in second["state"]["representative_pipelines"]
         if item["strategy"] == "balanced"
     )
-    final_runtime = AgentRuntime(tmp_path)
+    final_runtime = WorkOrderRuntime(tmp_path)
     final = final_runtime.resume(
         work_order_id="persistent_work_order",
         owner_id="user_1",
@@ -59,7 +59,7 @@ def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None
 
 
 def test_persistent_runtime_preserves_owner_isolation(tmp_path) -> None:
-    AgentRuntime(tmp_path).start(
+    WorkOrderRuntime(tmp_path).start(
         owner_id="owner_a",
         work_order_id="private_work_order",
         requirement="filter images",
@@ -68,7 +68,7 @@ def test_persistent_runtime_preserves_owner_isolation(tmp_path) -> None:
         ],
     )
 
-    restarted = AgentRuntime(tmp_path)
+    restarted = WorkOrderRuntime(tmp_path)
     try:
         restarted.state(work_order_id="private_work_order", owner_id="owner_b")
     except PermissionError:

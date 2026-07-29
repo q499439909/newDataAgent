@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 
+CURRENT_AGENT_STATE_VERSION = 2
+
+
 class WorkOrderGraphState(TypedDict, total=False):
+    agent_state_version: int
     work_order_id: str
     owner_id: str
     requirement: str
@@ -38,9 +42,6 @@ class WorkOrderGraphState(TypedDict, total=False):
     requirement_agent_action: str
     requirement_agent_decisions: list[dict[str, Any]]
     agent_action: dict[str, Any]
-    # Deprecated checkpoint compatibility fields.
-    main_agent_action: str
-    main_agent_decisions: list[dict[str, Any]]
     agent_observations: list[dict[str, Any]]
     task_plan: list[dict[str, str]]
     latest_run_feedback: dict[str, Any]

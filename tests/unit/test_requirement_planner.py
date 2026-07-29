@@ -7,8 +7,8 @@ from dataagent.agents.requirement import (
     RequirementPlanner,
     build_requirement_graph,
 )
-from dataagent.agents.runtime import AgentDecision
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.agents.runner import AgentDecision
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.specs import ConstraintContract, RequirementDraft
 from dataagent.domain.specs import (
     RequirementClauseTrace,
@@ -463,7 +463,7 @@ def test_requirement_agent_turns_a_semantic_gap_into_a_human_interrupt() -> None
 
 
 def test_requirement_agent_resumes_after_human_clarification() -> None:
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         include_datajuicer=False,
         agent_planner=ClarificationWorkOrderPlanner(),
     )
@@ -549,7 +549,7 @@ def test_agent_runtime_uses_requirement_planner_instead_of_fixed_requirement_rul
             ),
         )
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         include_datajuicer=False,
         requirement_planner=planner,
     )

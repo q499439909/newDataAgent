@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataagent.agents.runtime import (
+from dataagent.agents.runner import (
     AgentDecision,
     AgentPlanningRequest,
 )
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.evaluations import QCReport, QCStatus
 from dataagent.domain.specs import RequirementDraft
 
@@ -379,7 +379,7 @@ class WorkOrderScriptedPlanner:
 
 def test_work_order_runs_model_actions_and_specialist_tool_observations() -> None:
     planner = WorkOrderScriptedPlanner()
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
         agent_planner=planner,
@@ -419,7 +419,7 @@ def test_negative_run_feedback_returns_observation_to_requirement_agent(
     tmp_path,
 ) -> None:
     planner = WorkOrderScriptedPlanner()
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -490,7 +490,7 @@ def test_requirement_agent_recompiles_after_formal_run_observation(
     planner = WorkOrderScriptedPlanner(
         run_outcome_action="recompile_pipeline",
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -550,7 +550,7 @@ def test_requirement_agent_reretrieves_after_different_formal_failure(
     planner = WorkOrderScriptedPlanner(
         run_outcome_action="reretrieve_candidates",
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -615,7 +615,7 @@ def test_requirement_agent_completes_only_after_passed_qc_observation(
     planner = WorkOrderScriptedPlanner(
         run_outcome_action="complete_work_order",
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -704,7 +704,7 @@ def test_requirement_agent_schedules_only_failed_assets_for_repair(
     planner = WorkOrderScriptedPlanner(
         run_outcome_action="retry_failed_assets",
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -804,7 +804,7 @@ def test_requirement_agent_can_schedule_a_new_production_run_after_cancel(
     planner = WorkOrderScriptedPlanner(
         run_outcome_action="rerun_pipeline",
     )
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),
@@ -860,7 +860,7 @@ def test_requirement_agent_can_schedule_a_new_production_run_after_cancel(
 
 def test_requirement_agent_can_pause_for_human_run_resolution(tmp_path) -> None:
     planner = WorkOrderScriptedPlanner(run_outcome_action="ask_user")
-    runtime = AgentRuntime(
+    runtime = WorkOrderRuntime(
         home=tmp_path,
         include_datajuicer=False,
         requirement_planner=ArbitraryRequirementPlanner(),

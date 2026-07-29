@@ -6,7 +6,7 @@ from ...domain.common import new_id
 from ...domain.pipelines import PipelineVersion
 from ...domain.plans import SamplingPlanVersion
 from ...domain.specs import TaskSpecVersion
-from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
+from ..runner import AgentPlanner, AgentRunner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 
 
@@ -99,7 +99,7 @@ def generate_sampling_plan(
             "sampling_plan": plan.model_dump(mode="json"),
         }
 
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="strategy",
         planner=planner,
         tools=(

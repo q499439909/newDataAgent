@@ -16,7 +16,7 @@ from ...operators.planning import (
     infer_output_actions,
     infer_required_capabilities,
 )
-from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
+from ..runner import AgentPlanner, AgentRunner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 from .clarification import infer_task_ambiguities
 from .planner import RequirementPlanner, RequirementPlanningRequest
@@ -134,7 +134,7 @@ def _generate_agent_task_spec(
             }
         return {"ok": True}
 
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="requirement_planning",
         planner=planner,
         tools=(

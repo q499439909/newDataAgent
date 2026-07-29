@@ -17,7 +17,7 @@ from dataagent.agents.processing.nodes import (
 )
 from dataagent.agents.requirement.nodes import generate_task_spec
 from dataagent.agents.retrieval.nodes import generate_retrieval_plan
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.pipelines import PipelineVersion
 from dataagent.domain.specs import ConstraintContract, DataSourceSpec, TaskSpecVersion
 from dataagent.graph.interrupts import revise_task_spec_version
@@ -711,7 +711,7 @@ def test_retrieval_outputs_capability_coverage_matrix_for_cat_dog_task() -> None
     assert all(node.prompt_binding.resolved_sha256 for node in remote_nodes)
 
     base.providers.register(provider)
-    runtime = AgentRuntime(include_datajuicer=False)
+    runtime = WorkOrderRuntime(include_datajuicer=False)
     runtime.operator_library = OperatorLibrary(
         operators=operators,
         registry=registry,
@@ -842,7 +842,7 @@ def test_visual_semantic_selection_compiles_remote_vlm_and_policy_node() -> None
     ]
 
     base.providers.register(provider)
-    runtime = AgentRuntime(include_datajuicer=False)
+    runtime = WorkOrderRuntime(include_datajuicer=False)
     runtime.operator_library = library
     runtime.operator_registry = registry
     assert runtime.pipeline_execution_eligibility(pipelines[0]) == {

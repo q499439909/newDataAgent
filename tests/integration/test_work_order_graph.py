@@ -5,7 +5,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from dataagent.domain.pipelines import PipelineStrategy
-from dataagent.graph import build_main_graph
+from dataagent.graph import build_work_order_graph
 
 
 def initial_state() -> dict:
@@ -25,7 +25,7 @@ def initial_state() -> dict:
 
 
 def test_requirement_agent_is_the_root_graph_agent() -> None:
-    graph = build_main_graph()
+    graph = build_work_order_graph()
 
     nodes = graph.get_graph().nodes
 
@@ -35,7 +35,7 @@ def test_requirement_agent_is_the_root_graph_agent() -> None:
 
 
 def test_four_agent_graph_interrupts_and_resumes() -> None:
-    graph = build_main_graph(InMemorySaver())
+    graph = build_work_order_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_1"}}
 
     first = graph.invoke(initial_state(), config)
@@ -82,9 +82,8 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
         "run_strategy_agent",
         "finish_planning",
     ]
-    assert final["main_agent_decisions"] == (
-        final["requirement_agent_decisions"]
-    )
+    assert final["agent_state_version"] == 2
+    assert "main_agent_decisions" not in final
     assert next(
         item
         for item in final["task_plan"]
@@ -113,7 +112,7 @@ def test_four_agent_graph_interrupts_and_resumes() -> None:
 
 
 def test_rejected_task_spec_terminates_before_retrieval() -> None:
-    graph = build_main_graph(InMemorySaver())
+    graph = build_work_order_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_reject"}}
     graph.invoke(initial_state(), config)
 
@@ -125,7 +124,7 @@ def test_rejected_task_spec_terminates_before_retrieval() -> None:
 
 
 def test_task_spec_can_be_revised_before_confirmation() -> None:
-    graph = build_main_graph(InMemorySaver())
+    graph = build_work_order_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_spec_revision"}}
     first = graph.invoke(initial_state(), config)
 
@@ -157,7 +156,7 @@ def test_task_spec_can_be_revised_before_confirmation() -> None:
 
 
 def test_graph_rejects_unknown_task_patch_fields_at_the_revision_boundary() -> None:
-    graph = build_main_graph(InMemorySaver())
+    graph = build_work_order_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_invalid_patch"}}
     graph.invoke(initial_state(), config)
 
@@ -181,7 +180,7 @@ def test_graph_rejects_unknown_task_patch_fields_at_the_revision_boundary() -> N
 
 
 def test_graph_does_not_confirm_task_spec_with_unresolved_ambiguities() -> None:
-    graph = build_main_graph(InMemorySaver())
+    graph = build_work_order_graph(InMemorySaver())
     config = {"configurable": {"thread_id": "thread_clarification"}}
     state = initial_state() | {
         "requirement": "去掉不真实、不是实拍直出的图片，把猫和狗分开"

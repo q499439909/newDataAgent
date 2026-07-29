@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.local_stack import (
     LocalRuntimeIdentity,
     LocalStackError,
@@ -19,7 +19,7 @@ def test_api_health_exposes_local_runtime_identity(monkeypatch) -> None:
     monkeypatch.setenv("DATAAGENT_INSTANCE_ID", "instance_test")
     monkeypatch.setenv("DATAAGENT_SOURCE_REVISION", "revision_test")
 
-    client = TestClient(create_app(runtime=AgentRuntime()))
+    client = TestClient(create_app(runtime=WorkOrderRuntime()))
 
     assert client.get("/health").json() == {
         "status": "ok",

@@ -12,11 +12,10 @@ import httpx
 from json_repair import repair_json
 
 from .config import Settings
-from .application.conversation_actions import conversation_action_json_schema
 from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
 from .domain.specs import RequirementDraft, validate_requirement_draft_grounding
-from .agents.runtime import AgentDecision, AgentPlanningRequest
+from .agents.runner import AgentDecision, AgentPlanningRequest
 
 
 class ModelGatewayError(RuntimeError):
@@ -140,81 +139,6 @@ class ModelGateway:
             "OK",
             max_tokens=16,
         )
-
-    def conversation_turn(
-        self,
-        *,
-        history: list[dict[str, str]],
-        context: dict[str, Any],
-    ) -> tuple[dict[str, Any], ModelUsage]:
-        route = self.routing.route(ModelTaskKind.CONVERSATION)
-        action_schema = conversation_action_json_schema()
-        system = (
-            "You are DataAgent's conversational control assistant. Reply naturally in Chinese "
-            "unless the user uses another language. Interpret semantics from the full conversation; "
-            "do not use a fixed phrase list. You decide the user's intent AND extract the "
-            "structured arguments yourself: pull the data-source path into `source` and the "
-            "requirement text into `requirement` directly from the user's message, no matter how "
-            "the path is written (quoted, unquoted, adjacent to Chinese, absolute, with ~, or "
-            "several paths mentioned — pick the primary image directory). Do not ask the user to "
-            "reformat paths. Never claim an action succeeded unless the control plane executes it. "
-            "Ask one concise follow-up when information is missing. Only choose an action listed in "
-            "control_context.allowed_actions. A `control` conversation entry is a trusted, "
-            "structured observation from the control plane; use it to repair the proposed action. "
-            "START_WORK_ORDER requires a concrete data-production requirement and may carry "
-            "`source` and `task_spec_patch` in the same turn; greetings, product, capability, and usage "
-            "questions are CHAT. PROVIDE_SOURCE provides only a path (used when a requirement is "
-            "already pending). APPROVE confirms only a TaskSpec with no remaining ambiguities. "
-            "SELECT_PIPELINE requires one canonical strategy. SUBMIT_RUN, RUN_STATUS, CONTROL_RUN, "
-            "RETRY_RUN, RERUN_PIPELINE, and RECOMPILE_PIPELINE require explicit user intent. "
-            "When a TaskSpec has unresolved questions, answers are EDIT_TASK_SPEC. When no "
-            "ambiguities remain, an affirmative response to the pending TaskSpec confirmation is "
-            "APPROVE, not EDIT_TASK_SPEC. Never copy an acknowledgement into a TaskSpec patch. "
-            "To accept the "
-            "system's recommended default answers for pending ambiguities, emit "
-            "EDIT_TASK_SPEC with action=\"accept_defaults\" (and confirm_after_edit=true if the "
-            "user also wants to confirm). Put only user-provided changes in task_spec_patch using "
-            "hard_constraints, semantic_requirements, exclusion_requirements, preferences, classification, or "
-            "objective. For authenticity clarification, use hard_constraints.authenticity_scope. "
-            "For closed-set image classification, put requested classes in classification using "
-            "mode=closed_set, at least two labels with stable lowercase ASCII ids, display_name and "
-            "aliases. `mixed_label` and `unknown_label` must each be a lowercase ASCII string id, "
-            "never an object. `semantic_requirements` and `exclusion_requirements` must be arrays "
-            "of strings, never key-value maps. Do this on START_WORK_ORDER and later edits. "
-            "For mixed or unknown classes, use preferences.mixed_policy and "
-            "preferences.unknown_policy with keep, review, or reject. For output safety, use "
-            "hard_constraints.preserve_source and preferences.output_layout. When the user "
-            "explicitly excludes content outside the requested closed-set labels, set "
-            "preferences.unknown_policy=\"reject\" and preserve that exclusion in "
-            "exclusion_requirements. Do not leave an explicitly answered field unresolved. "
-            "Clarification questions are generated separately from the resulting TaskSpec; "
-            "do not put natural-language questions in task_spec_patch. When the user "
-            "removes a processing capability from a confirmed task, use "
-            "hard_constraints.disabled_capabilities with canonical capability IDs such as "
-            "image_quality. For QUERY_CONTROL_FACTS, set `facets` to a non-empty list drawn from: "
-            "work_order, run, pipeline, operators, task_spec, dataset, outcome, audit, repair. "
-            "Use repair for still-failed, abandoned, excluded, and asset-lineage questions. Use audit "
-            "for rejection reasons, failed or skipped images, per-operator decisions, and execution "
-            "trace questions. The system renders grounded facts from the control plane for those facets, "
-            "so never invent run/pipeline/spec identifiers, counts, or paths in your reply — "
-            "leave factual claims to the system. RERUN_PIPELINE means a new Run using the same "
-            "immutable TaskSpec and Pipeline. RETRY_RUN is for a transiently failed Run. "
-            "RECOMPILE_PIPELINE keeps the confirmed TaskSpec but uses the current Catalog to build "
-            "new Pipeline candidates. Return JSON only and match this JSON Schema exactly: "
-            + json.dumps(action_schema, ensure_ascii=False)
-        )
-        payload = {
-            "configured_model": route.model_id,
-            "conversation": history[-20:],
-            "control_context": context,
-        }
-        result = self._messages(
-            route.model_id,
-            system,
-            json.dumps(payload, ensure_ascii=False),
-            max_tokens=1000,
-        )
-        return _extract_json(result.text), result.usage
 
     def task_clarifications(
         self,

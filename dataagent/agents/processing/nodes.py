@@ -19,7 +19,7 @@ from ...operators import OperatorLibrary, build_operator_library
 from ...operators.catalog_matching import OperatorCatalogMatch
 from ...operators.validation import validate_parameters
 from ...prompts import builtin_prompt_registry
-from ..runtime import AgentDecisionLoop, AgentPlanner, AgentTool
+from ..runner import AgentPlanner, AgentRunner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 from ...domain.specs.binding import bind_constraint_parameters
 from ...execution.pipeline_trial import (
@@ -1133,7 +1133,7 @@ def _generate_agent_pipeline_variants(
             )
         return {"ok": not errors, "errors": errors}
 
-    loop = AgentDecisionLoop(
+    loop = AgentRunner(
         agent_name="processing",
         planner=planner,
         tools=(

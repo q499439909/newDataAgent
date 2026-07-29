@@ -400,46 +400,12 @@ class AgentRunner:
         )
 
 
-class AgentDecisionLoop(AgentRunner):
-    """Compatibility Adapter preserving the original synchronous contract."""
-
-    def run(self, *, goal: str, context: dict[str, Any]) -> AgentRunResult:
-        result = super().run(goal=goal, context=context)
-        if result.status == "exhausted":
-            raise RuntimeError(
-                f"{self.agent_name} exceeded {self.max_iterations} planning "
-                "iterations; recent decisions="
-                + repr(
-                    [
-                        {
-                            "action": item.action,
-                            "tool_name": item.tool_name,
-                            "reason": item.reason_summary,
-                        }
-                        for item in result.decisions[-5:]
-                    ]
-                )
-                + "; last_observation="
-                + repr(
-                    result.observations[-1].model_dump(mode="json")
-                    if result.observations
-                    else None
-                )
-            )
-        return result
-
-
-AgentLoopResult = AgentRunResult
-
-
 __all__ = [
     "AgentDecision",
-    "AgentDecisionLoop",
     "AgentMessage",
     "AgentRunner",
     "AgentRunnerEvent",
     "AgentRunResult",
-    "AgentLoopResult",
     "AgentObservation",
     "AgentPlanner",
     "AgentPlanningRequest",

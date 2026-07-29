@@ -1,4 +1,4 @@
-from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.work_order_runtime import WorkOrderRuntime
 
 
 YIFU_REQUIREMENT = (
@@ -13,7 +13,7 @@ YIFU_REQUIREMENT = (
 
 
 def test_main_agent_preserves_every_yifu_constraint_before_confirmation() -> None:
-    result = AgentRuntime(include_datajuicer=False).start(
+    result = WorkOrderRuntime(include_datajuicer=False).start(
         owner_id="user_1",
         requirement=YIFU_REQUIREMENT,
         data_sources=[

@@ -46,7 +46,7 @@ def test_image_generation_uses_operator_routes() -> None:
     )
 
 
-def test_gateway_uses_fast_conversation_and_reasoning_healthcheck(monkeypatch) -> None:
+def test_gateway_uses_planning_model_for_healthcheck(monkeypatch) -> None:
     settings = Settings(
         api_key="test-key",
         base_url="https://example.invalid",
@@ -71,9 +71,8 @@ def test_gateway_uses_fast_conversation_and_reasoning_healthcheck(monkeypatch) -
     monkeypatch.setattr(gateway, "_messages", fake_messages)
 
     gateway.healthcheck()
-    gateway.conversation_turn(history=[], context={})
 
-    assert called_models == ["glm-5.2", "glm-5.2"]
+    assert called_models == ["glm-5.2"]
 
 
 def test_requirement_planning_repairs_constraints_not_grounded_in_user_text(

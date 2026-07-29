@@ -139,7 +139,4 @@ class ControlToolExecutor:
         return result, trace
 
 
-GovernedToolLoop = ControlToolExecutor
-
-
-__all__ = ["ControlToolExecutor", "GovernedToolLoop"]
+__all__ = ["ControlToolExecutor"]
