@@ -16,8 +16,7 @@ from ..domain.operators import OperatorSpecVersion, OperatorStatus, RuntimeBacke
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
-from ..agents.requirement import RequirementPlanner
-from ..agents.main import build_task_plan
+from ..agents.requirement import RequirementPlanner, build_task_plan
 from ..agents.runtime import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
@@ -244,6 +243,24 @@ class AgentRuntime:
         result = dict(snapshot.values)
         if snapshot.interrupts:
             result["__interrupt__"] = snapshot.interrupts
+        return self._public_result(record, result)
+
+    def continue_work_order(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        """Continue pending LangGraph work without fabricating a user decision."""
+        record = self._get_authorized(work_order_id, owner_id)
+        snapshot = self.graph.get_state(self._config(record))
+        if snapshot.interrupts:
+            result = dict(snapshot.values)
+            result["__interrupt__"] = snapshot.interrupts
+            return self._public_result(record, result)
+        continued = self.graph.invoke(None, self._config(record))
+        result = dict(continued or snapshot.values)
+        self._capture_versions(record, result)
         return self._public_result(record, result)
 
     def pipeline_version(

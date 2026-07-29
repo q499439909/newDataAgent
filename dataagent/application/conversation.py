@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import logging
@@ -8,11 +9,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..config import Settings
+from ..agents.loop import AgentLoop
+from ..agents.turn import TurnInput
 from ..agents.requirement.clarification import recommended_clarification_patch
 from ..domain.common import new_id
 from ..gateway import ModelGateway, ModelGatewayError
 from ..infrastructure import ConversationStore
-from ..tools import GovernedToolLoop, ToolContext, build_p0_tool_registry
+from ..tools import ControlToolExecutor, ToolContext, build_p0_tool_registry
 from .agent_runtime import AgentRuntime
 from .conversation_actions import (
     ChatAction,
@@ -38,14 +41,12 @@ _MAX_REACT_ITERATIONS = 4
 
 
 class ConversationService:
-    """Conversational control plane.
+    """Compatibility Adapter for the existing conversation Interface.
 
-    The model is the *primary* decider: every user message is sent to the
-    gateway with the current control-plane context, and the model selects an
-    intent plus structured arguments (including the data-source ``source``
-    path and the ``requirement`` text). A bounded ReAct loop feeds
-    control-plane failures back to the model so it can self-correct or ask
-    the user a precise follow-up within the same turn.
+    Production construction injects AgentLoop, so ordinary text is delegated
+    directly to the root Requirement Agent. The legacy ConversationIntent
+    implementation remains temporarily available only for callers that have
+    not migrated; phase 7 removes that compatibility branch.
     """
 
     def __init__(
@@ -55,12 +56,14 @@ class ConversationService:
         agent_runtime: AgentRuntime,
         settings: Settings,
         gateway: ModelGateway | None = None,
+        agent_loop: AgentLoop | None = None,
     ) -> None:
         self.store = store
         self.agent_runtime = agent_runtime
         self.settings = settings
         self.gateway = gateway or ModelGateway(settings)
-        self.tool_loop = GovernedToolLoop(build_p0_tool_registry())
+        self.agent_loop = agent_loop
+        self.tool_executor = ControlToolExecutor(build_p0_tool_registry())
 
     def create(self, owner_id: str) -> dict[str, Any]:
         thread = self.store.create(thread_id=new_id("conversation"), owner_id=owner_id)
@@ -93,6 +96,13 @@ class ConversationService:
         content = content.strip()
         if not content:
             raise ValueError("Message must not be empty")
+        if self.agent_loop is not None:
+            return self._send_via_agent_loop(
+                thread_id=thread_id,
+                owner_id=owner_id,
+                content=content,
+                action_sink=action_sink,
+            )
         thread = self.store.get(thread_id, owner_id)
         self.store.add_message(
             thread_id=thread_id, owner_id=owner_id, role="user", content=content
@@ -178,7 +188,7 @@ class ConversationService:
                 }
             )
             if decision.intent != ConversationIntent.CHAT:
-                proposal, trace = self.tool_loop.execute(
+                proposal, trace = self.tool_executor.execute(
                     name="propose_control_action",
                     stage="validate_control_action",
                     context=self._tool_context(owner_id, context),
@@ -342,6 +352,73 @@ class ConversationService:
         response["messages"] = self.store.messages(thread_id, owner_id)
         return response
 
+    def _send_via_agent_loop(
+        self,
+        *,
+        thread_id: str,
+        owner_id: str,
+        content: str,
+        action_sink: Callable[[dict[str, Any]], None] | None,
+    ) -> dict[str, Any]:
+        action_trace: list[dict[str, Any]] = []
+
+        def receive_event(event: Any) -> None:
+            payload = (
+                event.model_dump(mode="json")
+                if hasattr(event, "model_dump")
+                else dict(event)
+            )
+            trace = {
+                "id": new_id("action_trace"),
+                "stage": payload.get("kind", "agent_turn"),
+                "stage_label": payload.get("kind", "agent_turn"),
+                "kind": "agent",
+                "tool": payload.get("data", {}).get("tool_name"),
+                "display_name": payload.get("kind", "Agent event"),
+                "status": payload.get("data", {}).get("status", "succeeded"),
+                "parameters": payload.get("data", {}),
+                "duration_ms": 0,
+                "summary": payload.get("kind", "Agent event"),
+                "evidence_ids": [],
+                "error_type": payload.get("data", {}).get("error_type"),
+            }
+            action_trace.append(trace)
+            if action_sink is not None:
+                action_sink(trace)
+
+        result = asyncio.run(
+            self.agent_loop.handle_message(
+                TurnInput(
+                    session_id=thread_id,
+                    owner_id=owner_id,
+                    content=content,
+                ),
+                receive_event,
+            )
+        )
+        thread = self.store.get(thread_id, owner_id)
+        work_order_id = (
+            result.work_order_id or thread.get("work_order_id")
+        )
+        turn = None
+        if work_order_id:
+            try:
+                turn = self.agent_runtime.state(
+                    work_order_id=work_order_id,
+                    owner_id=owner_id,
+                )
+            except KeyError:
+                turn = None
+        return {
+            "reply": result.reply or "",
+            "turn": turn,
+            "run": None,
+            "action_trace": action_trace,
+            "conversation_id": thread_id,
+            "work_order_id": work_order_id,
+            "messages": self.store.messages(thread_id, owner_id),
+        }
+
     @staticmethod
     def _allowed_actions(context: dict[str, Any]) -> tuple[str, ...]:
         return allowed_conversation_actions(context)
@@ -413,7 +490,7 @@ class ConversationService:
         tool_context = self._tool_context(owner_id, control_context)
 
         if decision.intent == ConversationIntent.QUERY_CONTROL_FACTS:
-            _, trace = self.tool_loop.execute(
+            _, trace = self.tool_executor.execute(
                 name="query_control_facts",
                 stage="inspect_control_facts",
                 context=tool_context,
@@ -455,7 +532,7 @@ class ConversationService:
             backends = ["cpu"]
             if self.settings.api_key:
                 backends.append("remote")
-            _, trace = self.tool_loop.execute(
+            _, trace = self.tool_executor.execute(
                 name="retrieve_operators",
                 stage="retrieve_operator_candidates",
                 context=tool_context,
@@ -483,7 +560,7 @@ class ConversationService:
             ),
             pipelines[0],
         )
-        compiled, trace = self.tool_loop.execute(
+        compiled, trace = self.tool_executor.execute(
             name="compile_pipeline_artifact",
             stage="compile_pipeline_artifact",
             context=tool_context,
@@ -492,7 +569,7 @@ class ConversationService:
         traces.append(trace)
         content = compiled.data.get("content") if compiled.ok else None
         if isinstance(content, str):
-            _, trace = self.tool_loop.execute(
+            _, trace = self.tool_executor.execute(
                 name="validate_pipeline_artifact",
                 stage="validate_pipeline_artifact",
                 context=tool_context,

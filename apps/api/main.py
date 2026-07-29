@@ -12,6 +12,12 @@ from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from dataagent.application.agent_runtime import AgentRuntime
+from dataagent.application.agent_sessions import (
+    ConversationStoreAgentSessionRepository,
+)
+from dataagent.application.agent_turns import WorkOrderRuntimeRootAgent
+from dataagent.application.control_tools import WorkOrderControlTools
+from dataagent.agents.loop import AgentLoop
 from dataagent.agents.requirement import GatewayRequirementPlanner
 from dataagent.agents.runtime import GatewayAgentPlanner
 from dataagent.local_stack import health_payload
@@ -143,19 +149,37 @@ def create_app(
         ),
         enable_pipeline_trials=gateway.configured,
     )
+    work_order_control_tools = WorkOrderControlTools(
+        app.state.agent_runtime
+    )
+    app.state.work_order_control_tools = work_order_control_tools
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
     elif app.state.agent_runtime.conversation_store is not None:
+        agent_loop = AgentLoop(
+            root_agent=WorkOrderRuntimeRootAgent(
+                runtime=app.state.agent_runtime,
+                planner=app.state.agent_runtime.agent_planner,
+                control_tools=work_order_control_tools,
+            ),
+            sessions=ConversationStoreAgentSessionRepository(
+                app.state.agent_runtime.conversation_store
+            ),
+        )
         app.state.conversation_service = ConversationService(
             store=app.state.agent_runtime.conversation_store,
             agent_runtime=app.state.agent_runtime,
             settings=settings,
+            agent_loop=agent_loop,
         )
     else:
         app.state.conversation_service = None
 
     def get_runtime() -> AgentRuntime:
         return app.state.agent_runtime
+
+    def get_work_order_control_tools() -> WorkOrderControlTools:
+        return app.state.work_order_control_tools
 
     def get_conversation_service() -> ConversationService:
         service = app.state.conversation_service
@@ -406,13 +430,26 @@ def create_app(
         request: ResumeAgentRequest,
         owner_id: str = Depends(require_owner),
         agent_runtime: AgentRuntime = Depends(get_runtime),
+        control_tools: WorkOrderControlTools = Depends(
+            get_work_order_control_tools
+        ),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.resume(
+            agent_runtime.state(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
-                decision=request.decision,
             )
+            result, _ = control_tools.execute(
+                name="resume_work_order",
+                owner_id=owner_id,
+                raw_input={
+                    "work_order_id": work_order_id,
+                    "decision": request.decision,
+                },
+            )
+            if not result.ok:
+                raise ValueError(result.summary)
+            return result.data
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:
@@ -465,13 +502,26 @@ def create_app(
         idempotency_key: Annotated[str, Header(min_length=1, max_length=128)],
         owner_id: str = Depends(require_owner),
         agent_runtime: AgentRuntime = Depends(get_runtime),
+        control_tools: WorkOrderControlTools = Depends(
+            get_work_order_control_tools
+        ),
     ) -> dict[str, Any]:
         try:
-            return agent_runtime.submit_dataset_run(
+            agent_runtime.state(
                 work_order_id=work_order_id,
                 owner_id=owner_id,
-                idempotency_key=idempotency_key,
             )
+            result, _ = control_tools.execute(
+                name="submit_dataset_run",
+                owner_id=owner_id,
+                raw_input={
+                    "work_order_id": work_order_id,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            if not result.ok:
+                raise ValueError(result.summary)
+            return result.data
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:

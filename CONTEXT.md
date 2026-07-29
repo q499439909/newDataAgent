@@ -27,6 +27,10 @@ _Avoid_: DatasetVersion, logical version
 A structured model-callable control-plane capability that lets the model propose or query workflow actions through a typed contract.
 _Avoid_: Operator, data processing operator, shell tool
 
+**ControlToolExecutor**:
+The single governed execution module for Control Tools. It applies registry lookup, input Schema validation, confirmation policy, redacted trace generation, and structured error results for both Agent and UI adapters.
+_Avoid_: AgentRunner, GovernedToolLoop, direct WorkOrder mutation from UI
+
 **Planning Tool**:
 A structured model-callable tool used to retrieve, inspect, compare, or draft planning inputs without mutating workflow state.
 _Avoid_: Operator
@@ -78,6 +82,10 @@ _Avoid_: LangGraph node, Conversation intent classifier, Dataset Run loop
 **AgentSession**:
 The durable association between message history, an owner, and the active WorkOrder used by AgentLoop.
 _Avoid_: WorkOrder, LangGraph checkpoint
+
+**Conversation Adapter**:
+The temporary compatibility implementation that preserves existing conversation HTTP and streaming response shapes while delegating messages to AgentLoop.
+_Avoid_: Conversation planner, intent router, root Agent
 
 **WorkOrder Liveness**:
 The structural classification of a WorkOrder as runnable, waiting for an explicit user decision, or terminal. A runnable WorkOrder must have a required next action.

@@ -1,7 +1,7 @@
 # DataAgent Requirement Agent 顶层化与对话执行架构重构方案
 
 > 日期：2026-07-29
-> 状态：阶段 0–4 已实施；阶段 5 及以后尚未实施
+> 状态：阶段 0–6 已实施；阶段 7 尚未实施
 > 范围：对话入口、Agent 推理循环、LangGraph 编排、WorkOrder 运行时和数据 Run 执行之间的职责重构
 
 ## 1. 结论
@@ -39,7 +39,9 @@ Web
 - 阶段 2 已完成：现有 Requirement Agent 已成为 LangGraph 根 Agent；原需求生成子图改为 `requirement_planning_agent`；原 Main Agent 仅保留 checkpoint 兼容 Adapter。
 - 阶段 3 已完成：`AgentDecisionLoop` 已演进为支持同步/异步、流式事件、消息、取消和明确停止原因的 `AgentRunner`；旧名称仅作兼容 Adapter。
 - 阶段 4 已完成：实现 `AgentLoop.handle_message()`、AgentSession Interface、内存与 ConversationStore Adapter、显式斜杠命令、自动 continuation、同 session 串行化、活动 Turn 取消和 system observation 入口。
-- 阶段 5–7 未实施：Control Tool 统一、ConversationService/Web 切换和旧代码删除仍在后续范围。
+- 阶段 5 已完成：`ControlToolExecutor` 成为唯一受治理工具执行 Module；`GovernedToolLoop` 仅保留兼容别名；根 Agent 与 Web 的 WorkOrder 恢复和 Run 提交使用同一组 typed Control Tools。
+- 阶段 6 已完成：默认 API 构造已将 ConversationService 配置成 AgentLoop Adapter；现有 Web/TUI 继续使用兼容 endpoint 和 SSE/NDJSON 格式，但普通自然语言不再进入 ConversationIntent gateway。
+- 阶段 7 未实施：旧 ConversationIntent、Conversation policy、旧 `_apply()` 和兼容字段仍待删除。
 
 ---
 

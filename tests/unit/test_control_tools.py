@@ -5,6 +5,7 @@ from dataagent.domain.operators import OperatorStatus
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 from dataagent.operators import OperatorRegistry, build_operator_library
 from dataagent.tools import (
+    ControlToolExecutor,
     GovernedToolLoop,
     ToolContext,
     ToolRegistry,
@@ -366,3 +367,7 @@ def test_pipeline_artifact_validation_accepts_provider_available_operator() -> N
     assert result.data["production_eligible"] is True
     assert result.data["operators"][0]["status"] == "PROVIDER_AVAILABLE"
     assert result.data["blockers"] == []
+
+
+def test_governed_tool_loop_is_a_compatibility_alias() -> None:
+    assert GovernedToolLoop is ControlToolExecutor
