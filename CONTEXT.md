@@ -67,6 +67,18 @@ _Avoid_: Requirement parser, Main Agent, Conversation intent router
 A structured Requirement Agent decision to respond, delegate through LangGraph, call a Control Tool, ask the user, or finish.
 _Avoid_: Conversation keyword, free-form route name
 
+**AgentRunner**:
+The bounded execution module for one model, tool, and Observation cycle. It owns iteration budgets, streaming events, cooperative cancellation, and explicit stop reasons, but not sessions or WorkOrder persistence.
+_Avoid_: AgentLoop, Dataset Run, Worker
+
+**AgentLoop**:
+The session-level module that accepts user or system messages, routes only explicit slash commands, serializes turns, drives the root Requirement Agent, schedules continuations, and records the final Turn result.
+_Avoid_: LangGraph node, Conversation intent classifier, Dataset Run loop
+
+**AgentSession**:
+The durable association between message history, an owner, and the active WorkOrder used by AgentLoop.
+_Avoid_: WorkOrder, LangGraph checkpoint
+
 **WorkOrder Liveness**:
 The structural classification of a WorkOrder as runnable, waiting for an explicit user decision, or terminal. A runnable WorkOrder must have a required next action.
 _Avoid_: Continue keyword, chat intent
