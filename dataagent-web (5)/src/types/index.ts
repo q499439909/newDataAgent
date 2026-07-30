@@ -219,6 +219,30 @@ export interface AgentObservation {
   [key: string]: any;
 }
 
+export interface OperatorPlan {
+  id: string;
+  version: number;
+  confirmed: boolean;
+  estimated_cost: number;
+  risk_reasons: string[];
+  constraint_coverage: Record<string, any>[];
+  operators: Array<{
+    operator_version_id: string;
+    display_name: string;
+    description: string;
+    category: string;
+    capability_tags: string[];
+    parameter_schema: Record<string, any>;
+    input_schema: string;
+    output_schema: string;
+    limitations: string[];
+    provider_id: string;
+    runtime_backend: string;
+    cost_tier: string;
+    executable: boolean;
+  }>;
+}
+
 export interface RetrievalPlan {
   id: string;
   sources: string[];
@@ -267,6 +291,7 @@ export interface WorkOrder {
   currentStage: 'spec' | 'retrieval' | 'processing' | 'sampling' | 'evaluating' | 'completed' | 'paused';
   currentTaskSpec?: TaskSpec;
   retrievalPlan?: RetrievalPlan;
+  operatorPlan?: OperatorPlan;
   candidatePool?: CandidatePool;
   selectedPipelineId?: string;
   candidatePipelines?: PipelineVersion[];
@@ -295,7 +320,7 @@ export interface WorkOrder {
   } | null;
 }
 
-export type WorkOrderChatArtifactKind = 'task_spec' | 'pipeline' | 'quality' | 'run' | 'files';
+export type WorkOrderChatArtifactKind = 'task_spec' | 'operator_plan' | 'pipeline' | 'quality' | 'run' | 'files';
 
 export interface WorkOrderChatMessage {
   id: string;

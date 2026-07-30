@@ -9,7 +9,6 @@ from dataagent.domain.operators import (
     RuntimeBackend,
 )
 from dataagent.graph import build_work_order_graph
-from dataagent.agents.requirement.clarification import recommended_clarification_patch
 from dataagent.operators import (
     OperatorLibrary,
     OperatorRegistry,
@@ -148,9 +147,14 @@ def test_resolution_can_return_work_order_to_task_spec_revision() -> None:
         Command(
             resume={
                 "action": "edit_spec",
-                "task_spec_patch": recommended_clarification_patch(
-                    tuple(draft["task_spec"]["ambiguities"])
-                ),
+                "task_spec_patch": {
+                    "hard_constraints": {"preserve_source": True},
+                    "preferences": {
+                        "mixed_policy": "review",
+                        "unknown_policy": "review",
+                        "output_layout": "versioned_class_directories",
+                    },
+                },
             }
         ),
         config,

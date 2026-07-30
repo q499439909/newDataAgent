@@ -12,6 +12,8 @@ from dataagent.application.work_order_runtime import WorkOrderRuntime
 from dataagent.domain.specs import ConstraintContract, RequirementDraft
 from dataagent.domain.specs import (
     RequirementClauseTrace,
+    build_requirement_source_clauses,
+    hydrate_requirement_draft_sources,
     validate_requirement_draft_grounding,
 )
 
@@ -27,7 +29,7 @@ class RecordingRequirementPlanner(RequirementPlanner):
 
 
 class StubPlanningGateway:
-    def plan_requirement_draft(self, *, requirement, data_sources):
+    def plan_requirement_draft(self, *, requirement, messages, data_sources):
         return {
             "objective": requirement,
             "constraints": [
@@ -177,6 +179,64 @@ def test_grounding_accepts_a_definition_linked_to_an_existing_constraint() -> No
 
     assert observation.ok is True
     assert observation.violations == ()
+
+
+def test_grounding_hydrates_model_text_from_stable_clause_references() -> None:
+    requirement = (
+        "Keep records with a score of at least 80; "
+        "When scores tie, keep any one record."
+    )
+    clauses = build_requirement_source_clauses(requirement)
+    draft = RequirementDraft(
+        objective="Keep high-scoring records",
+        constraints=(
+            ConstraintContract(
+                id="constraint_score",
+                source_text="score >= 80",
+                source_clause_id=clauses[0]["id"],
+                scope="asset",
+                field="record.score",
+                operator="gte",
+                value=80,
+                unit="score",
+                required_evidence_type="record_score",
+            ),
+        ),
+        clause_traces=(
+            RequirementClauseTrace(
+                source_text="score >= 80",
+                source_clause_id=clauses[0]["id"],
+                role="constraint",
+                constraint_refs=("constraint_score",),
+            ),
+            RequirementClauseTrace(
+                source_text="keep one arbitrary record",
+                source_clause_id=clauses[1]["id"],
+                role="preference",
+            ),
+        ),
+    )
+
+    hydrated = hydrate_requirement_draft_sources(draft, clauses)
+    observation = validate_requirement_draft_grounding(requirement, hydrated)
+
+    assert observation.ok is True
+    assert hydrated.constraints[0].source_text == clauses[0]["text"]
+    assert hydrated.clause_traces[1].source_text == clauses[1]["text"]
+
+
+def test_source_clauses_split_numbered_answers_without_newlines() -> None:
+    clauses = build_requirement_source_clauses(
+        "1. Choose an output layout. Answer: two folders"
+        "2. Choose a content format. Answer: original files"
+        "3. Describe the source. Answer: one flat directory"
+    )
+
+    assert [item["text"] for item in clauses] == [
+        "Choose an output layout. Answer: two folders",
+        "Choose a content format. Answer: original files",
+        "Describe the source. Answer: one flat directory",
+    ]
 
 
 def test_requirement_agent_repairs_a_draft_from_grounding_observation() -> None:

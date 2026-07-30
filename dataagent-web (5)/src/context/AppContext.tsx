@@ -5,8 +5,10 @@ import { INITIAL_PIPELINES, MOCK_NODE_PREVIEWS } from '../data/initialPipelines'
 import { INITIAL_WORK_ORDERS } from '../data/initialWorkOrders';
 import {
   createConversation,
+  getAgentContinuation,
+  getAgentState,
   listBackendOperators,
-  resumeAgent,
+  resumeAgentAsync,
   sendConversationMessage,
   submitDatasetRun,
   StreamEvent,
@@ -42,6 +44,7 @@ interface AppContextType {
   pipelines: PipelineVersion[];
   workOrders: WorkOrder[];
   activeWorkOrder: WorkOrder | null;
+  pendingWorkOrderActions: Record<string, string>;
   setActiveWorkOrder: (wo: WorkOrder | null) => void;
   activeWorkOrderChatMessages: WorkOrderChatMessage[];
   setActiveWorkOrderChatMessages: (messages: WorkOrderChatMessage[]) => void;
@@ -54,6 +57,7 @@ interface AppContextType {
     targetWorkOrder?: WorkOrder,
   ) => Promise<{ reply: string; workOrder: WorkOrder | null }>;
   approveCurrentTaskSpec: () => Promise<void>;
+  approveCurrentOperatorPlan: () => Promise<void>;
   approveCurrentPipeline: (pipelineId?: string) => Promise<void>;
   submitCurrentDatasetRun: () => Promise<void>;
   renameWorkOrder: (woId: string, newName: string) => void;
@@ -101,6 +105,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [pipelines, setPipelines] = useState<PipelineVersion[]>(INITIAL_PIPELINES);
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>(INITIAL_WORK_ORDERS);
   const [activeWorkOrder, setActiveWorkOrder] = useState<WorkOrder | null>(INITIAL_WORK_ORDERS[0]);
+  const [pendingWorkOrderActions, setPendingWorkOrderActions] = useState<Record<string, string>>({});
   const [chatMessagesByWorkOrder, setChatMessagesByWorkOrder] = useState<Record<string, WorkOrderChatMessage[]>>({});
   const [hasLoadedWorkspaceState, setHasLoadedWorkspaceState] = useState(false);
 
@@ -233,10 +238,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const upsertWorkOrder = (next: WorkOrder) => {
     setWorkOrders(prev => {
-      const exists = prev.some(wo => wo.id === next.id);
-      return exists ? prev.map(wo => (wo.id === next.id ? next : wo)) : [next, ...prev];
+      const matches = (workOrder: WorkOrder) => (
+        workOrder.id === next.id
+        || Boolean(
+          workOrder.conversationId
+          && next.conversationId
+          && workOrder.conversationId === next.conversationId
+        )
+      );
+      const exists = prev.some(matches);
+      return exists ? prev.map(wo => (matches(wo) ? next : wo)) : [next, ...prev];
     });
-    setActiveWorkOrder(next);
+    setActiveWorkOrder(previous => {
+      if (!previous) return previous;
+      const isSameWorkOrder = previous.id === next.id;
+      const isSameConversation = Boolean(
+        previous.conversationId
+        && next.conversationId
+        && previous.conversationId === next.conversationId
+      );
+      return isSameWorkOrder || isSameConversation ? next : previous;
+    });
   };
 
   const activeWorkOrderChatMessages = activeWorkOrder
@@ -522,15 +544,94 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const approveCurrentTaskSpec = async () => {
-    if (!activeWorkOrder?.agentTurn) {
+    if (
+      !activeWorkOrder?.agentTurn
+      || activeWorkOrder.waitingFor !== 'task_spec_confirmation'
+    ) {
       showToast('当前没有可审批的后端 TaskSpec。');
       return;
     }
-    const turn = await resumeAgent(currentUser.id, activeWorkOrder.id, { approved: true });
-    const updated = mapAgentTurnToWorkOrder(turn, activeWorkOrder);
-    upsertWorkOrder(updated);
-    showToast('TaskSpec 已提交给主 Agent 继续规划。');
-    addAuditLog('APPROVE_TASK_SPEC', 'WorkOrder', updated.id, `审批人: ${currentUser.name}`);
+    const target = activeWorkOrder;
+    if (pendingWorkOrderActions[target.id]) return;
+    setPendingWorkOrderActions(previous => ({
+      ...previous,
+      [target.id]: 'task_spec_confirmation',
+    }));
+    try {
+      let continuation = await resumeAgentAsync(
+        currentUser.id,
+        target.id,
+        {
+          approved: true,
+          expected_interrupt_kind: 'task_spec_confirmation',
+        },
+      );
+      let updated = mapAgentTurnToWorkOrder(continuation.turn, target);
+      upsertWorkOrder(updated);
+      showToast('TaskSpec 已确认，后台正在检索算子并检查能力覆盖。');
+      while (continuation.status === 'queued' || continuation.status === 'running') {
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        continuation = await getAgentContinuation(
+          currentUser.id,
+          continuation.turn_id,
+        );
+        updated = mapAgentTurnToWorkOrder(continuation.turn, updated);
+        upsertWorkOrder(updated);
+      }
+      if (continuation.status === 'failed') {
+        throw new Error(continuation.error || 'TaskSpec 后台 Turn 失败');
+      }
+      addAuditLog('APPROVE_TASK_SPEC', 'WorkOrder', updated.id, `审批人: ${currentUser.name}`);
+    } catch (error) {
+      const authoritative = await getAgentState(currentUser.id, target.id);
+      upsertWorkOrder(mapAgentTurnToWorkOrder(authoritative, target));
+      showToast(
+        `TaskSpec 确认失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setPendingWorkOrderActions(previous => {
+        const next = { ...previous };
+        delete next[target.id];
+        return next;
+      });
+    }
+  };
+
+  const approveCurrentOperatorPlan = async () => {
+    if (!activeWorkOrder?.agentTurn || activeWorkOrder.waitingFor !== 'operator_plan_confirmation') {
+      showToast('当前没有待确认的算子能力方案。');
+      return;
+    }
+    try {
+      let continuation = await resumeAgentAsync(
+        currentUser.id,
+        activeWorkOrder.id,
+        {
+          approved: true,
+          expected_interrupt_kind: 'operator_plan_confirmation',
+        },
+      );
+      let updated = mapAgentTurnToWorkOrder(continuation.turn, activeWorkOrder);
+      upsertWorkOrder(updated);
+      showToast('算子能力方案已确认，Processing 已转入后台。');
+      while (continuation.status === 'queued' || continuation.status === 'running') {
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        continuation = await getAgentContinuation(
+          currentUser.id,
+          continuation.turn_id,
+        );
+        updated = mapAgentTurnToWorkOrder(continuation.turn, updated);
+        upsertWorkOrder(updated);
+      }
+      if (continuation.status === 'failed') {
+        throw new Error(continuation.error || 'Processing 后台 Turn 失败');
+      }
+      addAuditLog('APPROVE_OPERATOR_PLAN', 'WorkOrder', updated.id, `审批人: ${currentUser.name}`);
+    } catch (error) {
+      const authoritative = await getAgentState(currentUser.id, activeWorkOrder.id);
+      upsertWorkOrder(mapAgentTurnToWorkOrder(authoritative, activeWorkOrder));
+      throw error;
+    }
   };
 
   const approveCurrentPipeline = async (pipelineId?: string) => {
@@ -539,14 +640,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
     const selectedId = pipelineId || activeWorkOrder.selectedPipelineId || activeWorkOrder.candidatePipelines?.[0]?.id;
-    const turn = await resumeAgent(currentUser.id, activeWorkOrder.id, {
-      approved: true,
-      pipeline_id: selectedId,
-    });
-    const updated = mapAgentTurnToWorkOrder(turn, activeWorkOrder);
-    upsertWorkOrder(updated);
-    showToast('Pipeline 方案已批准，主 Agent 将继续准备数据策略。');
-    addAuditLog('APPROVE_PIPELINE', 'WorkOrder', updated.id, `Pipeline: ${selectedId || '-'}`);
+    try {
+      let continuation = await resumeAgentAsync(
+        currentUser.id,
+        activeWorkOrder.id,
+        {
+          approved: true,
+          pipeline_id: selectedId,
+          expected_interrupt_kind: 'pipeline_approval',
+        },
+      );
+      let updated = mapAgentTurnToWorkOrder(continuation.turn, activeWorkOrder);
+      upsertWorkOrder(updated);
+      showToast('Pipeline 已批准，正在后台试运行选中的方案。');
+      while (continuation.status === 'queued' || continuation.status === 'running') {
+        await new Promise(resolve => window.setTimeout(resolve, 1000));
+        continuation = await getAgentContinuation(
+          currentUser.id,
+          continuation.turn_id,
+        );
+        updated = mapAgentTurnToWorkOrder(continuation.turn, updated);
+        upsertWorkOrder(updated);
+      }
+      if (continuation.status === 'failed') {
+        throw new Error(continuation.error || 'Pipeline 试运行失败');
+      }
+      addAuditLog('APPROVE_PIPELINE', 'WorkOrder', updated.id, `Pipeline: ${selectedId || '-'}`);
+    } catch (error) {
+      const authoritative = await getAgentState(currentUser.id, activeWorkOrder.id);
+      upsertWorkOrder(mapAgentTurnToWorkOrder(authoritative, activeWorkOrder));
+      throw error;
+    }
   };
 
   const submitCurrentDatasetRun = async () => {
@@ -663,6 +787,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         pipelines,
         workOrders,
         activeWorkOrder,
+        pendingWorkOrderActions,
         setActiveWorkOrder,
         activeWorkOrderChatMessages,
         setActiveWorkOrderChatMessages,
@@ -671,6 +796,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createNewWorkOrder,
         sendMainAgentMessage,
         approveCurrentTaskSpec,
+        approveCurrentOperatorPlan,
         approveCurrentPipeline,
         submitCurrentDatasetRun,
         renameWorkOrder,

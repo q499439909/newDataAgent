@@ -8,13 +8,11 @@ from ..agents.shared import WorkOrderGraphState, append_trace
 from ..domain.common import new_id
 from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.specs import TaskSpecPatch, TaskSpecVersion
-from ..domain.plans import CapabilityCoverage, CapabilityCoverageStatus
-from ..operators.planning import (
-    decompose_task_capabilities,
-    exclude_task_capabilities,
-    infer_output_actions,
+from ..domain.plans import (
+    CapabilityCoverage,
+    CapabilityCoverageStatus,
+    OperatorPlanVersion,
 )
-from ..agents.requirement.clarification import infer_task_ambiguities
 
 
 def _merge_unique(current: tuple[str, ...], additions: Any) -> tuple[str, ...]:
@@ -57,40 +55,6 @@ def revise_task_spec_version(
     exclusion_requirements = _merge_unique(
         spec.exclusion_requirements, patch.get("exclusion_requirements")
     )
-    disabled = {
-        str(item)
-        for item in hard_constraints.get("disabled_capabilities", [])
-        if str(item).strip()
-    }
-    uses_legacy_requirement_parser = (
-        spec.planning_origin == "legacy_compatibility"
-    )
-    if spec.constraints and not uses_legacy_requirement_parser:
-        # A structured TaskSpec describes what must be true, not how to
-        # implement it. Retrieval derives operator capabilities from those
-        # constraints after confirmation; re-running the legacy keyword
-        # decomposer here would silently replace the model-planned task.
-        capabilities = ()
-        output_actions = spec.output_actions
-    else:
-        planning_text = " ".join(
-            [objective, *semantic_requirements, *exclusion_requirements]
-        )
-        capabilities = decompose_task_capabilities(
-            planning_text,
-            has_semantic_selection=bool(
-                semantic_requirements or exclusion_requirements
-            ),
-        )
-        capabilities = exclude_task_capabilities(capabilities, disabled)
-        output_actions = infer_output_actions(capabilities)
-    ambiguities = infer_task_ambiguities(
-        capabilities,
-        hard_constraints=hard_constraints,
-        semantic_requirements=semantic_requirements,
-        exclusion_requirements=exclusion_requirements,
-        preferences=preferences,
-    )
     return spec.model_copy(
         update={
             "id": new_id("spec"),
@@ -98,9 +62,7 @@ def revise_task_spec_version(
             "parent_version_id": spec.id,
             "created_by": actor,
             "change_reason": (
-                "legacy requirement planning revised from conversation"
-                if uses_legacy_requirement_parser
-                else "TaskSpec revised from conversation"
+                "TaskSpec revised from conversation"
             ),
             "objective": objective,
             "hard_constraints": hard_constraints,
@@ -108,9 +70,6 @@ def revise_task_spec_version(
             "exclusion_requirements": exclusion_requirements,
             "preferences": preferences,
             "classification": classification,
-            "capability_requirements": capabilities,
-            "output_actions": output_actions,
-            "ambiguities": ambiguities,
             "confirmed": False,
         }
     )
@@ -150,7 +109,7 @@ def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
             "trace": append_trace(state, "hitl:task_spec_rejected"),
         }
     spec = TaskSpecVersion.model_validate(state["task_spec"])
-    if spec.ambiguities:
+    if spec.gaps:
         return {
             "task_spec_confirmed": False,
             "task_spec_approval": decision if isinstance(decision, dict) else {},
@@ -172,6 +131,75 @@ def confirm_task_spec(state: WorkOrderGraphState) -> dict[str, Any]:
         "task_spec_approval": decision if isinstance(decision, dict) else {"approved": True},
         "next_action": "run_retrieval_agent",
         "trace": append_trace(state, "hitl:task_spec_approved"),
+    }
+
+
+def confirm_operator_plan(state: WorkOrderGraphState) -> dict[str, Any]:
+    if state.get("operator_plan_confirmed"):
+        return {
+            "trace": append_trace(
+                state, "hitl:operator_plan_already_confirmed"
+            )
+        }
+    plan = OperatorPlanVersion.model_validate(state["operator_plan"])
+    decision = interrupt(
+        {
+            "kind": "operator_plan_confirmation",
+            "work_order_id": state["work_order_id"],
+            "operator_plan": plan.model_dump(mode="json"),
+            "allowed_actions": [
+                "approve",
+                "reretrieve",
+                "reject",
+                "terminate",
+            ],
+        }
+    )
+    if isinstance(decision, dict) and decision.get("action") == "reretrieve":
+        return {
+            "operator_plan_confirmed": False,
+            "operator_plan_approval": decision,
+            "retrieval_plan": {},
+            "operator_plan": {},
+            "candidate_sufficient": False,
+            "operator_candidates": [],
+            "capability_coverage": [],
+            "next_action": "run_retrieval_agent",
+            "trace": append_trace(
+                state, "hitl:operator_plan_reretrieval_requested"
+            ),
+        }
+    approved = (
+        bool(decision.get("approved"))
+        if isinstance(decision, dict)
+        else bool(decision)
+    )
+    if not approved:
+        return {
+            "operator_plan_approval": (
+                decision if isinstance(decision, dict) else {}
+            ),
+            "terminated": True,
+            "next_action": "terminated",
+            "trace": append_trace(state, "hitl:operator_plan_rejected"),
+        }
+    confirmed = plan.model_copy(
+        update={
+            "id": new_id("operator_plan"),
+            "version": plan.version + 1,
+            "parent_version_id": plan.id,
+            "change_reason": "OperatorPlan confirmed by user",
+            "confirmed": True,
+        }
+    )
+    return {
+        "operator_plan": confirmed.model_dump(mode="json"),
+        "operator_plan_confirmed": True,
+        "operator_plan_approval": (
+            decision if isinstance(decision, dict) else {"approved": True}
+        ),
+        "next_action": "generate_pipeline_candidates",
+        "trace": append_trace(state, "hitl:operator_plan_approved"),
     }
 
 
@@ -234,8 +262,43 @@ def approve_pipeline(state: WorkOrderGraphState) -> dict[str, Any]:
         "approved_pipeline": approved_pipeline.model_dump(mode="json"),
         "selected_pipeline_id": approved_pipeline.id,
         "pipeline_approval": decision if isinstance(decision, dict) else {"approved": True},
-        "next_action": "run_strategy_agent",
+        "selected_pipeline_trial": {},
+        "next_action": "trial_selected_pipeline",
         "trace": append_trace(state, "hitl:pipeline_approved"),
+    }
+
+
+def resolve_pipeline_trial(state: WorkOrderGraphState) -> dict[str, Any]:
+    decision = interrupt(
+        {
+            "kind": "pipeline_trial_resolution",
+            "work_order_id": state["work_order_id"],
+            "pipeline_trial": state.get("selected_pipeline_trial") or {},
+            "allowed_actions": ["recompile", "terminate"],
+        }
+    )
+    action = (
+        str(decision.get("action", ""))
+        if isinstance(decision, dict)
+        else ""
+    )
+    if action == "recompile":
+        return {
+            "pipeline_variants": [],
+            "representative_pipelines": [],
+            "approved_pipeline": {},
+            "selected_pipeline_id": "",
+            "pipeline_approval": {},
+            "selected_pipeline_trial": {},
+            "next_action": "generate_pipeline_candidates",
+            "trace": append_trace(
+                state, "hitl:pipeline_trial_recompile_requested"
+            ),
+        }
+    return {
+        "terminated": True,
+        "next_action": "terminated",
+        "trace": append_trace(state, "hitl:pipeline_trial_terminated"),
     }
 
 
@@ -249,7 +312,7 @@ def resolve_capability_gaps(state: WorkOrderGraphState) -> dict[str, Any]:
     if not gaps:
         return {
             "candidate_sufficient": True,
-            "next_action": "generate_pipeline_candidates",
+            "next_action": "confirm_operator_plan",
             "trace": append_trace(state, "hitl:capability_resolution_not_needed"),
         }
     decision = interrupt(

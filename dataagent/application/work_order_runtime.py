@@ -4,6 +4,7 @@ import sqlite3
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock, RLock
 from typing import Any, Callable
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -17,6 +18,7 @@ from ..domain.pipelines import PipelineStrategy, PipelineVersion
 from ..domain.runs import DatasetVersion, RunSnapshot
 from ..domain.specs import TaskSpecVersion
 from ..agents.requirement import RequirementPlanner, build_task_plan
+from ..agents.retrieval import hydrate_operator_plan
 from ..agents.runner import AgentPlanner
 from ..evaluation import QualityEvaluator
 from ..execution import NodePreviewBuilder
@@ -80,6 +82,8 @@ class WorkOrderRuntime:
     ) -> None:
         self.home = home.resolve() if home is not None else None
         self._threads: dict[str, AgentThread] = {}
+        self._resume_locks: dict[str, RLock] = {}
+        self._resume_locks_guard = Lock()
         self._checkpoint_connection: sqlite3.Connection | None = None
         self.thread_store: AgentThreadStore | None = None
         self.version_store: DomainVersionStore | None = None
@@ -187,10 +191,21 @@ class WorkOrderRuntime:
             "work_order_id": work_order_id,
             "owner_id": owner_id,
             "requirement": requirement,
+            "requirement_messages": [
+                {"role": "user", "content": requirement}
+            ],
             "data_sources": data_sources,
             "trace": [],
         }
-        result = self.graph.invoke(state, self._config(record))
+        try:
+            result = self.graph.invoke(state, self._config(record))
+        except Exception:
+            self._forget(record)
+            try:
+                self.checkpointer.delete_thread(record.thread_id)
+            except Exception:
+                pass
+            raise
         self._capture_versions(record, result)
         return self._public_result(record, result)
 
@@ -201,10 +216,51 @@ class WorkOrderRuntime:
         owner_id: str,
         decision: dict[str, Any],
     ) -> dict[str, Any]:
+        with self._resume_locks_guard:
+            lock = self._resume_locks.setdefault(work_order_id, RLock())
+        with lock:
+            return self._resume_locked(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision=decision,
+            )
+
+    def _resume_locked(
+        self,
+        *,
+        work_order_id: str,
+        owner_id: str,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
         record = self._get_authorized(work_order_id, owner_id)
         snapshot = self.graph.get_state(self._config(record))
+        expected_kind = decision.get("expected_interrupt_kind")
+        expected_id = decision.get("expected_interrupt_id")
+        if expected_kind or expected_id:
+            if not snapshot.interrupts:
+                raise ValueError(
+                    "The expected user boundary is no longer active"
+                )
+            active_interrupt = snapshot.interrupts[0]
+            active_value = getattr(active_interrupt, "value", {}) or {}
+            active_kind = active_value.get("kind")
+            active_id = getattr(active_interrupt, "id", None)
+            if expected_kind and active_kind != expected_kind:
+                raise ValueError(
+                    "Stale approval boundary: expected "
+                    f"{expected_kind}, active boundary is {active_kind}"
+                )
+            if expected_id and active_id != expected_id:
+                raise ValueError(
+                    "Stale approval boundary: interrupt id no longer matches"
+                )
+        graph_decision = {
+            key: value
+            for key, value in decision.items()
+            if key not in {"expected_interrupt_kind", "expected_interrupt_id"}
+        }
         if (
-            decision.get("approved")
+            graph_decision.get("approved")
             and snapshot.interrupts
             and getattr(snapshot.interrupts[0], "value", {}).get("kind")
             == "pipeline_approval"
@@ -213,7 +269,7 @@ class WorkOrderRuntime:
                 PipelineVersion.model_validate(item)
                 for item in snapshot.values.get("representative_pipelines", [])
             ]
-            selected_id = decision.get("pipeline_id")
+            selected_id = graph_decision.get("pipeline_id")
             selected = next(
                 (
                     item
@@ -234,7 +290,10 @@ class WorkOrderRuntime:
                     "Pipeline cannot be approved for execution: "
                     + "; ".join(eligibility["violations"])
                 )
-        result = self.graph.invoke(Command(resume=decision), self._config(record))
+        result = self.graph.invoke(
+            Command(resume=graph_decision),
+            self._config(record),
+        )
         self._capture_versions(record, result)
         return self._apply_run_control_decision(
             record=record,
@@ -263,6 +322,43 @@ class WorkOrderRuntime:
             result = migrate_work_order_state(snapshot.values)
             result["__interrupt__"] = snapshot.interrupts
             return self._public_result(record, result)
+        snapshot_state = migrate_work_order_state(snapshot.values)
+        if (
+            snapshot_state.get("candidate_sufficient")
+            and not snapshot_state.get("operator_plan")
+        ):
+            operator_plan = hydrate_operator_plan(
+                snapshot_state,
+                operator_registry=self.operator_registry,
+            )
+            upgrade_observation = {
+                "agent": "retrieval",
+                "status": "operator_plan_hydrated",
+                "summary": (
+                    "Legacy shallow candidates were hydrated into a "
+                    "self-contained OperatorPlan without another model search."
+                ),
+            }
+            self.graph.update_state(
+                self._config(record),
+                {
+                    "operator_plan": operator_plan.model_dump(mode="json"),
+                    "operator_plan_confirmed": False,
+                    "operator_plan_approval": {},
+                    "requirement_agent_action": "confirm_operator_plan",
+                    "current_agent": "retrieval",
+                    "next_action": "confirm_operator_plan",
+                    "agent_observations": [
+                        *snapshot_state.get("agent_observations", ()),
+                        upgrade_observation,
+                    ],
+                    "trace": [
+                        *snapshot_state.get("trace", ()),
+                        "migration:operator_plan_hydrated",
+                    ],
+                },
+                as_node="retrieval_agent",
+            )
         continued = self.graph.invoke(None, self._config(record))
         result = migrate_work_order_state(continued or snapshot.values)
         self._capture_versions(record, result)
@@ -983,6 +1079,9 @@ class WorkOrderRuntime:
                 "candidate_sufficient": False,
                 "operator_candidates": [],
                 "capability_coverage": [],
+                "operator_plan": {},
+                "operator_plan_confirmed": False,
+                "operator_plan_approval": {},
                 "capability_resolution": {},
                 "capability_resolution_attempt": 0,
                 "runtime_backend_overrides": [],
@@ -991,6 +1090,7 @@ class WorkOrderRuntime:
                 "approved_pipeline": {},
                 "selected_pipeline_id": "",
                 "pipeline_approval": {},
+                "selected_pipeline_trial": {},
                 "sampling_plan": {},
                 "current_agent": "retrieval",
                 "next_action": "run_retrieval_agent",
@@ -1044,6 +1144,9 @@ class WorkOrderRuntime:
                 "candidate_sufficient": False,
                 "operator_candidates": [],
                 "capability_coverage": [],
+                "operator_plan": {},
+                "operator_plan_confirmed": False,
+                "operator_plan_approval": {},
                 "capability_resolution": {},
                 "capability_resolution_attempt": 0,
                 "runtime_backend_overrides": [],
@@ -1052,6 +1155,7 @@ class WorkOrderRuntime:
                 "approved_pipeline": {},
                 "selected_pipeline_id": "",
                 "pipeline_approval": {},
+                "selected_pipeline_trial": {},
                 "sampling_plan": {},
                 "current_agent": "requirement",
                 "next_action": "confirm_task_spec",
@@ -1221,6 +1325,7 @@ class WorkOrderRuntime:
                     "approved_pipeline": {},
                     "selected_pipeline_id": "",
                     "pipeline_approval": {},
+                    "selected_pipeline_trial": {},
                     "sampling_plan": {},
                     "next_action": "generate_pipeline_candidates",
                     "current_agent": "requirement",
@@ -1445,6 +1550,12 @@ class WorkOrderRuntime:
             owner_id=record.owner_id,
         )
 
+    def _forget(self, record: AgentThread) -> None:
+        if self.thread_store is None:
+            self._threads.pop(record.work_order_id, None)
+            return
+        self.thread_store.delete(record.work_order_id)
+
     def _lookup(self, work_order_id: str) -> AgentThread:
         if self.thread_store is None:
             try:
@@ -1460,6 +1571,7 @@ class WorkOrderRuntime:
         singletons = {
             "task_spec": "task_spec",
             "retrieval_plan": "retrieval_plan",
+            "operator_plan": "operator_plan",
             "sampling_plan": "sampling_plan",
         }
         for state_key, kind in singletons.items():

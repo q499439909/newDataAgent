@@ -11,6 +11,8 @@ from ...domain.plans import (
     CapabilityCandidateEvidence,
     CapabilityCoverage,
     CapabilityCoverageStatus,
+    OperatorPlanOperator,
+    OperatorPlanVersion,
     RetrievalPlanVersion,
 )
 from ...domain.specs import TaskSpecVersion
@@ -206,7 +208,8 @@ def _constraint_query(constraint) -> str:
         (
             constraint.field.replace(".", " ").replace("_", " "),
             constraint.required_evidence_type.replace("_", " "),
-            constraint.source_text,
+            constraint.unit.replace("_", " "),
+            constraint.scope,
         )
     )
 
@@ -254,6 +257,17 @@ def _constraint_driven_candidates(
             _constraint_query(constraint),
             allow_draft_candidates=allow_draft_candidates,
         )
+        supported_matches = tuple(
+            item
+            for item in matches
+            if _operator_supports_constraint(
+                registry.get(item.operator_version_id),
+                constraint,
+                spec,
+            )
+        )
+        if supported_matches:
+            matches = supported_matches
         if matches:
             preferred = matches[0]
             capability = _preferred_match_capability(preferred, registry)
@@ -263,44 +277,6 @@ def _constraint_driven_candidates(
                 )
                 for item in matches
                 if _preferred_match_capability(item, registry) == capability
-            )
-            if constraint.scope == "asset" and spec.semantic_requirements:
-                semantic_matches = matcher.match(
-                    " ".join(
-                        (
-                            _constraint_query(constraint),
-                            *spec.semantic_requirements,
-                        )
-                    ),
-                    required_capabilities=("visual_semantic_selection",),
-                    allow_draft_candidates=allow_draft_candidates,
-                )
-                matching = tuple(
-                    item.model_copy(
-                        update={
-                            "capability": "visual_semantic_selection",
-                            "intent": "visual_semantic_selection",
-                        }
-                    )
-                    for item in semantic_matches
-                    if item.capability == "visual_semantic_selection"
-                )
-                if matching:
-                    capability = "visual_semantic_selection"
-            candidates.extend(matching)
-        elif constraint.scope == "asset" and spec.semantic_requirements:
-            semantic_matches = matcher.match(
-                " ".join(spec.semantic_requirements),
-                required_capabilities=("visual_semantic_selection",),
-                allow_draft_candidates=allow_draft_candidates,
-            )
-            capability = "visual_semantic_selection"
-            matching = tuple(
-                item.model_copy(
-                    update={"capability": capability, "intent": capability}
-                )
-                for item in semantic_matches
-                if item.capability == capability
             )
             candidates.extend(matching)
         else:
@@ -369,19 +345,7 @@ def generate_retrieval_plan(
         }
     )
     derived_requirements: list[dict] | None = None
-    uses_legacy_requirement_parser = (
-        spec.planning_origin == "legacy_compatibility"
-    )
-    if (
-        operator_registry is not None
-        and spec.constraints
-        and not uses_legacy_requirement_parser
-    ):
-        # Confirmed constraints are the authoritative business contract.
-        # Legacy capability lists may still be present on older TaskSpec
-        # versions, but they must never suppress per-constraint retrieval.
-        # The explicit compatibility marker is retained only for callers that
-        # have not injected the new RequirementPlanner yet.
+    if operator_registry is not None and spec.constraints:
         recalled_candidates, derived_requirements = _constraint_driven_candidates(
             spec,
             HybridOperatorCatalogMatcher(operator_registry),
@@ -391,7 +355,7 @@ def generate_retrieval_plan(
     else:
         recalled_candidates = (
             HybridOperatorCatalogMatcher(operator_registry).match(
-                spec.objective,
+                "",
                 required_capabilities=spec.required_capabilities,
                 capability_requirements=spec.capability_requirements,
                 allow_draft_candidates=allow_draft_candidates,
@@ -461,8 +425,19 @@ def generate_retrieval_plan(
         ),
         capability_coverage=coverage,
     )
+    operator_plan = _build_operator_plan(
+        state=state,
+        spec=spec,
+        retrieval_plan=plan,
+        candidates=operator_candidates,
+        coverage=coverage,
+        operator_registry=operator_registry,
+    )
     return {
         "retrieval_plan": plan.model_dump(mode="json"),
+        "operator_plan": operator_plan.model_dump(mode="json"),
+        "operator_plan_confirmed": False,
+        "operator_plan_approval": {},
         "operator_candidates": [
             item.model_dump(mode="json") for item in operator_candidates
         ],
@@ -491,6 +466,95 @@ def _operator_catalog_payload(operator) -> dict:
         ],
         "limitations": list(operator.limitations),
     }
+
+
+def _build_operator_plan(
+    *,
+    state: WorkOrderGraphState,
+    spec: TaskSpecVersion,
+    retrieval_plan: RetrievalPlanVersion,
+    candidates,
+    coverage,
+    operator_registry: OperatorRegistry,
+) -> OperatorPlanVersion:
+    operators: list[OperatorPlanOperator] = []
+    risks: list[str] = []
+    for candidate in candidates:
+        operator = operator_registry.get(candidate.operator_version_id)
+        operators.append(
+            OperatorPlanOperator(
+                operator_version_id=operator.id,
+                display_name=operator.display_name,
+                description=operator.description,
+                category=operator.primary_category.value,
+                capability_tags=tuple(sorted(operator.capability_tags)),
+                parameter_schema=operator.parameter_schema,
+                input_schema=operator.input_schema,
+                output_schema=operator.output_schema,
+                limitations=operator.limitations,
+                provider_id=candidate.provider_id,
+                provider_operator_ref=candidate.provider_operator_ref,
+                runtime_backend=candidate.runtime_backend.value,
+                cost_tier=candidate.cost_tier,
+                executable=candidate.executable,
+            )
+        )
+        if candidate.runtime_backend == RuntimeBackend.REMOTE:
+            risks.append(
+                f"{candidate.operator_version_id} requires a remote runtime"
+            )
+        if candidate.cost_tier not in {"unknown", "free", "low"}:
+            risks.append(
+                f"{candidate.operator_version_id} has cost tier "
+                f"{candidate.cost_tier}"
+            )
+        if not candidate.executable:
+            risks.append(
+                f"{candidate.operator_version_id} is not currently executable"
+            )
+    previous = state.get("operator_plan")
+    return OperatorPlanVersion(
+        id=new_id("operator_plan"),
+        version=int(previous.get("version", 0)) + 1 if previous else 1,
+        parent_version_id=previous.get("id") if previous else None,
+        created_by=state["owner_id"],
+        change_reason="Retrieval completed capability coverage",
+        task_spec_version_id=spec.id,
+        retrieval_plan_version_id=retrieval_plan.id,
+        operators=tuple(operators),
+        constraint_coverage=tuple(coverage),
+        estimated_cost=retrieval_plan.estimated_cost,
+        risk_reasons=tuple(dict.fromkeys(risks)),
+    )
+
+
+def hydrate_operator_plan(
+    state: WorkOrderGraphState,
+    *,
+    operator_registry: OperatorRegistry,
+) -> OperatorPlanVersion:
+    """Upgrade durable shallow candidates without another model retrieval."""
+
+    spec = TaskSpecVersion.model_validate(state["task_spec"])
+    retrieval_plan = RetrievalPlanVersion.model_validate(
+        state["retrieval_plan"]
+    )
+    candidates = tuple(
+        OperatorCatalogMatch.model_validate(item)
+        for item in state.get("operator_candidates", ())
+    )
+    coverage = tuple(
+        CapabilityCoverage.model_validate(item)
+        for item in state.get("capability_coverage", ())
+    )
+    return _build_operator_plan(
+        state=state,
+        spec=spec,
+        retrieval_plan=retrieval_plan,
+        candidates=candidates,
+        coverage=coverage,
+        operator_registry=operator_registry,
+    )
 
 
 def _explicit_candidate(
@@ -593,6 +657,20 @@ def _operator_supports_constraint(operator, constraint, spec) -> bool:
             operator.capability_tags
         )
     )
+    deterministic_evidence = {
+        "file_metadata",
+        "image_metadata",
+        "perceptual_hash",
+        "cryptographic_hash",
+    }
+    if (
+        is_semantic_model
+        and constraint.scope == "asset"
+        and constraint.field.startswith("image.")
+        and constraint.required_evidence_type.lower()
+        not in deterministic_evidence
+    ):
+        return True
     return (
         constraint.unit.lower() in semantic_units
         and bool(spec.semantic_requirements)
@@ -732,6 +810,20 @@ def _generate_agent_retrieval_plan(
         }
         errors: list[dict[str, str]] = []
         known_constraints = {item.id: item for item in spec.constraints}
+        for operator_id in sorted(candidate_ids):
+            try:
+                operator_registry.get(operator_id)
+            except KeyError:
+                errors.append(
+                    {
+                        "constraint_id": "",
+                        "code": "UNKNOWN_CANDIDATE_OPERATOR",
+                        "message": (
+                            "candidate_operator_ids references an unknown "
+                            f"Operator version: {operator_id}"
+                        ),
+                    }
+                )
         for constraint in spec.constraints:
             if constraint.hardness != "hard":
                 continue
@@ -926,7 +1018,7 @@ def _generate_agent_retrieval_plan(
                 execute=search_pipeline_experience,
             ),
         ),
-        max_iterations=15,
+        max_iterations=8,
         finish_validator=validate_bundle,
     )
     result = loop.run(
@@ -1071,6 +1163,61 @@ def _generate_agent_retrieval_plan(
         ),
         capability_coverage=tuple(coverage),
     )
+    operator_plan_operators: list[OperatorPlanOperator] = []
+    risk_reasons: list[str] = []
+    for candidate in candidates_by_id.values():
+        operator = operator_registry.get(candidate.operator_version_id)
+        operator_plan_operators.append(
+            OperatorPlanOperator(
+                operator_version_id=operator.id,
+                display_name=operator.display_name,
+                description=operator.description,
+                category=operator.primary_category.value,
+                capability_tags=tuple(sorted(operator.capability_tags)),
+                parameter_schema=operator.parameter_schema,
+                input_schema=operator.input_schema,
+                output_schema=operator.output_schema,
+                limitations=operator.limitations,
+                provider_id=candidate.provider_id,
+                provider_operator_ref=candidate.provider_operator_ref,
+                runtime_backend=candidate.runtime_backend.value,
+                cost_tier=candidate.cost_tier,
+                executable=candidate.executable,
+            )
+        )
+        if candidate.runtime_backend == RuntimeBackend.REMOTE:
+            risk_reasons.append(
+                f"{candidate.operator_version_id} requires a remote runtime"
+            )
+        if candidate.cost_tier not in {"unknown", "free", "low"}:
+            risk_reasons.append(
+                f"{candidate.operator_version_id} has cost tier "
+                f"{candidate.cost_tier}"
+            )
+        if not candidate.executable:
+            risk_reasons.append(
+                f"{candidate.operator_version_id} is not currently executable"
+            )
+    previous_operator_plan = state.get("operator_plan")
+    operator_plan = OperatorPlanVersion(
+        id=new_id("operator_plan"),
+        version=(
+            int(previous_operator_plan.get("version", 0)) + 1
+            if previous_operator_plan
+            else 1
+        ),
+        parent_version_id=(
+            previous_operator_plan.get("id") if previous_operator_plan else None
+        ),
+        created_by=state["owner_id"],
+        change_reason="Retrieval completed capability coverage",
+        task_spec_version_id=spec.id,
+        retrieval_plan_version_id=plan.id,
+        operators=tuple(operator_plan_operators),
+        constraint_coverage=tuple(coverage),
+        estimated_cost=plan.estimated_cost,
+        risk_reasons=tuple(dict.fromkeys(risk_reasons)),
+    )
     observation = {
         "agent": "retrieval",
         "status": result.status,
@@ -1090,6 +1237,9 @@ def _generate_agent_retrieval_plan(
     )
     return {
         "retrieval_plan": plan.model_dump(mode="json"),
+        "operator_plan": operator_plan.model_dump(mode="json"),
+        "operator_plan_confirmed": False,
+        "operator_plan_approval": {},
         "operator_candidates": list(plan.operator_candidates),
         "capability_coverage": [
             item.model_dump(mode="json") for item in coverage
@@ -1097,7 +1247,7 @@ def _generate_agent_retrieval_plan(
         "candidate_sufficient": sufficient,
         "pipeline_experience_matches": experience_matches,
         "next_action": (
-            "generate_pipeline_candidates" if sufficient else "expand_retrieval"
+            "confirm_operator_plan" if sufficient else "expand_retrieval"
         ),
         "agent_observations": [
             *state.get("agent_observations", ()),
@@ -1112,7 +1262,7 @@ def assess_candidate_sufficiency(state: WorkOrderGraphState) -> dict:
     plan = RetrievalPlanVersion.model_validate(state["retrieval_plan"])
     return {
         "candidate_sufficient": plan.sufficient,
-        "next_action": "generate_pipeline_candidates"
+        "next_action": "confirm_operator_plan"
         if plan.sufficient
         else "expand_retrieval",
         "trace": append_trace(state, "retrieval:candidate_sufficiency_checked"),

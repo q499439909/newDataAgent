@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 
-export type ArtifactKind = 'task_spec' | 'pipeline' | 'quality' | 'run' | 'files';
+export type ArtifactKind = 'task_spec' | 'operator_plan' | 'pipeline' | 'quality' | 'run' | 'files';
 
 interface ArtifactPanelProps {
   activeKind: ArtifactKind;
@@ -29,6 +29,7 @@ interface ArtifactPanelProps {
 
 const artifactLabels: Record<ArtifactKind, string> = {
   task_spec: 'TaskSpec',
+  operator_plan: 'OperatorPlan',
   pipeline: 'Pipeline',
   quality: '边界/QC',
   run: '运行产物',
@@ -37,6 +38,7 @@ const artifactLabels: Record<ArtifactKind, string> = {
 
 const artifactIcons: Record<ArtifactKind, React.ElementType> = {
   task_spec: FileText,
+  operator_plan: ListChecks,
   pipeline: GitBranch,
   quality: ListChecks,
   run: Play,
@@ -52,6 +54,7 @@ function hasArtifact(workOrder: WorkOrder | null, kind: ArtifactKind): boolean {
   const state = rawState(workOrder);
   const latestRun = workOrder.latestRunObservation || state.latest_run_observation;
   if (kind === 'task_spec') return Boolean(workOrder.currentTaskSpec);
+  if (kind === 'operator_plan') return Boolean(workOrder.operatorPlan);
   if (kind === 'pipeline') return Boolean(workOrder.candidatePipelines?.length || workOrder.selectedPipelineId);
   if (kind === 'quality') {
     return Boolean(
@@ -90,6 +93,40 @@ function JsonBlock({ value }: { value: any }) {
     <pre className="max-h-72 overflow-auto rounded-xl bg-slate-950 p-3 text-[11px] leading-relaxed text-slate-100">
       {JSON.stringify(value, null, 2)}
     </pre>
+  );
+}
+
+function OperatorPlanArtifact({ workOrder }: { workOrder: WorkOrder }) {
+  const plan = workOrder.operatorPlan;
+  if (!plan) {
+    return <EmptyArtifact title="尚无 OperatorPlan" detail="算子检索完成后会在这里展示能力覆盖、运行时、成本和限制。" />;
+  }
+  return (
+    <div className="space-y-3">
+      <div className="rounded-xl border border-sky-200 bg-white p-4">
+        <div className="text-sm font-bold text-slate-900">
+          OperatorPlan v{plan.version} · {plan.operators.length} 个算子
+        </div>
+        <div className="mt-1 text-xs text-slate-500">
+          状态：{plan.confirmed ? '已确认' : '待确认'} · 估算成本：{plan.estimated_cost}
+        </div>
+      </div>
+      {plan.operators.map(operator => (
+        <div key={operator.operator_version_id} className="rounded-xl border border-slate-200 bg-white p-3">
+          <div className="text-xs font-bold text-slate-900">{operator.display_name}</div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            {operator.operator_version_id} · {operator.runtime_backend} · {operator.cost_tier}
+          </div>
+          <div className="mt-2 text-xs leading-relaxed text-slate-600">{operator.description}</div>
+          <JsonBlock value={operator.parameter_schema} />
+        </div>
+      ))}
+      {plan.risk_reasons.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          {plan.risk_reasons.join('；')}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -551,6 +588,7 @@ export const ArtifactPanel: React.FC<ArtifactPanelProps> = ({
 
       <div className="flex-1 overflow-y-auto bg-slate-50/70 p-4">
         {visibleKind === 'task_spec' && <TaskSpecArtifact workOrder={activeWorkOrder} />}
+        {visibleKind === 'operator_plan' && <OperatorPlanArtifact workOrder={activeWorkOrder} />}
         {visibleKind === 'pipeline' && <PipelineArtifact workOrder={activeWorkOrder} />}
         {visibleKind === 'quality' && <QualityArtifact workOrder={activeWorkOrder} />}
         {visibleKind === 'run' && <RunArtifact workOrder={activeWorkOrder} />}

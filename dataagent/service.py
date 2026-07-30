@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Settings
-from .gateway import ModelGateway, ModelGatewayError, fallback_task_spec
+from .gateway import ModelGateway, ModelGatewayError
 from .imaging import analyze_image, hashes, representative_sample, scan_images, transform_image
 from .models import DatasetManifest, ImageDecision, TaskSpec, TaskState, TrialBundle
 from .pipelines import decide, default_candidates
@@ -50,12 +50,15 @@ class DataAgentService:
                     },
                 )
             except (ModelGatewayError, ValueError) as exc:
-                warning = str(exc)
-                spec = fallback_task_spec(requirement, str(source))
+                raise ModelGatewayError(
+                    "Requirement planning failed; no rule-based fallback is "
+                    "allowed because it can silently change task semantics."
+                ) from exc
         else:
-            spec = fallback_task_spec(requirement, str(source))
-            if use_model:
-                warning = "Model API is not configured; used local conservative planning."
+            raise ModelGatewayError(
+                "Requirement planning model is not configured; configure the "
+                "model before creating a natural-language task."
+            )
         self.store.save_spec(task["id"], self.settings.owner, spec.model_dump(mode="json"))
         self.store.transition(
             task["id"], self.settings.owner, TaskState.WAITING_SPEC_CONFIRMATION

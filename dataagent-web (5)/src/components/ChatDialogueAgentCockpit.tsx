@@ -35,19 +35,21 @@ const createWelcomeMessage = (): WorkOrderChatMessage => ({
 export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> = ({ onOpenArtifact }) => {
   const {
     activeWorkOrder,
+    pendingWorkOrderActions,
     activeWorkOrderChatMessages,
     setActiveWorkOrderChatMessages,
     setWorkOrderChatMessages,
     createNewWorkOrder,
     sendMainAgentMessage,
     approveCurrentTaskSpec,
+    approveCurrentOperatorPlan,
     approveCurrentPipeline,
     submitCurrentDatasetRun,
     showToast,
   } = useApp();
 
   const [inputPrompt, setInputPrompt] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingByWorkOrder, setGeneratingByWorkOrder] = useState<Record<string, boolean>>({});
   const messages = activeWorkOrderChatMessages;
 
   useEffect(() => {
@@ -58,6 +60,8 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
 
   if (!activeWorkOrder) return null;
 
+  const isGenerating = Boolean(generatingByWorkOrder[activeWorkOrder.id]);
+  const pendingApproval = pendingWorkOrderActions[activeWorkOrder.id];
   const spec = activeWorkOrder.currentTaskSpec;
   const hasAmbiguities = Boolean(spec?.ambiguities?.length);
   const requirementQuestions = activeWorkOrder.requirementClarification?.questions || [];
@@ -103,7 +107,10 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
       { id: messageId(), sender: 'user', text: userText, time: nowTime() },
     ];
     setMessages(messagesWithUser, initialWorkOrderId);
-    setIsGenerating(true);
+    setGeneratingByWorkOrder(previous => ({
+      ...previous,
+      [initialWorkOrderId]: true,
+    }));
 
     try {
       const { reply, workOrder } = await sendMainAgentMessage(userText, (streamEvent) => {
@@ -114,6 +121,8 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
 
       const nextActionType: ArtifactKind | undefined = workOrder?.waitingFor === 'task_spec_confirmation'
         ? 'task_spec'
+        : workOrder?.waitingFor === 'operator_plan_confirmation'
+          ? 'operator_plan'
         : workOrder?.waitingFor === 'pipeline_approval'
           ? 'pipeline'
           : workOrder?.waitingFor === 'run_outcome_resolution'
@@ -126,7 +135,7 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
           id: messageId(),
           sender: 'agent',
           agentName: '数据任务规划 Agent（主 Agent）',
-          text: reply || '后端已完成本轮处理。',
+          text: reply,
           time: nowTime(),
           actionType: nextActionType,
         },
@@ -135,18 +144,23 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
       setMessages(messagesWithReply, targetWorkOrderId);
       showToast('主 Agent 本轮状态已同步。');
     } catch (error) {
+      console.error('Agent turn failed', error);
       setMessages([
         ...messagesWithUser,
         {
           id: messageId(),
           sender: 'agent',
           agentName: '数据任务规划 Agent（主 Agent）',
-          text: `后端连接失败，本轮没有写入真实控制面。请确认 Python API 已启动。错误：${error instanceof Error ? error.message : String(error)}`,
+          text: '本轮规划未完成，工单状态保持不变。请重试本轮输入；如果持续失败，可在运行日志中查看技术详情。',
           time: nowTime(),
         },
       ], initialWorkOrderId);
     } finally {
-      setIsGenerating(false);
+      setGeneratingByWorkOrder(previous => {
+        const next = { ...previous };
+        delete next[initialWorkOrderId];
+        return next;
+      });
     }
   };
 
@@ -256,16 +270,60 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
             </div>
           )}
 
+          {activeWorkOrder.operatorPlan && (
+            <div className="space-y-2 rounded-xl border border-sky-100 bg-sky-50/70 p-3 text-[11px] text-slate-700">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-sky-900">
+                  OperatorPlan v{activeWorkOrder.operatorPlan.version}
+                </span>
+                <span className="font-bold text-sky-700">
+                  {activeWorkOrder.operatorPlan.operators.length} 个候选算子
+                </span>
+              </div>
+              <div className="grid gap-1 sm:grid-cols-2">
+                {activeWorkOrder.operatorPlan.operators.map(operator => (
+                  <div key={operator.operator_version_id} className="rounded border border-sky-100 bg-white px-2 py-1.5">
+                    <div className="font-semibold text-slate-800">{operator.display_name}</div>
+                    <div className="text-slate-500">
+                      {operator.runtime_backend} · {operator.cost_tier} · {operator.category}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {activeWorkOrder.operatorPlan.risk_reasons.length > 0 && (
+                <div className="rounded border border-amber-200 bg-amber-50 p-2 text-amber-800">
+                  {activeWorkOrder.operatorPlan.risk_reasons.join('；')}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             {activeWorkOrder.waitingFor === 'task_spec_confirmation' && (
               <button
                 type="button"
                 onClick={approveCurrentTaskSpec}
-                disabled={hasAmbiguities}
+                disabled={hasAmbiguities || Boolean(pendingApproval)}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-emerald-700 disabled:opacity-50"
               >
+                {pendingApproval === 'task_spec_confirmation'
+                  ? <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {pendingApproval === 'task_spec_confirmation'
+                  ? '正在确认并检索算子…'
+                  : '确认 TaskSpec'}
+              </button>
+            )}
+
+            {activeWorkOrder.waitingFor === 'operator_plan_confirmation' && (
+              <button
+                type="button"
+                onClick={approveCurrentOperatorPlan}
+                disabled={Boolean(pendingApproval)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-sky-700"
+              >
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                确认 TaskSpec
+                确认算子能力方案
               </button>
             )}
 
@@ -274,6 +332,7 @@ export const ChatDialogueAgentCockpit: React.FC<ChatDialogueAgentCockpitProps> =
                 key={pipe.id}
                 type="button"
                 onClick={() => approveCurrentPipeline(pipe.id)}
+                disabled={Boolean(pendingApproval)}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition-all hover:bg-emerald-700"
               >
                 <CheckCircle2 className="h-3.5 w-3.5" />

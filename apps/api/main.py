@@ -12,6 +12,9 @@ from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from dataagent.application.work_order_runtime import WorkOrderRuntime
+from dataagent.application.agent_continuations import (
+    AgentContinuationManager,
+)
 from dataagent.application.agent_sessions import (
     ConversationStoreAgentSessionRepository,
 )
@@ -153,6 +156,9 @@ def create_app(
         app.state.work_order_runtime
     )
     app.state.work_order_control_tools = work_order_control_tools
+    app.state.agent_continuations = AgentContinuationManager(
+        app.state.work_order_runtime
+    )
     if conversation_service is not None:
         app.state.conversation_service = conversation_service
     elif app.state.work_order_runtime.conversation_store is not None:
@@ -456,6 +462,63 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.post(
+        "/api/work-orders/{work_order_id}/agent/resume-async",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def resume_agent_async(
+        work_order_id: str,
+        request: ResumeAgentRequest,
+        owner_id: str = Depends(require_owner),
+    ) -> dict[str, Any]:
+        try:
+            return app.state.agent_continuations.submit(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+                decision=request.decision,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/agent-turns/{turn_id}")
+    def get_agent_turn(
+        turn_id: str,
+        owner_id: str = Depends(require_owner),
+    ) -> dict[str, Any]:
+        try:
+            return app.state.agent_continuations.get(
+                turn_id=turn_id,
+                owner_id=owner_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/work-orders/{work_order_id}/agent/continue-async",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def continue_agent_async(
+        work_order_id: str,
+        owner_id: str = Depends(require_owner),
+    ) -> dict[str, Any]:
+        try:
+            return app.state.agent_continuations.submit_continue(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get(
         "/api/work-orders/{work_order_id}/agent/state",
         response_model=AgentTurnResponse,
@@ -466,7 +529,32 @@ def create_app(
         work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
     ) -> dict[str, Any]:
         try:
+            active = app.state.agent_continuations.active(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
+            if active is not None:
+                return active["turn"]
             return work_order_runtime.state(work_order_id=work_order_id, owner_id=owner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/work-orders/{work_order_id}/agent/continue",
+        response_model=AgentTurnResponse,
+    )
+    def continue_agent(
+        work_order_id: str,
+        owner_id: str = Depends(require_owner),
+        work_order_runtime: WorkOrderRuntime = Depends(get_work_order_runtime),
+    ) -> dict[str, Any]:
+        try:
+            return work_order_runtime.continue_work_order(
+                work_order_id=work_order_id,
+                owner_id=owner_id,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except PermissionError as exc:

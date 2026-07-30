@@ -14,7 +14,13 @@ from json_repair import repair_json
 from .config import Settings
 from .model_routing import ModelRoutingPolicy, ModelTaskKind
 from .models import ModelResult, ModelUsage, TaskSpec
-from .domain.specs import RequirementDraft, validate_requirement_draft_grounding
+from .domain.specs import (
+    RequirementDraft,
+    build_requirement_source_clauses,
+    canonicalize_requirement_draft_payload,
+    hydrate_requirement_draft_sources,
+    validate_requirement_draft_grounding,
+)
 from .agents.runner import AgentDecision, AgentPlanningRequest
 
 
@@ -48,9 +54,25 @@ def _extract_json(text: str) -> dict[str, Any]:
 def _requirement_draft_grounding_errors(
     requirement: str,
     draft: RequirementDraft,
-) -> list[str]:
+) -> list[dict[str, str]]:
     observation = validate_requirement_draft_grounding(requirement, draft)
-    return [item.message for item in observation.violations]
+    return [
+        {
+            "code": item.code,
+            "source_text": item.source_text,
+            "message": item.message,
+        }
+        for item in observation.violations
+    ]
+
+
+def _requirement_draft_planning_schema() -> dict[str, Any]:
+    schema = RequirementDraft.model_json_schema()
+    constraint_schema = schema.get("$defs", {}).get("ConstraintContract", {})
+    constraint_schema["required"] = [
+        item for item in constraint_schema.get("required", ()) if item != "id"
+    ]
+    return schema
 
 
 class ModelGateway:
@@ -69,6 +91,9 @@ class ModelGateway:
         system: str,
         content: str | list[dict[str, Any]],
         max_tokens: int = 2048,
+        *,
+        timeout: float | None = None,
+        attempts: int = 3,
     ) -> ModelResult:
         if not self.settings.api_key:
             raise ModelGatewayError("BAILIAN_API_KEY is not configured")
@@ -88,9 +113,10 @@ class ModelGateway:
         }
         response = None
         last_error: Exception | None = None
-        for attempt in range(3):
+        request_timeout = self.timeout if timeout is None else timeout
+        for attempt in range(attempts):
             try:
-                with httpx.Client(timeout=self.timeout) as client:
+                with httpx.Client(timeout=request_timeout) as client:
                     response = client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                 break
@@ -103,7 +129,7 @@ class ModelGateway:
                     ) from exc
             except httpx.HTTPError as exc:
                 last_error = exc
-            if attempt < 2:
+            if attempt < attempts - 1:
                 time.sleep(1.5 * (2**attempt))
         if response is None or response.is_error:
             if isinstance(last_error, httpx.HTTPStatusError):
@@ -146,19 +172,16 @@ class ModelGateway:
         task_spec: dict[str, Any],
     ) -> tuple[dict[str, Any], ModelUsage]:
         route = self.routing.route(ModelTaskKind.CONVERSATION)
-        missing_fields = [
-            str(item) for item in task_spec.get("ambiguities", ()) if str(item)
+        gaps = [
+            item for item in task_spec.get("gaps", ()) if isinstance(item, dict)
         ]
         system = (
             "You generate concise clarification questions for an image-data task. "
-            "Use the complete TaskSpec and its `ambiguities` field paths. Summarize "
-            "constraints that are already captured, then ask exactly one natural-language "
-            "question for each missing field. Never ask for a field that already has a "
-            "value, never add requirements, and do not use a fixed domain-specific question "
-            "template. Return JSON only with this shape: "
-            '{"summary":"...","questions":[{"field":"...","question":"..."}]}. '
-            "Every question field must be one of the supplied ambiguity paths and every "
-            "ambiguity path must appear exactly once."
+            "Use the complete TaskSpec and its structured `gaps`. Summarize constraints "
+            "that are already captured, then preserve exactly the model-authored question "
+            "for every blocking gap. Never invent a gap or default answer. Return JSON only "
+            "with this shape: "
+            '{"summary":"...","questions":[{"gap_id":"...","question":"..."}]}.'
         )
         result = self._messages(
             route.model_id,
@@ -166,11 +189,13 @@ class ModelGateway:
             json.dumps(
                 {
                     "task_spec": task_spec,
-                    "missing_fields": missing_fields,
+                    "gaps": gaps,
                 },
                 ensure_ascii=False,
             ),
             max_tokens=1000,
+            timeout=min(self.timeout, 20.0),
+            attempts=1,
         )
         payload = _extract_json(result.text)
         questions = payload.get("questions")
@@ -178,16 +203,17 @@ class ModelGateway:
             questions, list
         ):
             raise ValueError("Clarification model returned an invalid payload")
-        fields = [
-            str(item.get("field"))
+        gap_ids = [
+            str(item.get("gap_id"))
             for item in questions
             if isinstance(item, dict)
             and isinstance(item.get("question"), str)
             and item.get("question", "").strip()
         ]
-        if fields != missing_fields:
+        expected_ids = [str(item.get("id")) for item in gaps]
+        if gap_ids != expected_ids:
             raise ValueError(
-                "Clarification model questions do not match TaskSpec ambiguities"
+                "Clarification model questions do not match TaskSpec gaps"
             )
         return payload, result.usage
 
@@ -195,12 +221,14 @@ class ModelGateway:
         self,
         *,
         requirement: str,
+        messages: tuple[dict[str, Any], ...] = (),
         data_sources: tuple[dict, ...],
     ) -> dict[str, Any]:
         """Interpret a request without choosing operators or implementation."""
 
         route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)
-        schema = RequirementDraft.model_json_schema()
+        schema = _requirement_draft_planning_schema()
+        source_clauses = build_requirement_source_clauses(requirement)
         system = (
             "You are DataAgent's Requirement Planning Agent. Convert the user's "
             "request into a complete, implementation-neutral RequirementDraft. "
@@ -209,13 +237,30 @@ class ModelGateway:
             "that defines or qualifies an existing condition is a definition trace "
             "referencing that Constraint; it is not a new Constraint unless it is "
             "independently testable. Preference, output, and context clauses use "
-            "their corresponding trace roles. "
+            "their corresponding trace roles. A tie-break, ranking, or retention "
+            "choice applied only after eligible items have been grouped is a "
+            "preference/output instruction, not an additional eligibility "
+            "Constraint. "
+            "A description of the source's current contents, annotations, count, "
+            "or layout is a context fact unless the user explicitly requires it "
+            "as an eligibility, transformation, output, or acceptance condition. "
+            "Represent such facts with a context ClauseTrace normalized_effect, "
+            "not a Constraint. "
             "Every filtering, transformation, classification, annotation, deduplication, "
             "or output clause must have at least one Constraint; a semantic requirement "
             "does not substitute for its Constraint. "
             "Preserve comparison boundaries exactly (for example < differs from <=), "
-            "normalize units, retain the original source span, and list genuinely "
-            "blocking ambiguities. Constraint `field` is a generic observable target "
+            "normalize units. Do not assign final Constraint IDs; the server assigns "
+            "stable C-numbers. A temporary Constraint id is optional and is used only "
+            "when a definition trace must refer to that Constraint. Every Constraint "
+            "and ClauseTrace must reference one "
+            "supplied source clause by `source_clause_id`; every RequirementGap must "
+            "use `source_clause_ids`. The server owns the exact source text and hydrates "
+            "it from those IDs, so never invent source IDs. Put only genuinely "
+            "blocking semantic gaps in `gaps`; each gap must explain why it blocks a "
+            "TaskSpec and include a concise user question plus an answer JSON Schema. "
+            "Never add a gap merely because source files were not inspected. "
+            "Constraint `field` is a generic observable target "
             "such as image.face_count or image.vehicle_count. "
             "Do not choose capabilities, operators, libraries, models, parameters, "
             "pipeline nodes, or execution order; RetrievalAgent and ProcessingAgent "
@@ -225,25 +270,36 @@ class ModelGateway:
         )
         request_payload: dict[str, Any] = {
             "requirement": requirement,
+            "messages": list(messages),
             "data_sources": data_sources,
+            "source_clauses": list(source_clauses),
         }
-        grounding_errors: list[str] = []
-        for attempt in range(3):
+        grounding_errors: list[dict[str, str]] = []
+        for attempt in range(2):
             if grounding_errors:
                 request_payload["repair_observation"] = {
                     "errors": grounding_errors,
                     "instruction": (
-                        "Repair Constraint and ClauseTrace grounding using only "
-                        "exact spans from the original requirement."
+                        "Repair exactly the reported structural grounding "
+                        "violations using supplied source clause IDs. Preserve "
+                        "valid semantics and do not add defaults or task-specific "
+                        "rules."
                     ),
                 }
             result = self._messages(
                 route.model_id,
                 system,
                 json.dumps(request_payload, ensure_ascii=False),
-                max_tokens=3000,
+                max_tokens=4000,
             )
-            draft = RequirementDraft.model_validate(_extract_json(result.text))
+            canonical_payload = canonicalize_requirement_draft_payload(
+                _extract_json(result.text),
+                source_clauses,
+            )
+            draft = hydrate_requirement_draft_sources(
+                RequirementDraft.model_validate(canonical_payload),
+                source_clauses,
+            )
             grounding_errors = _requirement_draft_grounding_errors(
                 requirement,
                 draft,
@@ -253,7 +309,139 @@ class ModelGateway:
             request_payload["previous_invalid_draft"] = draft.model_dump(mode="json")
         raise ModelGatewayError(
             "Requirement planner could not produce a grounded draft: "
-            + "; ".join(grounding_errors)
+            + "; ".join(
+                f"{item['code']}[{item['source_text']}]: {item['message']}"
+                for item in grounding_errors
+            )
+        )
+
+    def resolve_requirement_gaps(
+        self,
+        *,
+        gaps: tuple[dict[str, Any], ...],
+        answer: str,
+        messages: tuple[dict[str, Any], ...],
+        draft: dict[str, Any],
+        requirement: str,
+        data_sources: tuple[dict, ...],
+    ) -> dict[str, Any]:
+        """Resolve gaps and revise the persisted draft in one bounded model call."""
+
+        route = self.routing.route(ModelTaskKind.REQUIREMENT_PLANNING)
+        source_clauses = build_requirement_source_clauses(requirement)
+        draft_schema = _requirement_draft_planning_schema()
+        system = (
+            "You are resolving an active Requirement clarification boundary. "
+            "Interpret the user's latest message semantically against only the supplied "
+            "gaps. For every gap return its exact gap_id, resolved=true only when the "
+            "message provides enough information for its answer_schema, and a concise "
+            "normalized_answer. A question, complaint, topic change, or partial answer "
+            "must not be invented into a resolution. Return a helpful user-facing reply "
+            "that acknowledges what was understood and asks only unresolved questions. "
+            "Set requirement_relevant=false only when the message supplies no requirement "
+            "information. When every gap is resolved, return `revised_draft`: update "
+            "the supplied previous draft using the answer while preserving unaffected "
+            "semantics and ordering. Clear resolved gaps. Use supplied source_clause_id "
+            "values and do not assign final Constraint IDs or direct constraint Trace "
+            "references; the server derives those. Descriptions of the source's current "
+            "contents or layout are context facts unless the user explicitly makes them "
+            "an eligibility, transformation, output, or acceptance requirement. "
+            "When any gap remains unresolved, set revised_draft to null. "
+            "Return JSON only with shape "
+            '{"reply":"...","requirement_relevant":true,'
+            '"resolutions":[{"gap_id":"...","resolved":true,'
+            '"normalized_answer":"..."}],"revised_draft":{...}}. '
+            "When non-null, revised_draft must match this exact JSON Schema: "
+            + json.dumps(draft_schema, ensure_ascii=False)
+        )
+        expected = [str(item.get("id")) for item in gaps]
+        request_payload: dict[str, Any] = {
+            "active_gaps": list(gaps),
+            "latest_message": answer,
+            "recent_messages": list(messages[-6:]),
+            "previous_draft": draft,
+            "requirement": requirement,
+            "data_sources": list(data_sources),
+            "source_clauses": list(source_clauses),
+        }
+        last_error: ValueError | ModelGatewayError | None = None
+        for _attempt in range(2):
+            result = self._messages(
+                route.model_id,
+                system,
+                json.dumps(request_payload, ensure_ascii=False),
+                max_tokens=4000,
+                timeout=self.timeout,
+                attempts=1,
+            )
+            try:
+                payload = _extract_json(result.text)
+                resolutions = payload.get("resolutions")
+                if not isinstance(payload.get("reply"), str) or not isinstance(
+                    resolutions, list
+                ):
+                    raise ModelGatewayError(
+                        "Requirement gap resolver returned an invalid payload"
+                    )
+                actual = [
+                    str(item.get("gap_id"))
+                    for item in resolutions
+                    if isinstance(item, dict)
+                ]
+                if actual != expected:
+                    raise ModelGatewayError(
+                        "Requirement gap resolver did not preserve active gap IDs"
+                    )
+                all_resolved = all(
+                    isinstance(item, dict) and item.get("resolved") is True
+                    for item in resolutions
+                )
+                if not all_resolved:
+                    payload["revised_draft"] = None
+                    return payload
+                revised_payload = payload.get("revised_draft")
+                if not isinstance(revised_payload, dict):
+                    raise ModelGatewayError(
+                        "Resolved Requirement gaps require a revised draft"
+                    )
+                canonical_payload = canonicalize_requirement_draft_payload(
+                    revised_payload,
+                    source_clauses,
+                    previous_draft=draft,
+                )
+                revised_draft = hydrate_requirement_draft_sources(
+                    RequirementDraft.model_validate(canonical_payload),
+                    source_clauses,
+                )
+                grounding_errors = _requirement_draft_grounding_errors(
+                    requirement,
+                    revised_draft,
+                )
+                if revised_draft.gaps or grounding_errors:
+                    raise ModelGatewayError(
+                        "Requirement gap resolution produced an invalid revised "
+                        "draft: "
+                        + "; ".join(
+                            f"{item['code']}: {item['message']}"
+                            for item in grounding_errors
+                        )
+                    )
+                payload["revised_draft"] = revised_draft.model_dump(mode="json")
+                return payload
+            except (ValueError, ModelGatewayError) as exc:
+                last_error = exc
+                request_payload["repair_observation"] = {
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "instruction": (
+                        "Return the same resolution decision with a revised_draft "
+                        "that matches the supplied Schema exactly. Do not invent "
+                        "fields or operators."
+                    ),
+                }
+        raise ModelGatewayError(
+            "Requirement gap resolver could not produce a valid revised draft: "
+            + str(last_error)
         )
 
     def plan_agent_decision(
@@ -287,6 +475,9 @@ class ModelGateway:
             "goal": request.goal,
             "iteration": request.iteration,
             "context": request.context,
+            "messages": [
+                item.model_dump(mode="json") for item in request.messages
+            ],
             "tools": request.tools,
             "observations": [
                 item.model_dump(mode="json") for item in request.observations
@@ -469,58 +660,3 @@ class ModelGateway:
             "usage": data.get("usage", {}),
         }
         return parsed
-
-
-def fallback_task_spec(requirement: str, source_path: str) -> TaskSpec:
-    lower = requirement.lower()
-    constraints: dict[str, Any] = {}
-    patterns = {
-        "min_width": [r"宽(?:度)?(?:至少|不小于|>=?)\s*(\d+)", r"min(?:imum)? width\s*(\d+)"],
-        "min_height": [r"高(?:度)?(?:至少|不小于|>=?)\s*(\d+)", r"min(?:imum)? height\s*(\d+)"],
-        "min_short_edge": [r"短边(?:至少|不小于|>=?)\s*(\d+)", r"short edge\s*(\d+)"],
-    }
-    for field, candidates in patterns.items():
-        for pattern in candidates:
-            match = re.search(pattern, lower, flags=re.IGNORECASE)
-            if match:
-                constraints[field] = int(match.group(1))
-                break
-    formats = re.findall(r"\b(jpe?g|png|webp|gif|bmp|tiff?)\b", lower)
-    if formats and any(word in lower for word in ["只要", "仅", "格式", "format"]):
-        constraints["allowed_formats"] = ["jpeg" if item in {"jpg", "jpeg"} else item for item in formats]
-
-    actions = ["filter", "manifest"]
-    action_words = {
-        "deduplicate": ["去重", "dedup"],
-        "resize": ["缩放", "resize"],
-        "crop": ["裁剪", "crop"],
-        "enhance": ["增强", "提亮", "autocontrast"],
-        "convert": ["转换格式", "convert"],
-        "tag": ["打标", "标签", "tag"],
-    }
-    for action, words in action_words.items():
-        if any(word in lower for word in words):
-            actions.append(action)
-
-    semantic_probe = lower
-    semantic_probe = re.sub(r"\d+(?:\.\d+)?", "", semantic_probe)
-    for token in [
-        "筛选", "图片", "宽度", "高度", "短边", "长边", "至少", "不小于", "大于",
-        "小于", "去重", "并", "输出", "清单", "格式", "filter", "image", "width",
-        "height", "minimum", "dedup", "manifest", "resize", "crop", "convert",
-        "create", "and", "the", "files", "file",
-    ]:
-        semantic_probe = semantic_probe.replace(token, "")
-    semantic_probe = re.sub(r"[^\w\u4e00-\u9fff]+", "", semantic_probe)
-    semantic_requirements = [requirement] if len(semantic_probe) >= 2 else []
-
-    return TaskSpec(
-        objective=requirement,
-        source_type="local",
-        source_path=source_path,
-        output_actions=actions,
-        hard_constraints=constraints,
-        semantic_requirements=semantic_requirements,
-        ambiguities=["当前使用本地规则生成的 TaskSpec，请在试跑前确认语义口径。"],
-        acceptance_notes=["首次任务以代理评估和边界样本人工判断为准。"],
-    )

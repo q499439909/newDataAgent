@@ -11,7 +11,9 @@ class WorkOrderGraphState(TypedDict, total=False):
     work_order_id: str
     owner_id: str
     requirement: str
+    requirement_messages: list[dict[str, Any]]
     data_sources: list[dict[str, Any]]
+    requirement_draft: dict[str, Any]
     requirement_clarification_request: dict[str, Any]
 
     task_spec: dict[str, Any]
@@ -26,12 +28,16 @@ class WorkOrderGraphState(TypedDict, total=False):
     capability_resolution_attempt: int
     runtime_backend_overrides: list[str]
     pipeline_experience_matches: list[dict[str, Any]]
+    operator_plan: dict[str, Any]
+    operator_plan_confirmed: bool
+    operator_plan_approval: dict[str, Any]
 
     pipeline_variants: list[dict[str, Any]]
     representative_pipelines: list[dict[str, Any]]
     approved_pipeline: dict[str, Any]
     selected_pipeline_id: str
     pipeline_approval: dict[str, Any]
+    selected_pipeline_trial: dict[str, Any]
 
     sampling_plan: dict[str, Any]
     current_agent: str

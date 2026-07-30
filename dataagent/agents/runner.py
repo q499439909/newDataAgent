@@ -98,6 +98,7 @@ class AgentTool:
         dict[str, Any] | Awaitable[dict[str, Any]],
     ]
     summarize_input: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    return_direct: bool = False
 
     def as_schema(self) -> dict[str, Any]:
         return {
@@ -145,6 +146,7 @@ class AgentRunResult(BaseModel):
 
 EventSink = Callable[[AgentRunnerEvent], Any | Awaitable[Any]]
 CancellationCheck = Callable[[], bool]
+TerminalValidator = Callable[[AgentDecision], dict[str, Any]]
 
 
 class AgentRunner:
@@ -161,6 +163,7 @@ class AgentRunner:
             [dict[str, Any]], dict[str, Any]
         ]
         | None = None,
+        terminal_validator: TerminalValidator | None = None,
     ) -> None:
         if max_iterations < 1:
             raise ValueError("max_iterations must be positive")
@@ -169,6 +172,7 @@ class AgentRunner:
         self.tools = {tool.name: tool for tool in tools}
         self.max_iterations = max_iterations
         self.finish_validator = finish_validator
+        self.terminal_validator = terminal_validator
 
     def run(
         self,
@@ -253,6 +257,21 @@ class AgentRunner:
                     data=decision.model_dump(mode="json"),
                 ),
             )
+            if (
+                decision.action != "tool"
+                and self.terminal_validator is not None
+            ):
+                validation = self.terminal_validator(decision)
+                if not bool(validation.get("ok")):
+                    observations.append(
+                        AgentObservation(
+                            sequence=len(observations) + 1,
+                            tool_name="validate_terminal_decision",
+                            tool_input=decision.output,
+                            data=validation,
+                        )
+                    )
+                    continue
             if decision.action == "finish":
                 if self.finish_validator is not None:
                     validation = self.finish_validator(dict(decision.output))
@@ -327,7 +346,14 @@ class AgentRunner:
                 ),
             )
             try:
-                executed = tool.execute(dict(decision.tool_input))
+                tool_input = dict(decision.tool_input)
+                if inspect.iscoroutinefunction(tool.execute):
+                    executed = tool.execute(tool_input)
+                else:
+                    executed = await asyncio.to_thread(
+                        tool.execute,
+                        tool_input,
+                    )
                 data = (
                     await executed
                     if inspect.isawaitable(executed)
@@ -359,6 +385,17 @@ class AgentRunner:
                     data=observation.model_dump(mode="json"),
                 ),
             )
+            if tool.return_direct:
+                result = AgentRunResult(
+                    status="finished",
+                    stop_reason="finish",
+                    output={"tool_result": data},
+                    decisions=tuple(decisions),
+                    observations=tuple(observations),
+                    messages=messages,
+                )
+                await self._emit_stopped(event_sink, iteration, result)
+                return result
         result = AgentRunResult(
             status="exhausted",
             stop_reason="max_iterations",

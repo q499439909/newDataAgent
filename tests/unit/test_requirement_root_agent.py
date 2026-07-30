@@ -40,6 +40,8 @@ def test_requirement_root_agent_continues_pipeline_compilation() -> None:
         "task_spec_confirmed": True,
         "retrieval_plan": {"id": "retrieval_current"},
         "candidate_sufficient": True,
+        "operator_plan": {"id": "operator_plan_current"},
+        "operator_plan_confirmed": True,
         "representative_pipelines": [],
         "waiting": None,
         "next_action": "generate_pipeline_candidates",
@@ -90,8 +92,13 @@ def test_requirement_root_agent_continues_pipeline_compilation() -> None:
                 "task_spec_confirmed": True,
                 "retrieval_plan": {"id": "retrieval_beta"},
                 "candidate_sufficient": True,
+                "operator_plan": {"id": "operator_plan_beta"},
+                "operator_plan_confirmed": True,
                 "representative_pipelines": [{"id": "pipeline_beta"}],
                 "selected_pipeline_id": "pipeline_beta",
+                "selected_pipeline_trial": {
+                    "status": "static_validation_passed"
+                },
                 "sampling_plan": {},
                 "waiting": None,
             },

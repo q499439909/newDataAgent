@@ -5,6 +5,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from dataagent.domain.pipelines import PipelineStrategy
+from dataagent.domain.specs import (
+    ConstraintContract,
+    DataSourceSpec,
+    TaskSpecVersion,
+)
 from dataagent.graph import build_work_order_graph
 
 
@@ -32,6 +37,93 @@ def test_requirement_agent_is_the_root_graph_agent() -> None:
     assert "requirement_agent" in nodes
     assert "requirement_planning_agent" in nodes
     assert "main_agent" not in nodes
+
+
+def test_retrieval_stops_at_operator_plan_confirmation_before_processing() -> None:
+    graph = build_work_order_graph(InMemorySaver())
+    config = {"configurable": {"thread_id": "thread_operator_plan_boundary"}}
+    spec = TaskSpecVersion(
+        id="spec_operator_plan_boundary",
+        version=1,
+        created_by="user_1",
+        change_reason="confirmed test requirement",
+        work_order_id="work_order_operator_plan_boundary",
+        objective="Keep assets whose measured quality is at least the threshold",
+        data_sources=(
+            DataSourceSpec(type="local_directory", uri="D:/images"),
+        ),
+        constraints=(
+            ConstraintContract(
+                id="constraint_quality",
+                source_text="measured image quality is at least 0.5",
+                scope="asset",
+                field="image.quality",
+                operator="gte",
+                value=0.5,
+                unit="score",
+                required_evidence_type="measured_image_quality",
+            ),
+        ),
+        confirmed=True,
+    )
+
+    retrieved = graph.invoke(
+        {
+            "work_order_id": spec.work_order_id,
+            "owner_id": "user_1",
+            "requirement": spec.objective,
+            "data_sources": [
+                item.model_dump(mode="json") for item in spec.data_sources
+            ],
+            "task_spec": spec.model_dump(mode="json"),
+            "task_spec_confirmed": True,
+            "next_action": "run_retrieval_agent",
+            "trace": [],
+        },
+        config,
+    )
+
+    assert retrieved["__interrupt__"][0].value["kind"] == (
+        "operator_plan_confirmation"
+    )
+    assert retrieved["candidate_sufficient"] is True
+    assert retrieved["operator_plan"]["operators"]
+    assert all(
+        item["parameter_schema"]
+        for item in retrieved["operator_plan"]["operators"]
+    )
+    assert retrieved.get("pipeline_variants", []) == []
+    assert not any(
+        item.get("agent") == "processing"
+        for item in retrieved.get("agent_observations", [])
+    )
+
+    compiled = graph.invoke(Command(resume={"approved": True}), config)
+
+    assert compiled["operator_plan_confirmed"] is True
+    assert compiled["__interrupt__"][0].value["kind"] == "pipeline_approval"
+    assert len(compiled["representative_pipelines"]) == 3
+
+    balanced = next(
+        item
+        for item in compiled["representative_pipelines"]
+        if item["strategy"] == "balanced"
+    )
+    completed = graph.invoke(
+        Command(
+            resume={
+                "approved": True,
+                "pipeline_id": balanced["id"],
+            }
+        ),
+        config,
+    )
+
+    assert completed["selected_pipeline_trial"]["status"] == (
+        "static_validation_passed"
+    )
+    assert completed["sampling_plan"]
+    assert completed["next_action"] == "submit_dataset_run"
 
 
 def test_four_agent_graph_interrupts_and_resumes() -> None:

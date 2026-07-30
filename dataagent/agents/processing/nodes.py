@@ -12,7 +12,11 @@ from ...domain.pipelines import (
     PipelineVersion,
     PromptBinding,
 )
-from ...domain.plans import CapabilityCoverage, CapabilityCoverageStatus
+from ...domain.plans import (
+    CapabilityCoverage,
+    CapabilityCoverageStatus,
+    OperatorPlanVersion,
+)
 from ...domain.specs import TaskSpecVersion
 from ...experiences import PipelineExperienceMatch, PipelineExperienceRetriever
 from ...operators import OperatorLibrary, build_operator_library
@@ -22,11 +26,7 @@ from ...prompts import builtin_prompt_registry
 from ..runner import AgentPlanner, AgentRunner, AgentTool
 from ..shared import WorkOrderGraphState, append_trace
 from ...domain.specs.binding import bind_constraint_parameters
-from ...execution.pipeline_trial import (
-    PipelineTrialRequest,
-    PipelineTrialRunner,
-    PipelineTrialStatus,
-)
+from ...execution.pipeline_trial import PipelineTrialRunner
 
 
 STRATEGY_POLICIES: dict[PipelineStrategy, dict[str, Any]] = {
@@ -837,8 +837,16 @@ def _generate_agent_pipeline_variants(
     planner: AgentPlanner,
     trial_runner: PipelineTrialRunner | None,
 ) -> dict:
+    del trial_runner
     library = operator_library or build_operator_library(include_datajuicer=False)
     spec = TaskSpecVersion.model_validate(state["task_spec"])
+    operator_plan = OperatorPlanVersion.model_validate(
+        state.get("operator_plan") or {}
+    )
+    if not operator_plan.confirmed or not state.get("operator_plan_confirmed"):
+        raise ValueError(
+            "Processing Agent requires a confirmed OperatorPlan"
+        )
     candidate_payloads = [
         OperatorCatalogMatch.model_validate(item)
         for item in state.get("operator_candidates", ())
@@ -860,32 +868,8 @@ def _generate_agent_pipeline_variants(
             allowed.add(coverage_item.selected_operator_version_id)
         allowed_by_constraint[coverage_item.capability_id] = allowed
     compiled: list[PipelineVersion] = []
-    trial_passed = False
-
-    def inspect_operator(payload: dict[str, Any]) -> dict[str, Any]:
-        operator_id = str(payload.get("operator_version_id", ""))
-        if operator_id not in candidates:
-            raise ValueError(
-                "Processing Agent may inspect only executable retrieved candidates"
-            )
-        operator = library.registry.get(operator_id)
-        return {
-            "operator": {
-                "operator_version_id": operator.id,
-                "display_name": operator.display_name,
-                "description": operator.description,
-                "category": operator.primary_category.value,
-                "capability_tags": sorted(operator.capability_tags),
-                "parameter_schema": operator.parameter_schema,
-                "input_schema": operator.input_schema,
-                "output_schema": operator.output_schema,
-                "limitations": list(operator.limitations),
-            }
-        }
 
     def compile_variants(payload: dict[str, Any]) -> dict[str, Any]:
-        nonlocal trial_passed
-        trial_passed = False
         raw_pipelines = payload.get("pipelines")
         if not isinstance(raw_pipelines, list):
             raise ValueError("pipelines must be an array")
@@ -1044,71 +1028,6 @@ def _generate_agent_pipeline_variants(
             ],
         }
 
-    def trial_variants(_payload: dict[str, Any]) -> dict[str, Any]:
-        nonlocal trial_passed
-        if not compiled:
-            raise ValueError(
-                "No compiled Pipeline variants exist; call "
-                "compile_pipeline_variants first."
-            )
-        if trial_runner is not None:
-            observations = [
-                trial_runner.run(
-                    PipelineTrialRequest(
-                        task_spec=spec,
-                        pipeline=pipeline,
-                    )
-                )
-                for pipeline in compiled
-            ]
-            trial_passed = all(
-                item.status == PipelineTrialStatus.PASSED
-                for item in observations
-            )
-            return {
-                "ok": trial_passed,
-                "trial_mode": "sample_execution",
-                "pipelines": [
-                    item.model_dump(mode="json") for item in observations
-                ],
-            }
-        results: list[dict[str, Any]] = []
-        for pipeline in compiled:
-            violations: list[str] = []
-            covered = {item.constraint_id for item in pipeline.constraint_coverage}
-            missing = [
-                constraint_id
-                for constraint_id in pipeline.required_constraint_ids
-                if constraint_id not in covered
-            ]
-            if missing:
-                violations.append(
-                    "missing required constraint coverage: "
-                    + ", ".join(missing)
-                )
-            try:
-                library.runtime.validate_pipeline(pipeline)
-            except (KeyError, ValueError) as exc:
-                violations.append(str(exc))
-            results.append(
-                {
-                    "pipeline_id": pipeline.id,
-                    "strategy": pipeline.strategy.value,
-                    "node_count": len(pipeline.nodes),
-                    "constraint_coverage_count": len(
-                        pipeline.constraint_coverage
-                    ),
-                    "ok": not violations,
-                    "violations": violations,
-                }
-            )
-        trial_passed = all(item["ok"] for item in results)
-        return {
-            "ok": trial_passed,
-            "trial_mode": "pre_execution_validation",
-            "pipelines": results,
-        }
-
     def validate_finish(_payload: dict[str, Any]) -> dict[str, Any]:
         errors: list[dict[str, str]] = []
         if not compiled:
@@ -1121,38 +1040,12 @@ def _generate_agent_pipeline_variants(
                     ),
                 }
             )
-        if compiled and not trial_passed:
-            errors.append(
-                {
-                    "code": "PIPELINE_TRIAL_REQUIRED",
-                    "message": (
-                        "Call trial_pipeline_variants after the latest "
-                        "successful compilation before finishing."
-                    ),
-                }
-            )
         return {"ok": not errors, "errors": errors}
 
     loop = AgentRunner(
         agent_name="processing",
         planner=planner,
         tools=(
-            AgentTool(
-                name="inspect_operator",
-                description=(
-                    "Inspect one retrieved executable Operator and its exact "
-                    "parameter schema."
-                ),
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "operator_version_id": {"type": "string"}
-                    },
-                    "required": ["operator_version_id"],
-                    "additionalProperties": False,
-                },
-                execute=inspect_operator,
-            ),
             AgentTool(
                 name="compile_pipeline_variants",
                 description=(
@@ -1214,24 +1107,8 @@ def _generate_agent_pipeline_variants(
                 },
                 execute=compile_variants,
             ),
-            AgentTool(
-                name="trial_pipeline_variants",
-                description=(
-                    "Run the latest PipelineArtifacts on an isolated bounded "
-                    "sample when a PipelineTrialRunner is configured, returning "
-                    "Constraint Evidence and execution observations for repair. "
-                    "Compatibility mode performs pre-execution validation only. "
-                    "The tool never chooses, reorders, or edits nodes."
-                ),
-                input_schema={
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-                execute=trial_variants,
-            ),
         ),
-        max_iterations=15,
+        max_iterations=4,
         finish_validator=validate_finish,
     )
     result = loop.run(
@@ -1240,13 +1117,14 @@ def _generate_agent_pipeline_variants(
             "retention_first, balanced, and quality_first Pipelines. Decide "
             "Operator selection, order, parameters, and Constraint coverage. "
             "Compile them with the Artifact Tool and repair any validation "
-            "observation. Trial the latest compiled artifacts before finishing."
+            "observation. Finish after static validation succeeds."
         ),
         context={
             "task_spec": spec.model_dump(mode="json"),
             "operator_candidates": [
                 item.model_dump(mode="json") for item in candidates.values()
             ],
+            "operator_plan": operator_plan.model_dump(mode="json"),
             "pipeline_experience_matches": state.get(
                 "pipeline_experience_matches", ()
             ),

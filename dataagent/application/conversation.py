@@ -110,6 +110,11 @@ class ConversationService:
                 receive_event,
             )
         )
+        if not result.reply or not result.reply.strip():
+            raise RuntimeError(
+                "AGENT_EMPTY_REPLY: the root Agent ended the turn without "
+                "a user-facing reply"
+            )
         thread = self.store.get(thread_id, owner_id)
         work_order_id = result.work_order_id or thread.get("work_order_id")
         turn = None

@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-import { Readable } from 'stream';
+import http from 'http';
+import https from 'https';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -128,47 +129,53 @@ Format in Markdown.`;
     const backendBase = (process.env.DATAAGENT_API_BASE || 'http://127.0.0.1:8000').replace(/\/$/, '');
     const targetUrl = `${backendBase}/api${req.path}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`;
 
-    try {
-      const headers: Record<string, string> = {
-        'content-type': String(req.headers['content-type'] || 'application/json'),
-      };
-      for (const key of ['x-owner-id', 'idempotency-key', 'accept']) {
-        const value = req.headers[key];
-        if (typeof value === 'string') headers[key] = value;
-      }
+    const headers: Record<string, string> = {
+      'content-type': String(req.headers['content-type'] || 'application/json'),
+    };
+    for (const key of ['x-owner-id', 'idempotency-key', 'accept']) {
+      const value = req.headers[key];
+      if (typeof value === 'string') headers[key] = value;
+    }
 
-      const response = await fetch(targetUrl, {
+    const target = new URL(targetUrl);
+    const transport = target.protocol === 'https:' ? https : http;
+    const upstream = transport.request(
+      target,
+      {
         method: req.method,
         headers,
-        body: ['GET', 'HEAD'].includes(req.method)
-          ? undefined
-          : JSON.stringify(req.body || {}),
-      });
-
-      res.status(response.status);
-      const contentType = response.headers.get('content-type');
-      if (contentType) res.setHeader('content-type', contentType);
-
-      if (!response.body) {
-        res.end();
-        return;
+      },
+      (upstreamResponse) => {
+        res.status(upstreamResponse.statusCode || 502);
+        const contentType = upstreamResponse.headers['content-type'];
+        if (contentType) res.setHeader('content-type', contentType);
+        upstreamResponse.on('error', (streamError) => {
+          console.error('DataAgent backend stream failed:', streamError);
+          if (!res.headersSent) {
+            res.status(502).json({
+              detail: `DataAgent backend stream failed: ${streamError.message}`,
+            });
+          } else {
+            res.destroy(streamError);
+          }
+        });
+        upstreamResponse.pipe(res);
+      },
+    );
+    upstream.setTimeout(0);
+    upstream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.status(502).json({
+          detail: `DataAgent backend proxy failed: ${err.message}`,
+        });
+      } else {
+        res.destroy(err);
       }
-
-      Readable.fromWeb(response.body as any).on('error', (streamError) => {
-        console.error('DataAgent backend stream failed:', streamError);
-        if (!res.headersSent) {
-          res.status(502).json({
-            detail: `DataAgent backend stream failed: ${streamError instanceof Error ? streamError.message : String(streamError)}`,
-          });
-        } else {
-          res.destroy(streamError instanceof Error ? streamError : undefined);
-        }
-      }).pipe(res);
-    } catch (err: any) {
-      res.status(502).json({
-        detail: `DataAgent backend proxy failed: ${err.message}`,
-      });
+    });
+    if (!['GET', 'HEAD'].includes(req.method)) {
+      upstream.write(JSON.stringify(req.body || {}));
     }
+    upstream.end();
   });
 
   // Vite middleware or production static build
@@ -186,9 +193,11 @@ Format in Markdown.`;
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`DataAgent server running on http://0.0.0.0:${PORT}`);
   });
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
 }
 
 startServer();

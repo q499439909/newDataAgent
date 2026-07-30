@@ -330,7 +330,10 @@ def _print_spec(spec: TaskSpec) -> None:
     table.add_row("硬约束", json.dumps(spec.hard_constraints.model_dump(exclude_none=True), ensure_ascii=False))
     table.add_row("语义要求", "；".join(spec.semantic_requirements) or "无")
     table.add_row("排除要求", "；".join(spec.exclusion_requirements) or "无")
-    table.add_row("待确认歧义", "；".join(spec.ambiguities) or "无")
+    table.add_row(
+        "待澄清缺口",
+        "；".join(item.description for item in spec.gaps) or "无",
+    )
     console.print(table)
 
 

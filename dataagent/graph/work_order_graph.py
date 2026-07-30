@@ -8,6 +8,8 @@ from langgraph.types import interrupt
 
 from ..operators import OperatorLibrary, build_operator_library
 from ..domain.operators import RuntimeBackend
+from ..domain.pipelines import PipelineVersion
+from ..domain.specs import TaskSpecVersion
 from ..agents.processing import build_processing_graph
 from ..agents.runner import AgentPlanner
 from ..agents.requirement import (
@@ -20,8 +22,18 @@ from ..agents.retrieval import build_retrieval_graph
 from ..agents.shared import WorkOrderGraphState
 from ..agents.strategy import build_strategy_graph
 from ..experiences import PipelineExperienceRetriever
-from ..execution.pipeline_trial import PipelineTrialRunner
-from .interrupts import approve_pipeline, confirm_task_spec, resolve_capability_gaps
+from ..execution.pipeline_trial import (
+    PipelineTrialRequest,
+    PipelineTrialRunner,
+    PipelineTrialStatus,
+)
+from .interrupts import (
+    approve_pipeline,
+    confirm_operator_plan,
+    confirm_task_spec,
+    resolve_pipeline_trial,
+    resolve_capability_gaps,
+)
 from .state_migrations import migrate_work_order_state
 
 
@@ -82,6 +94,7 @@ def _prepare_pipeline_recompile(state: WorkOrderGraphState) -> dict:
         "approved_pipeline": {},
         "selected_pipeline_id": "",
         "pipeline_approval": {},
+        "selected_pipeline_trial": {},
         "sampling_plan": {},
         "resolved_run_ids": _resolved_run_ids(state),
         "next_action": "generate_pipeline_candidates",
@@ -99,6 +112,9 @@ def _prepare_candidate_retrieval(state: WorkOrderGraphState) -> dict:
         "retrieval_plan": {},
         "candidate_sufficient": False,
         "operator_candidates": [],
+        "operator_plan": {},
+        "operator_plan_confirmed": False,
+        "operator_plan_approval": {},
         "capability_coverage": [],
         "capability_resolution": {},
         "capability_resolution_attempt": 0,
@@ -108,6 +124,7 @@ def _prepare_candidate_retrieval(state: WorkOrderGraphState) -> dict:
         "approved_pipeline": {},
         "selected_pipeline_id": "",
         "pipeline_approval": {},
+        "selected_pipeline_trial": {},
         "sampling_plan": {},
         "resolved_run_ids": _resolved_run_ids(state),
         "next_action": "run_retrieval_agent",
@@ -117,6 +134,70 @@ def _prepare_candidate_retrieval(state: WorkOrderGraphState) -> dict:
     return {
         **updates,
         "task_plan": build_task_plan({**state, **updates}),
+    }
+
+
+def _trial_selected_pipeline(
+    state: WorkOrderGraphState,
+    *,
+    operator_library: OperatorLibrary,
+    trial_runner: PipelineTrialRunner | None,
+) -> dict:
+    pipeline = PipelineVersion.model_validate(state["approved_pipeline"])
+    spec = TaskSpecVersion.model_validate(state["task_spec"])
+    if trial_runner is None:
+        try:
+            operator_library.runtime.validate_pipeline(pipeline)
+        except (KeyError, ValueError) as exc:
+            trial = {
+                "pipeline_version_id": pipeline.id,
+                "status": "failed",
+                "mode": "static_validation",
+                "execution_failures": [str(exc)],
+            }
+        else:
+            trial = {
+                "pipeline_version_id": pipeline.id,
+                "status": "static_validation_passed",
+                "mode": "static_validation",
+                "execution_failures": [],
+            }
+    else:
+        observation = trial_runner.run(
+            PipelineTrialRequest(task_spec=spec, pipeline=pipeline)
+        )
+        trial = observation.model_dump(mode="json")
+    passed = trial["status"] in {
+        PipelineTrialStatus.PASSED.value,
+        "static_validation_passed",
+    }
+    agent_observation = {
+        "agent": "processing",
+        "status": "selected_pipeline_trial",
+        "summary": (
+            "The selected Pipeline passed its bounded trial."
+            if passed
+            else "The selected Pipeline trial requires resolution."
+        ),
+        "pipeline_trial": trial,
+    }
+    return {
+        "selected_pipeline_trial": trial,
+        "next_action": (
+            "run_strategy_agent" if passed else "resolve_pipeline_trial"
+        ),
+        "agent_observations": [
+            *state.get("agent_observations", ()),
+            agent_observation,
+        ],
+        "trace": [
+            *state.get("trace", ()),
+            (
+                "processing:selected_pipeline_trial_passed"
+                if passed
+                else "processing:selected_pipeline_trial_failed"
+            ),
+        ],
     }
 
 
@@ -205,6 +286,7 @@ def build_work_order_graph(
         ),
     )
     graph.add_node("confirm_task_spec", confirm_task_spec)
+    graph.add_node("confirm_operator_plan", confirm_operator_plan)
     graph.add_node(
         "retrieval_agent",
         build_retrieval_graph(
@@ -226,6 +308,15 @@ def build_work_order_graph(
     )
     graph.add_node("resolve_capability_gaps", resolve_capability_gaps)
     graph.add_node("approve_pipeline", approve_pipeline)
+    graph.add_node(
+        "trial_selected_pipeline",
+        partial(
+            _trial_selected_pipeline,
+            operator_library=operator_library,
+            trial_runner=pipeline_trial_runner,
+        ),
+    )
+    graph.add_node("resolve_pipeline_trial", resolve_pipeline_trial)
     graph.add_node("strategy_agent", build_strategy_graph(agent_planner))
     graph.add_node("complete_work_order", _complete_work_order)
     graph.add_node("terminate_work_order", _terminate_work_order)
@@ -252,9 +343,12 @@ def build_work_order_graph(
             "run_requirement_agent": "requirement_planning_agent",
             "confirm_task_spec": "confirm_task_spec",
             "run_retrieval_agent": "retrieval_agent",
+            "confirm_operator_plan": "confirm_operator_plan",
             "resolve_capability_gaps": "resolve_capability_gaps",
             "run_processing_agent": "processing_agent",
             "approve_pipeline": "approve_pipeline",
+            "trial_selected_pipeline": "trial_selected_pipeline",
+            "resolve_pipeline_trial": "resolve_pipeline_trial",
             "run_strategy_agent": "strategy_agent",
             "complete_work_order": "complete_work_order",
             "retry_failed_assets": "retry_failed_assets",
@@ -268,10 +362,13 @@ def build_work_order_graph(
     )
     graph.add_edge("requirement_planning_agent", "requirement_agent")
     graph.add_edge("confirm_task_spec", "requirement_agent")
+    graph.add_edge("confirm_operator_plan", "requirement_agent")
     graph.add_edge("retrieval_agent", "requirement_agent")
     graph.add_edge("resolve_capability_gaps", "requirement_agent")
     graph.add_edge("processing_agent", "requirement_agent")
     graph.add_edge("approve_pipeline", "requirement_agent")
+    graph.add_edge("trial_selected_pipeline", "requirement_agent")
+    graph.add_edge("resolve_pipeline_trial", "requirement_agent")
     graph.add_edge("strategy_agent", "requirement_agent")
     graph.add_edge("complete_work_order", END)
     graph.add_edge("terminate_work_order", END)

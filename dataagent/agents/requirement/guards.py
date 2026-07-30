@@ -34,6 +34,16 @@ def next_requirement_action(
             "resolve_capability_gaps",
             "Required capability coverage is incomplete.",
         )
+    if not state.get("operator_plan"):
+        return (
+            "run_retrieval_agent",
+            "Legacy shallow candidates must be upgraded to an OperatorPlan.",
+        )
+    if not state.get("operator_plan_confirmed"):
+        return (
+            "confirm_operator_plan",
+            "The retrieved capability and Operator plan requires confirmation.",
+        )
     if not state.get("representative_pipelines"):
         return (
             "run_processing_agent",
@@ -41,6 +51,17 @@ def next_requirement_action(
         )
     if not state.get("selected_pipeline_id"):
         return "approve_pipeline", "Validated Pipeline candidates are ready."
+    trial = state.get("selected_pipeline_trial") or {}
+    if not trial:
+        return (
+            "trial_selected_pipeline",
+            "The approved Pipeline requires one bounded trial.",
+        )
+    if trial.get("status") not in {"passed", "static_validation_passed"}:
+        return (
+            "resolve_pipeline_trial",
+            "The selected Pipeline trial did not pass.",
+        )
     if not state.get("sampling_plan"):
         return "run_strategy_agent", "The approved Pipeline needs a data strategy."
     return "finish_planning", "All planning completion gates are satisfied."
@@ -78,6 +99,8 @@ def allowed_requirement_actions(
         return ("run_requirement_agent", "terminate")
     if not state.get("task_spec_confirmed"):
         return ("confirm_task_spec", "terminate")
+    if state.get("next_action") == "run_retrieval_agent":
+        return ("run_retrieval_agent",)
     if not state.get("retrieval_plan"):
         return ("run_retrieval_agent", "terminate")
     if not state.get("candidate_sufficient"):
@@ -86,6 +109,10 @@ def allowed_requirement_actions(
             "resolve_capability_gaps",
             "terminate",
         )
+    if not state.get("operator_plan"):
+        return ("run_retrieval_agent", "terminate")
+    if not state.get("operator_plan_confirmed"):
+        return ("confirm_operator_plan", "run_retrieval_agent", "terminate")
     if not state.get("representative_pipelines"):
         return (
             "run_processing_agent",
@@ -99,6 +126,11 @@ def allowed_requirement_actions(
             "run_retrieval_agent",
             "terminate",
         )
+    trial = state.get("selected_pipeline_trial") or {}
+    if not trial:
+        return ("trial_selected_pipeline", "terminate")
+    if trial.get("status") not in {"passed", "static_validation_passed"}:
+        return ("resolve_pipeline_trial", "terminate")
     if not state.get("sampling_plan"):
         return (
             "run_strategy_agent",
@@ -147,7 +179,9 @@ def assess_work_order_liveness(
         waiting_actions = {
             "requirement_clarification": "run_requirement_agent",
             "task_spec_confirmation": "confirm_task_spec",
+            "operator_plan_confirmation": "confirm_operator_plan",
             "pipeline_approval": "approve_pipeline",
+            "pipeline_trial_resolution": "resolve_pipeline_trial",
             "capability_resolution": "resolve_capability_gaps",
             "run_outcome_resolution": "ask_user",
         }

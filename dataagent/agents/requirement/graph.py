@@ -12,6 +12,7 @@ def build_requirement_graph(
     requirement_planner: RequirementPlanner | None = None,
     *,
     agent_planner: AgentPlanner | None = None,
+    checkpointer=None,
 ):
     def route_after_generation(state: WorkOrderGraphState) -> str:
         return state["next_action"]
@@ -25,7 +26,13 @@ def build_requirement_graph(
             agent_planner=agent_planner,
         ),
     )
-    graph.add_node("clarify_requirement", clarify_requirement)
+    graph.add_node(
+        "clarify_requirement",
+        partial(
+            clarify_requirement,
+            requirement_planner=requirement_planner,
+        ),
+    )
     graph.add_node("validate_task_spec", validate_task_spec)
     graph.add_edge(START, "generate_task_spec")
     graph.add_conditional_edges(
@@ -36,6 +43,13 @@ def build_requirement_graph(
             "confirm_task_spec": "validate_task_spec",
         },
     )
-    graph.add_edge("clarify_requirement", "generate_task_spec")
+    graph.add_conditional_edges(
+        "clarify_requirement",
+        route_after_generation,
+        {
+            "clarify_requirement": "clarify_requirement",
+            "generate_task_spec": "generate_task_spec",
+        },
+    )
     graph.add_edge("validate_task_spec", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

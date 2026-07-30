@@ -1,6 +1,55 @@
 from __future__ import annotations
 
+import pytest
+
 from dataagent.application.work_order_runtime import WorkOrderRuntime
+from dataagent.domain.specs import RequirementDraft
+
+
+class CompleteRequirementPlanner:
+    def plan(self, request):
+        return RequirementDraft(
+            objective=request.requirement,
+            clause_traces=(
+                {
+                    "source_text": request.requirement,
+                    "role": "context",
+                },
+            ),
+        )
+
+
+def test_resume_rejects_a_stale_approval_boundary(tmp_path) -> None:
+    runtime = WorkOrderRuntime(
+        tmp_path,
+        include_datajuicer=False,
+        requirement_planner=CompleteRequirementPlanner(),
+    )
+    started = runtime.start(
+        owner_id="user_1",
+        work_order_id="guarded_work_order",
+        requirement="Prepare the referenced records.",
+        data_sources=[
+            {"type": "local_directory", "uri": "D:/records", "mapping": {}}
+        ],
+    )
+    assert started["interrupts"][0]["value"]["kind"] == "task_spec_confirmation"
+
+    with pytest.raises(ValueError, match="Stale approval boundary"):
+        runtime.resume(
+            work_order_id="guarded_work_order",
+            owner_id="user_1",
+            decision={
+                "approved": True,
+                "expected_interrupt_kind": "operator_plan_confirmation",
+            },
+        )
+
+    current = runtime.state(
+        work_order_id="guarded_work_order",
+        owner_id="user_1",
+    )
+    assert current["interrupts"][0]["value"]["kind"] == "task_spec_confirmation"
 
 
 def test_agent_checkpoint_and_versions_survive_runtime_restart(tmp_path) -> None:

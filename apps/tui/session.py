@@ -135,7 +135,10 @@ class TuiSession:
             if selected is None:
                 raise ValueError(f"Unknown pipeline strategy: {strategy}")
             decision["pipeline_id"] = selected["id"]
-        elif kind != "task_spec_confirmation":
+        elif kind not in {
+            "task_spec_confirmation",
+            "operator_plan_confirmation",
+        }:
             raise ValueError("Current work order is not waiting for approval")
         self.turn = self.client.resume(work_order_id, decision)
         return self.turn

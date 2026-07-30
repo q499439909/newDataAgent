@@ -298,6 +298,12 @@ class AgentThreadStore:
                 "owner_id": row.owner_id,
             }
 
+    def delete(self, work_order_id: str) -> None:
+        with self.database.session() as session, session.begin():
+            row = session.get(AgentThreadRow, work_order_id)
+            if row is not None:
+                session.delete(row)
+
 
 class DomainVersionStore:
     """Append-only JSON store for formal versioned domain objects."""

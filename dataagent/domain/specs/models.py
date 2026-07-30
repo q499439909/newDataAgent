@@ -34,6 +34,7 @@ class ConstraintContract(DomainModel):
         pattern=r"^(?:C\d{2,}|constraint_[a-z0-9][a-z0-9_-]*)$"
     )
     source_text: str = Field(min_length=1)
+    source_clause_id: str | None = None
     scope: Literal["asset", "dataset"]
     field: str = Field(min_length=1)
     operator: Literal["eq", "lt", "lte", "gt", "gte"]
@@ -80,9 +81,32 @@ class RequirementClauseTrace(DomainModel):
     """Source-grounded role of one user clause in a Requirement Draft."""
 
     source_text: str = Field(min_length=1)
+    source_clause_id: str | None = None
     role: Literal["constraint", "definition", "preference", "output", "context"]
     constraint_refs: tuple[str, ...] = ()
     normalized_effect: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequirementGap(DomainModel):
+    """A model-identified blocker that must be resolved by the user."""
+
+    id: str = Field(pattern=r"^gap_[a-z0-9][a-z0-9_-]*$")
+    kind: Literal[
+        "missing_value",
+        "ambiguous_scope",
+        "ambiguous_definition",
+        "conflicting_constraints",
+        "missing_acceptance",
+        "missing_reference",
+    ]
+    source_texts: tuple[str, ...] = ()
+    source_clause_ids: tuple[str, ...] = ()
+    description: str = Field(min_length=1)
+    blocking_reason: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    answer_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "string"}
+    )
 
 
 class RequirementDraft(DomainModel):
@@ -100,7 +124,7 @@ class RequirementDraft(DomainModel):
     exclusion_requirements: tuple[str, ...] = ()
     hard_constraints: dict[str, Any] = Field(default_factory=dict)
     preferences: dict[str, Any] = Field(default_factory=dict)
-    ambiguities: tuple[str, ...] = ()
+    gaps: tuple[RequirementGap, ...] = ()
     assumptions: tuple[str, ...] = ()
 
     @property
@@ -185,9 +209,7 @@ class TaskSpecVersion(VersionedModel):
     work_order_id: str
     objective: str
     data_sources: tuple[DataSourceSpec, ...]
-    planning_origin: Literal[
-        "agent_planner", "legacy_compatibility"
-    ] = "agent_planner"
+    planning_origin: Literal["agent_planner"] = "agent_planner"
     output_actions: tuple[str, ...] = ("filter", "manifest")
     required_capabilities: tuple[str, ...] = ()
     capability_requirements: tuple[TaskCapabilitySpec, ...] = ()
@@ -200,7 +222,7 @@ class TaskSpecVersion(VersionedModel):
     preferences: dict[str, Any] = Field(default_factory=dict)
     quotas: dict[str, int] = Field(default_factory=dict)
     acceptance: AcceptanceSpec = Field(default_factory=AcceptanceSpec)
-    ambiguities: tuple[str, ...] = ()
+    gaps: tuple[RequirementGap, ...] = ()
     confirmed: bool = False
 
     @model_validator(mode="after")
@@ -249,6 +271,6 @@ class TaskSpecVersion(VersionedModel):
             raise ValueError("Task capability graph must be acyclic")
 
     def confirm(self, actor: str) -> "TaskSpecVersion":
-        if self.ambiguities:
-            raise ValueError("TaskSpec cannot be confirmed with unresolved ambiguities")
+        if self.gaps:
+            raise ValueError("TaskSpec cannot be confirmed with unresolved requirement gaps")
         return self.model_copy(update={"confirmed": True, "created_by": actor})

@@ -3,6 +3,8 @@ from .models import (
     CapabilityCoverage,
     CapabilityCoverageStatus,
     CurationPlanVersion,
+    OperatorPlanOperator,
+    OperatorPlanVersion,
     RetrievalPlanVersion,
     SamplingPlanVersion,
 )
@@ -12,6 +14,8 @@ __all__ = [
     "CapabilityCoverage",
     "CapabilityCoverageStatus",
     "CurationPlanVersion",
+    "OperatorPlanOperator",
+    "OperatorPlanVersion",
     "RetrievalPlanVersion",
     "SamplingPlanVersion",
 ]

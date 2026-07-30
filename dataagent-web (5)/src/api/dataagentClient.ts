@@ -5,6 +5,14 @@ export interface AgentTurnResponse {
   interrupts: Array<{ id?: string | null; value: Record<string, any> }>;
 }
 
+export interface AgentContinuationResponse {
+  turn_id: string;
+  work_order_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  turn: AgentTurnResponse;
+  error?: string | null;
+}
+
 export interface ConversationMessageResponse {
   reply: string;
   turn?: AgentTurnResponse | null;
@@ -122,6 +130,9 @@ export async function sendConversationMessage(
   if (!finalResponse) {
     throw new Error('Conversation stream ended without a final response');
   }
+  if (!finalResponse.reply?.trim()) {
+    throw new Error('Agent turn completed without a user-visible reply');
+  }
   return finalResponse;
 }
 
@@ -136,6 +147,39 @@ export async function resumeAgent(
     body: JSON.stringify({ decision }),
   });
   return parseJsonResponse<AgentTurnResponse>(response);
+}
+
+export async function getAgentState(
+  ownerId: string,
+  workOrderId: string,
+): Promise<AgentTurnResponse> {
+  const response = await fetch(`${API_BASE}/api/work-orders/${workOrderId}/agent/state`, {
+    headers: ownerHeaders(ownerId),
+  });
+  return parseJsonResponse<AgentTurnResponse>(response);
+}
+
+export async function resumeAgentAsync(
+  ownerId: string,
+  workOrderId: string,
+  decision: Record<string, any>,
+): Promise<AgentContinuationResponse> {
+  const response = await fetch(`${API_BASE}/api/work-orders/${workOrderId}/agent/resume-async`, {
+    method: 'POST',
+    headers: ownerHeaders(ownerId),
+    body: JSON.stringify({ decision }),
+  });
+  return parseJsonResponse<AgentContinuationResponse>(response);
+}
+
+export async function getAgentContinuation(
+  ownerId: string,
+  turnId: string,
+): Promise<AgentContinuationResponse> {
+  const response = await fetch(`${API_BASE}/api/agent-turns/${turnId}`, {
+    headers: ownerHeaders(ownerId),
+  });
+  return parseJsonResponse<AgentContinuationResponse>(response);
 }
 
 export async function submitDatasetRun(

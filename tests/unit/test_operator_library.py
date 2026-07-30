@@ -22,6 +22,7 @@ from dataagent.domain.operators import (
 )
 from dataagent.domain.pipelines import PipelineNode, PipelineStrategy, PipelineVersion
 from dataagent.domain.specs import ConstraintContract, DataSourceSpec, TaskSpecVersion
+from dataagent.domain.specs import TaskCapabilitySpec
 from dataagent.operators import (
     OperatorLibrary,
     OperatorRegistry,
@@ -33,9 +34,7 @@ from dataagent.operators.planning import (
     CapabilityGapError,
     OperatorRequirement,
     OperatorSelector,
-    decompose_task_capabilities,
     exclude_task_capabilities,
-    infer_required_capabilities,
 )
 from dataagent.operators.protocol import OperatorContext, OperatorInput, OperatorResult
 from dataagent.operators.providers import DataJuicerOperatorProvider
@@ -68,30 +67,27 @@ def test_parameter_validation_applies_defaults_and_rejects_invalid_values() -> N
         validate_parameters(schema, {"unexpected": True})
 
 
-def test_capability_search_is_bilingual_and_does_not_fallback() -> None:
-    assert infer_required_capabilities("筛选美学评分高且没有水印的人像") == (
-        "aesthetic_score",
-        "watermark_detection",
-    )
-    assert infer_required_capabilities("segment images and match face identity") == (
-        "segmentation",
-        "face_identity",
-    )
-
-
 def test_disabled_capability_is_removed_and_dependency_chain_is_reconnected() -> None:
-    capabilities = decompose_task_capabilities(
-        "去掉不真实、不清晰的图片，把猫和狗分开"
+    capabilities = tuple(
+        TaskCapabilitySpec(
+            id=capability_id,
+            capability=capability_id,
+            description=capability_id,
+            depends_on=depends_on,
+        )
+        for capability_id, depends_on in (
+            ("image_decode", ()),
+            ("quality_assessment", ("image_decode",)),
+            ("policy_evaluation", ("quality_assessment",)),
+            ("manifest", ("policy_evaluation",)),
+        )
     )
 
-    revised = exclude_task_capabilities(capabilities, {"image_quality"})
+    revised = exclude_task_capabilities(capabilities, {"quality_assessment"})
     by_id = {item.id: item for item in revised}
 
-    assert "image_quality" not in by_id
-    assert by_id["authenticity_assessment"].depends_on == ("image_decode",)
-    assert by_id["image_classification"].depends_on == (
-        "authenticity_assessment",
-    )
+    assert "quality_assessment" not in by_id
+    assert by_id["policy_evaluation"].depends_on == ("image_decode",)
 
     selector = OperatorSelector(
         build_operator_library(include_datajuicer=False).registry
@@ -489,6 +485,12 @@ def test_retrieval_uses_structured_capabilities_for_yifu_operator_coverage() -> 
         "file_size": "datajuicer.image_size_filter:1",
         "face_count": "datajuicer.image_face_count_filter:1",
     }
+    assert result["operator_plan"]["operators"]
+    assert all(
+        "parameter_schema" in item
+        for item in result["operator_plan"]["operators"]
+    )
+    assert result["operator_plan"]["confirmed"] is False
 
 
 def test_retrieval_derives_operator_candidates_from_generic_constraints() -> None:

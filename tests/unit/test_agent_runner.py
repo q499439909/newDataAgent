@@ -164,3 +164,136 @@ def test_agent_runner_reports_iteration_budget_exhaustion() -> None:
     assert result.observations[-1].data["error_type"] == (
         "unavailable_tool"
     )
+
+
+def test_terminal_validator_returns_invalid_terminal_output_to_planner() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="finish",
+                reason_summary="Finished without a user-facing reply.",
+            ),
+            AgentDecision(
+                action="finish",
+                reason_summary="Finished with a user-facing reply.",
+                output={"reply": "The requirement is ready for confirmation."},
+            ),
+        ]
+    )
+    runner = AgentRunner(
+        agent_name="requirement",
+        planner=planner,
+        tools=(),
+        terminal_validator=lambda decision: {
+            "ok": bool(decision.output.get("reply")),
+            "error_type": "empty_user_reply",
+        },
+    )
+
+    result = runner.run(goal="Handle the user turn.", context={})
+
+    assert result.output["reply"] == (
+        "The requirement is ready for confirmation."
+    )
+    assert result.observations[0].tool_name == "validate_terminal_decision"
+    assert result.observations[0].data["error_type"] == "empty_user_reply"
+
+
+def test_async_agent_can_run_a_sync_tool_with_its_own_agent_loop() -> None:
+    nested_planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="finish",
+                reason_summary="Nested planning is complete.",
+                output={"ok": True},
+            )
+        ]
+    )
+    outer_planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Start the governed synchronous runtime.",
+                tool_name="start_runtime",
+            ),
+            AgentDecision(
+                action="finish",
+                reason_summary="The runtime completed.",
+                output={"reply": "done"},
+            ),
+        ]
+    )
+
+    def start_runtime(_payload):
+        nested = AgentRunner(
+            agent_name="nested",
+            planner=nested_planner,
+            tools=(),
+        ).run(goal="Complete nested planning.", context={})
+        return {"status": nested.status}
+
+    result = asyncio.run(
+        AgentRunner(
+            agent_name="outer",
+            planner=outer_planner,
+            tools=(
+                AgentTool(
+                    name="start_runtime",
+                    description="Start a synchronous governed runtime.",
+                    input_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                    },
+                    execute=start_runtime,
+                ),
+            ),
+        ).arun(goal="Run the nested runtime.", context={})
+    )
+
+    assert result.status == "finished"
+    assert result.observations[0].data == {"status": "finished"}
+
+
+def test_return_direct_tool_stops_before_another_model_decision() -> None:
+    planner = ScriptedPlanner(
+        [
+            AgentDecision(
+                action="tool",
+                reason_summary="Reach the governed user boundary.",
+                tool_name="advance",
+            )
+        ]
+    )
+    events = []
+    result = AgentRunner(
+        agent_name="root",
+        planner=planner,
+        tools=(
+            AgentTool(
+                name="advance",
+                description="Advance until the next user boundary.",
+                input_schema={"type": "object"},
+                execute=lambda _payload: {
+                    "work_order_id": "work_1",
+                    "interrupts": [
+                        {"value": {"kind": "task_spec_confirmation"}}
+                    ],
+                },
+                return_direct=True,
+            ),
+        ),
+    ).run(
+        goal="Advance once.",
+        context={},
+        event_sink=events.append,
+    )
+
+    assert result.status == "finished"
+    assert result.output["tool_result"]["work_order_id"] == "work_1"
+    assert len(planner.requests) == 1
+    assert [event.kind for event in events] == [
+        "decision",
+        "tool_started",
+        "observation",
+        "stopped",
+    ]

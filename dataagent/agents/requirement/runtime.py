@@ -18,8 +18,11 @@ _TASK_ACTIONS = (
     "confirm_task_spec",
     "run_retrieval_agent",
     "resolve_capability_gaps",
+    "confirm_operator_plan",
     "run_processing_agent",
     "approve_pipeline",
+    "trial_selected_pipeline",
+    "resolve_pipeline_trial",
     "run_strategy_agent",
     "complete_work_order",
     "retry_failed_assets",
@@ -36,8 +39,11 @@ def build_task_plan(state: WorkOrderGraphState) -> list[dict[str, str]]:
     task_spec_ready = bool(state.get("task_spec"))
     confirmed = bool(state.get("task_spec_confirmed"))
     retrieved = bool(state.get("candidate_sufficient"))
+    operator_plan_confirmed = bool(state.get("operator_plan_confirmed"))
     compiled = bool(state.get("representative_pipelines"))
     approved = bool(state.get("selected_pipeline_id"))
+    trial_status = (state.get("selected_pipeline_trial") or {}).get("status")
+    trial_ready = trial_status in {"passed", "static_validation_passed"}
     strategy_ready = bool(state.get("sampling_plan"))
     outcome = state.get("latest_run_observation") or {}
     run_id = outcome.get("run_id")
@@ -73,13 +79,24 @@ def build_task_plan(state: WorkOrderGraphState) -> list[dict[str, str]]:
             ),
         },
         {
+            "id": "confirm_operator_plan",
+            "label": "Confirm capability coverage and Operator plan",
+            "status": (
+                "completed"
+                if operator_plan_confirmed
+                else "in_progress"
+                if retrieved
+                else "pending"
+            ),
+        },
+        {
             "id": "compile_pipelines",
             "label": "Compile and validate three PipelineArtifacts",
             "status": (
                 "completed"
                 if compiled
                 else "in_progress"
-                if retrieved
+                if operator_plan_confirmed
                 else "pending"
             ),
         },
@@ -95,13 +112,24 @@ def build_task_plan(state: WorkOrderGraphState) -> list[dict[str, str]]:
             ),
         },
         {
+            "id": "trial_selected_pipeline",
+            "label": "Trial the selected Pipeline on a bounded sample",
+            "status": (
+                "completed"
+                if trial_ready
+                else "in_progress"
+                if approved
+                else "pending"
+            ),
+        },
+        {
             "id": "prepare_strategy",
             "label": "Prepare the data strategy",
             "status": (
                 "completed"
                 if strategy_ready
                 else "in_progress"
-                if approved
+                if trial_ready
                 else "pending"
             ),
         },
@@ -160,6 +188,43 @@ def decide_requirement_agent_turn(
         source = "deterministic_fallback"
     else:
         allowed_actions = allowed_requirement_actions(state)
+        if len(allowed_actions) == 1:
+            action = allowed_actions[0]
+            reason = (
+                "The governed WorkOrder state permits exactly one next action."
+            )
+            source = "policy"
+            model_decision = None
+        else:
+            action, reason, source, model_decision = _plan_allowed_action(
+                state,
+                planner,
+                allowed_actions,
+            )
+    prior_decisions = list(state.get("requirement_agent_decisions", ()))
+    decision = {
+        "sequence": len(prior_decisions) + 1,
+        "action": action,
+        "reason_summary": reason,
+        "source": source,
+    }
+    decisions = [*prior_decisions, decision]
+    agent_action = _to_agent_action(action, reason)
+    return {
+        "agent_state_version": CURRENT_AGENT_STATE_VERSION,
+        "current_agent": "requirement",
+        "requirement_agent_action": action,
+        "requirement_agent_decisions": decisions,
+        "agent_action": agent_action.model_dump(mode="json"),
+        "task_plan": build_task_plan(state),
+    }
+
+
+def _plan_allowed_action(
+    state: WorkOrderGraphState,
+    planner: AgentPlanner,
+    allowed_actions: tuple[str, ...],
+) -> tuple[str, str, str, Any]:
         policy_observations: list[dict[str, str]] = []
         model_decision = None
         action = ""
@@ -183,6 +248,10 @@ def decide_requirement_agent_turn(
                         "retrieval_plan": state.get("retrieval_plan"),
                         "candidate_sufficient": bool(
                             state.get("candidate_sufficient")
+                        ),
+                        "operator_plan": state.get("operator_plan"),
+                        "operator_plan_confirmed": bool(
+                            state.get("operator_plan_confirmed")
                         ),
                         "representative_pipelines": state.get(
                             "representative_pipelines", ()
@@ -244,23 +313,7 @@ def decide_requirement_agent_turn(
         assert model_decision is not None
         reason = model_decision.reason_summary
         source = "model"
-    prior_decisions = list(state.get("requirement_agent_decisions", ()))
-    decision = {
-        "sequence": len(prior_decisions) + 1,
-        "action": action,
-        "reason_summary": reason,
-        "source": source,
-    }
-    decisions = [*prior_decisions, decision]
-    agent_action = _to_agent_action(action, reason)
-    return {
-        "agent_state_version": CURRENT_AGENT_STATE_VERSION,
-        "current_agent": "requirement",
-        "requirement_agent_action": action,
-        "requirement_agent_decisions": decisions,
-        "agent_action": agent_action.model_dump(mode="json"),
-        "task_plan": build_task_plan(state),
-    }
+        return action, reason, source, model_decision
 
 
 def _to_agent_action(action: str, reason: str) -> AgentAction:
@@ -281,7 +334,9 @@ def _to_agent_action(action: str, reason: str) -> AgentAction:
         )
     if action in {
         "confirm_task_spec",
+        "confirm_operator_plan",
         "approve_pipeline",
+        "resolve_pipeline_trial",
         "resolve_capability_gaps",
         "ask_user",
     }:

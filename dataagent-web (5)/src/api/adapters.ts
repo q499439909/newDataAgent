@@ -13,14 +13,21 @@ function asArray(value: any): any[] {
 }
 
 function textList(value: any): string[] {
+  const unique = (items: string[]) => [...new Set(items.filter(Boolean))];
   if (Array.isArray(value)) {
-    return value.map((item) => {
+    return unique(value.flatMap((item) => {
       if (typeof item === 'string') return item;
-      return item?.description || item?.source_text || JSON.stringify(item);
-    });
+      if (item?.description || item?.source_text) {
+        return String(item.description || item.source_text);
+      }
+      return textList(item);
+    }));
   }
   if (value && typeof value === 'object') {
-    return Object.entries(value).map(([key, item]) => `${key}: ${String(item)}`);
+    return unique(Object.entries(value).flatMap(([key, item]) => {
+      const nested = textList(item);
+      return nested.length ? nested.map(text => `${key}: ${text}`) : [];
+    }));
   }
   return [];
 }
@@ -31,6 +38,7 @@ function stageFromTurn(turn: AgentTurnResponse): WorkOrder['currentStage'] {
   if (state.terminated) return 'paused';
   if (state.next_action === 'submit_dataset_run') return 'sampling';
   if (interruptKind === 'pipeline_approval' || state.representative_pipelines?.length) return 'processing';
+  if (state.current_agent === 'processing' || state.next_action === 'run_processing_agent') return 'processing';
   if (state.retrieval_plan || state.current_agent === 'retrieval') return 'retrieval';
   if (state.sampling_plan) return 'sampling';
   return 'spec';
@@ -138,17 +146,21 @@ export function mapAgentTurnToWorkOrder(
     name: objective,
     version: `v${specPayload.version || 1}`,
     createdBy: String(specPayload.created_by || state.owner_id || 'DataAgent'),
-    hardConstraints: [
+    hardConstraints: [...new Set([
       ...textList(specPayload.constraints),
       ...textList(specPayload.hard_constraints),
-    ],
+    ])],
     semanticConstraints: textList(specPayload.semantic_requirements),
     outputRequirements: textList(specPayload.output_actions),
     acceptanceCriteria: [
       `硬规则违规率 <= ${specPayload.acceptance?.hard_rule_violation_rate ?? 0}`,
       `边界样本复核量 ${specPayload.acceptance?.boundary_review_size ?? 20}`,
     ],
-    ambiguities: textList(specPayload.ambiguities),
+    ambiguities: asArray(specPayload.gaps).map((item) => (
+      typeof item === 'object' && item !== null && 'description' in item
+        ? String((item as Record<string, unknown>).description)
+        : String(item)
+    )),
     status: specPayload.confirmed ? 'confirmed' : 'draft',
     targetMetrics: Object.entries(specPayload.acceptance?.model_metrics || {}).map(([metric, value]) => ({
       metric,
@@ -174,13 +186,14 @@ export function mapAgentTurnToWorkOrder(
     candidatePipelines: pipelines.length ? pipelines : existing?.candidatePipelines,
     nodePreviews: existing?.nodePreviews,
     retrievalPlan: state.retrieval_plan || existing?.retrievalPlan,
+    operatorPlan: state.operator_plan || existing?.operatorPlan,
     candidatePool: existing?.candidatePool,
     qcReport: existing?.qcReport,
     modelFeedback: existing?.modelFeedback,
     backendThreadId: turn.thread_id,
     agentTurn: turn,
     taskPlan: state.task_plan || existing?.taskPlan,
-    mainAgentAction: state.main_agent_action || existing?.mainAgentAction,
+    mainAgentAction: state.requirement_agent_action || existing?.mainAgentAction,
     waitingFor: interrupt?.kind || null,
     latestRunObservation: state.latest_run_observation || existing?.latestRunObservation || null,
     observedRunIds: asArray(state.observed_run_ids || existing?.observedRunIds).map(String),
@@ -189,11 +202,15 @@ export function mapAgentTurnToWorkOrder(
     agentObservations: asArray(state.agent_observations || existing?.agentObservations),
     requirementClarification: interrupt?.kind === 'requirement_clarification'
       ? {
-          questions: asArray(interrupt.questions).map(String),
+          questions: asArray(interrupt.questions).map((item) => (
+            typeof item === 'object' && item !== null && 'question' in item
+              ? String((item as Record<string, unknown>).question)
+              : String(item)
+          )),
           summary: interrupt.summary ? String(interrupt.summary) : undefined,
           allowedActions: asArray(interrupt.allowed_actions).map(String),
         }
-      : existing?.requirementClarification || null,
+      : null,
   };
 }
 

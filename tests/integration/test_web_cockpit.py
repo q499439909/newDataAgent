@@ -34,3 +34,12 @@ def test_web_cockpit_reads_langgraph_interrupt_value_wrapper() -> None:
     assert "interrupt?.value || interrupt" in script
     assert "unwrapInterrupt(payload.interrupts[0])?.kind" in script
     assert "unwrapInterrupt(payload.interrupts?.[0])" in script
+
+
+def test_react_cockpit_does_not_expose_internal_planner_errors_in_chat() -> None:
+    script = Path(
+        "dataagent-web (5)/src/components/ChatDialogueAgentCockpit.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "error instanceof Error ? error.message" not in script
+    assert "本轮规划未完成，工单状态保持不变" in script

@@ -47,6 +47,35 @@ class RetrievalPlanVersion(VersionedModel):
     capability_coverage: tuple[CapabilityCoverage, ...] = ()
 
 
+class OperatorPlanOperator(DomainModel):
+    operator_version_id: str
+    display_name: str
+    description: str
+    category: str
+    capability_tags: tuple[str, ...] = ()
+    parameter_schema: dict[str, Any]
+    input_schema: str
+    output_schema: str
+    limitations: tuple[str, ...] = ()
+    provider_id: str
+    provider_operator_ref: str = ""
+    runtime_backend: str
+    cost_tier: str = "unknown"
+    executable: bool = True
+
+
+class OperatorPlanVersion(VersionedModel):
+    """Durable, self-contained contract between Retrieval and Processing."""
+
+    task_spec_version_id: str
+    retrieval_plan_version_id: str
+    operators: tuple[OperatorPlanOperator, ...]
+    constraint_coverage: tuple[CapabilityCoverage, ...] = ()
+    estimated_cost: float = Field(default=0, ge=0)
+    risk_reasons: tuple[str, ...] = ()
+    confirmed: bool = False
+
+
 class CurationPlanVersion(VersionedModel):
     task_spec_version_id: str
     pipeline_version_ids: tuple[str, ...]

@@ -29,6 +29,44 @@ class ScriptedPlanner:
         return self.decisions.pop(0)
 
 
+def confirmed_operator_plan(library, spec, candidates, coverage=()):
+    operators = []
+    for candidate in candidates:
+        operator = library.registry.get(candidate["operator_version_id"])
+        operators.append(
+            {
+                "operator_version_id": operator.id,
+                "display_name": operator.display_name,
+                "description": operator.description,
+                "category": operator.primary_category.value,
+                "capability_tags": sorted(operator.capability_tags),
+                "parameter_schema": operator.parameter_schema,
+                "input_schema": operator.input_schema,
+                "output_schema": operator.output_schema,
+                "limitations": list(operator.limitations),
+                "provider_id": candidate["provider_id"],
+                "provider_operator_ref": candidate["provider_operator_ref"],
+                "runtime_backend": candidate["runtime_backend"],
+                "cost_tier": candidate.get("cost_tier", "unknown"),
+                "executable": candidate["executable"],
+            }
+        )
+    return {
+        "id": "operator_plan_test",
+        "version": 2,
+        "parent_version_id": "operator_plan_draft",
+        "created_by": "user_1",
+        "change_reason": "confirmed in test",
+        "task_spec_version_id": spec.id,
+        "retrieval_plan_version_id": "retrieval_plan_test",
+        "operators": operators,
+        "constraint_coverage": list(coverage),
+        "estimated_cost": 0,
+        "risk_reasons": [],
+        "confirmed": True,
+    }
+
+
 def test_agent_uses_tool_observation_before_finishing() -> None:
     planner = ScriptedPlanner(
         [
@@ -273,6 +311,8 @@ def test_requirement_root_rejects_finish_before_pipeline_compilation(
             "task_spec_confirmed": True,
             "retrieval_plan": case_state["retrieval_plan"],
             "candidate_sufficient": True,
+            "operator_plan": {"id": "operator_plan_confirmed"},
+            "operator_plan_confirmed": True,
             "representative_pipelines": [],
             "requirement_agent_decisions": [],
             "agent_observations": [
@@ -343,6 +383,8 @@ def test_requirement_root_routes_to_approval_after_compilation() -> None:
             "task_spec_confirmed": True,
             "retrieval_plan": {"id": "retrieval_plan_1"},
             "candidate_sufficient": True,
+            "operator_plan": {"id": "operator_plan_confirmed"},
+            "operator_plan_confirmed": True,
             "representative_pipelines": [{"id": "pipeline_1"}],
             "selected_pipeline_id": "",
             "requirement_agent_decisions": [],
@@ -465,14 +507,8 @@ def test_processing_agent_chooses_operator_order_and_parameters_through_tool_loo
                 tool_input={"pipelines": proposals},
             ),
             AgentDecision(
-                action="tool",
-                reason_summary="Trial the compiled artifacts before offering them.",
-                tool_name="trial_pipeline_variants",
-                tool_input={},
-            ),
-            AgentDecision(
                 action="finish",
-                reason_summary="All three artifacts passed deterministic validation.",
+                reason_summary="All three artifacts passed static validation.",
                 output={"use_compiled_variants": True},
             ),
         ]
@@ -534,6 +570,10 @@ def test_processing_agent_chooses_operator_order_and_parameters_through_tool_loo
             "owner_id": "user_1",
             "task_spec": spec.model_dump(mode="json"),
             "operator_candidates": candidates,
+            "operator_plan": confirmed_operator_plan(
+                library, spec, candidates
+            ),
+            "operator_plan_confirmed": True,
             "capability_coverage": [],
             "trace": [],
         },
@@ -552,9 +592,9 @@ def test_processing_agent_chooses_operator_order_and_parameters_through_tool_loo
     assert planner.requests[1].observations[0].tool_name == (
         "compile_pipeline_variants"
     )
-    assert planner.requests[2].observations[1].tool_name == (
-        "trial_pipeline_variants"
-    )
+    assert {
+        tool["name"] for tool in planner.requests[0].tools
+    } == {"compile_pipeline_variants"}
 
 
 def test_processing_agent_repairs_pipeline_after_trial_observation() -> None:
@@ -612,14 +652,8 @@ def test_processing_agent_repairs_pipeline_after_trial_observation() -> None:
                 tool_input={"pipelines": repaired},
             ),
             AgentDecision(
-                action="tool",
-                reason_summary="Trial the repaired variants.",
-                tool_name="trial_pipeline_variants",
-                tool_input={},
-            ),
-            AgentDecision(
                 action="finish",
-                reason_summary="The repaired variants passed trial validation.",
+                reason_summary="The repaired variants passed static validation.",
                 output={"use_compiled_variants": True},
             ),
         ]
@@ -681,6 +715,25 @@ def test_processing_agent_repairs_pipeline_after_trial_observation() -> None:
             "owner_id": "user_1",
             "task_spec": spec.model_dump(mode="json"),
             "operator_candidates": candidates,
+            "operator_plan": confirmed_operator_plan(
+                library,
+                spec,
+                candidates,
+                [
+                    {
+                        "capability_id": "constraint_alpha",
+                        "capability": "image.width",
+                        "description": "width is at least four pixels",
+                        "required": True,
+                        "status": "covered",
+                        "selected_operator_version_id": (
+                            "builtin.hard_constraint_evaluator:1"
+                        ),
+                        "candidates": [],
+                    }
+                ],
+            ),
+            "operator_plan_confirmed": True,
             "capability_coverage": [
                 {
                     "capability_id": "constraint_alpha",
@@ -715,28 +768,13 @@ def test_processing_agent_repairs_pipeline_after_trial_observation() -> None:
     assert "constraint_alpha" in planner.requests[1].observations[-1].data[
         "error"
     ]
-    assert planner.requests[3].observations[-1].data["ok"] is True
+    assert planner.requests[2].observations[-1].data["ok"] is True
 
 
-def test_processing_agent_repairs_from_real_sample_trial_observation(
+def test_processing_agent_does_not_trial_candidates_before_user_selection(
     tmp_path,
 ) -> None:
-    source = tmp_path / "asset.png"
-    Image.new("RGB", (80, 80), color="white").save(source)
-    incomplete = [
-        {
-            "strategy": strategy,
-            "nodes": [
-                {
-                    "operator_version_id": "builtin.manifest:1",
-                    "parameters": {},
-                    "constraint_ids": ["constraint_alpha"],
-                }
-            ],
-        }
-        for strategy in ("retention_first", "balanced", "quality_first")
-    ]
-    repaired = [
+    proposals = [
         {
             "strategy": strategy,
             "nodes": [
@@ -758,31 +796,13 @@ def test_processing_agent_repairs_from_real_sample_trial_observation(
         [
             AgentDecision(
                 action="tool",
-                reason_summary="Compile the initial candidates.",
+                reason_summary="Compile the candidates.",
                 tool_name="compile_pipeline_variants",
-                tool_input={"pipelines": incomplete},
-            ),
-            AgentDecision(
-                action="tool",
-                reason_summary="Run the initial candidates on real samples.",
-                tool_name="trial_pipeline_variants",
-                tool_input={},
-            ),
-            AgentDecision(
-                action="tool",
-                reason_summary="Repair the missing Evidence observation.",
-                tool_name="compile_pipeline_variants",
-                tool_input={"pipelines": repaired},
-            ),
-            AgentDecision(
-                action="tool",
-                reason_summary="Run the repaired candidates.",
-                tool_name="trial_pipeline_variants",
-                tool_input={},
+                tool_input={"pipelines": proposals},
             ),
             AgentDecision(
                 action="finish",
-                reason_summary="The repaired candidates have real Evidence.",
+                reason_summary="Static validation succeeded.",
                 output={"use_compiled_variants": True},
             ),
         ]
@@ -836,6 +856,10 @@ def test_processing_agent_repairs_from_real_sample_trial_observation(
             "owner_id": "user_1",
             "task_spec": spec.model_dump(mode="json"),
             "operator_candidates": candidates,
+            "operator_plan": confirmed_operator_plan(
+                library, spec, candidates
+            ),
+            "operator_plan_confirmed": True,
             "capability_coverage": [],
             "trace": [],
         },
@@ -847,20 +871,9 @@ def test_processing_agent_repairs_from_real_sample_trial_observation(
         ),
     )
 
-    failed_trial = planner.requests[2].observations[-1]
-    passed_trial = planner.requests[4].observations[-1]
-    assert failed_trial.tool_name == "trial_pipeline_variants"
-    assert failed_trial.data["ok"] is False
     assert {
-        item["failure_code"]
-        for pipeline in failed_trial.data["pipelines"]
-        for item in pipeline["constraint_results"]
-    } == {"MISSING_EVIDENCE"}
-    assert passed_trial.data["ok"] is True
-    assert all(
-        pipeline["status"] == "passed"
-        for pipeline in passed_trial.data["pipelines"]
-    )
+        tool["name"] for tool in planner.requests[0].tools
+    } == {"compile_pipeline_variants"}
     assert len(result["pipeline_variants"]) == 3
 
 
@@ -1034,6 +1047,7 @@ def test_invalid_constraint_assignment_becomes_observation_and_is_replanned() ->
                 reason_summary="Initial proposal.",
                 output={
                     "candidate_operator_ids": [
+                        "None",
                         "builtin.decode_check:1",
                         "builtin.manifest:1",
                     ],
@@ -1107,7 +1121,12 @@ def test_invalid_constraint_assignment_becomes_observation_and_is_replanned() ->
 
     validation = planner.requests[1].observations[-1]
     assert validation.tool_name == "validate_finish"
-    assert validation.data["errors"][0]["code"] == "UNSUPPORTED_CONSTRAINT"
+    assert {
+        item["code"] for item in validation.data["errors"]
+    } == {
+        "UNKNOWN_CANDIDATE_OPERATOR",
+        "UNSUPPORTED_CONSTRAINT",
+    }
     assert result["capability_coverage"][0]["selected_operator_version_id"] == (
         "builtin.hard_constraint_evaluator:1"
     )

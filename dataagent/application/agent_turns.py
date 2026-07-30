@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Protocol
 
+from pydantic import BaseModel, Field
+
 from ..agents.runner import (
+    AgentDecision,
     AgentPlanner,
     AgentRunResult,
     AgentRunner,
@@ -10,7 +13,16 @@ from ..agents.runner import (
 )
 from ..agents.session import AgentSession
 from ..agents.turn import TurnInput, TurnResult
+from ..domain.specs import DataSourceSpec
 from .control_tools import WorkOrderControlTools
+from .source_references import (
+    AmbiguousSourceReference,
+    extract_explicit_data_sources,
+)
+
+
+class StartWorkOrderInput(BaseModel):
+    data_sources: list[DataSourceSpec] = Field(min_length=1)
 
 
 class WorkOrderTurnRuntime(Protocol):
@@ -69,6 +81,20 @@ class WorkOrderRuntimeRootAgent:
         event_sink=None,
         cancellation_requested: Callable[[], bool] | None = None,
     ) -> TurnResult:
+        initial = self._start_from_explicit_sources(
+            turn=turn,
+            session=session,
+        )
+        if initial is not None:
+            return initial
+
+        clarification = self._active_requirement_clarification(
+            turn=turn,
+            session=session,
+        )
+        if clarification is not None:
+            return clarification
+
         if self.planner is None:
             return self._run_without_model(turn, session)
 
@@ -79,17 +105,27 @@ class WorkOrderRuntimeRootAgent:
             latest = result
             return result
 
+        def active_work_order_id() -> str | None:
+            if latest is not None and latest.get("work_order_id"):
+                return str(latest["work_order_id"])
+            return session.work_order_id
+
         def start_work_order(payload: dict[str, Any]) -> dict[str, Any]:
+            validated = StartWorkOrderInput.model_validate(payload)
             return remember(
                 self.runtime.start(
                     owner_id=turn.owner_id,
-                    requirement=str(payload["requirement"]),
-                    data_sources=list(payload["data_sources"]),
+                    requirement=turn.content,
+                    data_sources=[
+                        item.model_dump(mode="json")
+                        for item in validated.data_sources
+                    ],
                 )
             )
 
         def inspect_work_order(_payload: dict[str, Any]) -> dict[str, Any]:
-            if not session.work_order_id:
+            work_order_id = active_work_order_id()
+            if not work_order_id:
                 return {
                     "ok": False,
                     "error_type": "no_active_work_order",
@@ -97,12 +133,13 @@ class WorkOrderRuntimeRootAgent:
             result, _ = self.control_tools.execute(
                 name="inspect_work_order",
                 owner_id=turn.owner_id,
-                raw_input={"work_order_id": session.work_order_id},
+                raw_input={"work_order_id": work_order_id},
             )
             return remember(self._tool_data(result))
 
         def resume_work_order(payload: dict[str, Any]) -> dict[str, Any]:
-            if not session.work_order_id:
+            work_order_id = active_work_order_id()
+            if not work_order_id:
                 return {
                     "ok": False,
                     "error_type": "no_active_work_order",
@@ -111,14 +148,15 @@ class WorkOrderRuntimeRootAgent:
                 name="resume_work_order",
                 owner_id=turn.owner_id,
                 raw_input={
-                    "work_order_id": session.work_order_id,
+                    "work_order_id": work_order_id,
                     "decision": dict(payload["decision"]),
                 },
             )
             return remember(self._tool_data(result))
 
         def continue_work_order(_payload: dict[str, Any]) -> dict[str, Any]:
-            if not session.work_order_id:
+            work_order_id = active_work_order_id()
+            if not work_order_id:
                 return {
                     "ok": False,
                     "error_type": "no_active_work_order",
@@ -126,12 +164,13 @@ class WorkOrderRuntimeRootAgent:
             result, _ = self.control_tools.execute(
                 name="continue_work_order",
                 owner_id=turn.owner_id,
-                raw_input={"work_order_id": session.work_order_id},
+                raw_input={"work_order_id": work_order_id},
             )
             return remember(self._tool_data(result))
 
         def submit_dataset_run(payload: dict[str, Any]) -> dict[str, Any]:
-            if not session.work_order_id:
+            work_order_id = active_work_order_id()
+            if not work_order_id:
                 return {
                     "ok": False,
                     "error_type": "no_active_work_order",
@@ -140,7 +179,7 @@ class WorkOrderRuntimeRootAgent:
                 name="submit_dataset_run",
                 owner_id=turn.owner_id,
                 raw_input={
-                    "work_order_id": session.work_order_id,
+                    "work_order_id": work_order_id,
                     "idempotency_key": str(payload["idempotency_key"]),
                 },
             )
@@ -153,23 +192,14 @@ class WorkOrderRuntimeRootAgent:
                 AgentTool(
                     name="start_work_order",
                     description=(
-                        "Create a WorkOrder from the user's complete goal and "
-                        "explicitly supplied data-source references."
+                        "Create a WorkOrder for the latest user message. Extract "
+                        "only explicitly supplied data-source references; the "
+                        "runtime preserves the user's message as the authoritative "
+                        "requirement."
                     ),
-                    input_schema={
-                        "type": "object",
-                        "required": ["requirement", "data_sources"],
-                        "properties": {
-                            "requirement": {"type": "string"},
-                            "data_sources": {
-                                "type": "array",
-                                "items": {"type": "object"},
-                                "minItems": 1,
-                            },
-                        },
-                        "additionalProperties": False,
-                    },
+                    input_schema=StartWorkOrderInput.model_json_schema(),
                     execute=start_work_order,
+                    return_direct=True,
                 ),
                 AgentTool(
                     name="inspect_work_order",
@@ -195,6 +225,7 @@ class WorkOrderRuntimeRootAgent:
                         "additionalProperties": False,
                     },
                     execute=resume_work_order,
+                    return_direct=True,
                 ),
                 AgentTool(
                     name="continue_work_order",
@@ -207,6 +238,7 @@ class WorkOrderRuntimeRootAgent:
                         "additionalProperties": False,
                     },
                     execute=continue_work_order,
+                    return_direct=True,
                 ),
                 AgentTool(
                     name="submit_dataset_run",
@@ -223,9 +255,11 @@ class WorkOrderRuntimeRootAgent:
                         "additionalProperties": False,
                     },
                     execute=submit_dataset_run,
+                    return_direct=True,
                 ),
             ),
             max_iterations=self.max_iterations,
+            terminal_validator=self._validate_terminal_decision,
         )
         result = await runner.arun(
             goal=(
@@ -246,6 +280,92 @@ class WorkOrderRuntimeRootAgent:
             cancellation_requested=cancellation_requested,
         )
         return self._to_turn_result(result, latest, session)
+
+    def _start_from_explicit_sources(
+        self,
+        *,
+        turn: TurnInput,
+        session: AgentSession,
+    ) -> TurnResult | None:
+        if session.work_order_id:
+            return None
+        supplied = turn.metadata.get("data_sources")
+        if isinstance(supplied, list) and supplied:
+            raw_sources = supplied
+        else:
+            try:
+                raw_sources = extract_explicit_data_sources(turn.content)
+            except AmbiguousSourceReference:
+                return TurnResult(
+                    status="waiting_for_user",
+                    reply=(
+                        "我无法可靠区分数据源路径和紧邻的需求文字。"
+                        "请用引号包住完整路径，或在路径后加一个空格后重新发送。"
+                    ),
+                    stop_reason="ambiguous_source_reference",
+                )
+        if not raw_sources:
+            return None
+        sources = [
+            DataSourceSpec.model_validate(item).model_dump(mode="json")
+            for item in raw_sources
+        ]
+        result = self.runtime.start(
+            owner_id=turn.owner_id,
+            requirement=turn.content,
+            data_sources=sources,
+        )
+        return self._runtime_turn_result(result)
+
+    def _active_requirement_clarification(
+        self,
+        *,
+        turn: TurnInput,
+        session: AgentSession,
+    ) -> TurnResult | None:
+        """Forward clarification text to the owning Requirement Agent.
+
+        The LangGraph interrupt already identifies both the target agent and
+        the expected action. Replanning that routing decision with the root
+        model adds latency and can distort the user's answer. The Requirement
+        planner remains responsible for interpreting the answer semantically.
+        """
+
+        if not session.work_order_id:
+            return None
+        current = self.runtime.state(
+            work_order_id=session.work_order_id,
+            owner_id=turn.owner_id,
+        )
+        interrupts = current.get("interrupts") or ()
+        if not interrupts:
+            return None
+        value = interrupts[0].get("value") or {}
+        if value.get("kind") != "requirement_clarification":
+            return None
+        resumed = self.runtime.resume(
+            work_order_id=session.work_order_id,
+            owner_id=turn.owner_id,
+            decision={"answer": turn.content},
+        )
+        return self._runtime_turn_result(resumed)
+
+    @staticmethod
+    def _validate_terminal_decision(
+        decision: AgentDecision,
+    ) -> dict[str, Any]:
+        if decision.action in {"finish", "ask_user"}:
+            reply = decision.output.get("reply")
+            if not isinstance(reply, str) or not reply.strip():
+                return {
+                    "ok": False,
+                    "error_type": "empty_user_reply",
+                    "message": (
+                        "Root Requirement Agent terminal decisions require "
+                        "a non-empty output.reply."
+                    ),
+                }
+        return {"ok": True}
 
     def _run_without_model(
         self,
@@ -291,6 +411,16 @@ class WorkOrderRuntimeRootAgent:
     ) -> TurnResult:
         if runtime_result is not None:
             reply = str(result.output.get("reply") or "") or None
+            if reply is None and result.status in {
+                "cancelled",
+                "exhausted",
+                "gap",
+            }:
+                reply = (
+                    "The Requirement Agent stopped before completing this "
+                    f"turn ({result.stop_reason}). The latest WorkOrder state "
+                    "was preserved; no automatic approval was applied."
+                )
             return self._runtime_turn_result(runtime_result, reply=reply)
         if result.status == "needs_user":
             return TurnResult(
@@ -316,7 +446,14 @@ class WorkOrderRuntimeRootAgent:
                 if result.status == "cancelled"
                 else "failed"
             ),
-            reply=str(result.output.get("reply") or "") or None,
+            reply=(
+                str(result.output.get("reply") or "") or
+                (
+                    "The Requirement Agent could not complete this turn "
+                    f"within its bounded planning loop ({result.stop_reason}). "
+                    "No automatic approval or semantic fallback was applied."
+                )
+            ),
             work_order_id=session.work_order_id,
             stop_reason=result.stop_reason,
         )
@@ -343,11 +480,26 @@ class WorkOrderRuntimeRootAgent:
         if interrupts:
             value = interrupts[0].get("value") or {}
             kind = str(value.get("kind") or "user_decision")
+            default_replies = {
+                "operator_plan_confirmation": (
+                    "算子检索与能力覆盖已经完成。请检查 OperatorPlan 中的"
+                    "算子、运行时、成本和限制；确认后我才会开始编排 Pipeline。"
+                ),
+                "pipeline_approval": (
+                    "Pipeline 候选已经通过静态校验，请选择并批准一个方案。"
+                ),
+                "task_spec_confirmation": (
+                    "需求已整理为 TaskSpec，请确认目标、约束和验收标准。"
+                ),
+            }
             return TurnResult(
                 status="waiting_for_user",
                 reply=reply or str(
                     value.get("summary")
-                    or f"The WorkOrder is waiting for {kind}."
+                    or default_replies.get(
+                        kind,
+                        f"The WorkOrder is waiting for {kind}.",
+                    )
                 ),
                 work_order_id=work_order_id,
                 stop_reason=kind,

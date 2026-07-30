@@ -60,8 +60,12 @@ An Evidence Claim produced by a qualified Operator or Pipeline and accepted thro
 _Avoid_: Present field, Operator output
 
 **Requirement Draft**:
-The Data Task Planning Agent's implementation-neutral interpretation of a user request. It contains the objective, atomic Constraint Contracts, ambiguities, assumptions, and acceptance intent, but never concrete Operators, models, parameters, or Pipeline order.
+The Data Task Planning Agent's implementation-neutral interpretation of a user request. It contains the objective, atomic Constraint Contracts, structured Requirement Gaps, assumptions, and acceptance intent, but never concrete Operators, models, parameters, or Pipeline order.
 _Avoid_: Pipeline proposal, Operator selection
+
+**Requirement Gap**:
+A source-grounded semantic omission that blocks a complete TaskSpec. It carries a model-generated user question and an answer Schema; it is not a fixed clarification template.
+_Avoid_: Keyword ambiguity, default clarification
 
 **Requirement Agent**:
 The root user-facing Agent that owns the requirement goal, reads WorkOrder facts, delegates specialist planning through LangGraph, and replans from Observations. Requirement planning is one internal phase of this Agent, not a separate Main Agent.
@@ -90,6 +94,14 @@ _Avoid_: Conversation planner, intent router, root Agent
 **WorkOrder Liveness**:
 The structural classification of a WorkOrder as runnable, waiting for an explicit user decision, or terminal. A runnable WorkOrder must have a required next action.
 _Avoid_: Continue keyword, chat intent
+
+**User Boundary**:
+An explicit LangGraph interrupt or terminal state at which one user turn must stop. A Control Tool that reaches a User Boundary returns directly instead of allowing the same message to satisfy a second approval.
+_Avoid_: Extra Agent iteration, implicit approval
+
+**Explicit Source Reference**:
+A syntactically typed path or URI recognized before semantic planning. Recognition establishes only a DataSourceSpec and never interprets task entities, constraints, or intent.
+_Avoid_: Requirement keyword parser, task classifier
 
 **Constraint Contract**:
 An atomic, source-traceable statement of one observable target, comparator, value, unit, hardness, and required Evidence type. Constraint identifiers and targets are task-generated and must not be tied to one regression dataset.
